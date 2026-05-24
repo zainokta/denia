@@ -10,6 +10,8 @@ pub struct SecretRef(String);
 pub enum SecretRefError {
     #[error("secret reference cannot be empty")]
     Empty,
+    #[error("secret reference must contain only ASCII letters, digits, dot, underscore, or dash")]
+    InvalidCharacters,
 }
 
 impl SecretRef {
@@ -21,6 +23,12 @@ impl SecretRef {
         let value = value.into();
         if value.trim().is_empty() {
             return Err(SecretRefError::Empty);
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(SecretRefError::InvalidCharacters);
         }
         Ok(Self(value))
     }

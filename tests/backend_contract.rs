@@ -155,6 +155,12 @@ fn sops_secret_store_resolves_secret_paths_under_data_dir() {
 }
 
 #[test]
+fn secret_ref_parse_rejects_path_traversal() {
+    assert!(SecretRef::parse("../outside").is_err());
+    assert!(SecretRef::parse("/tmp/secret").is_err());
+}
+
+#[test]
 fn secret_payload_serializes_without_exposing_metadata() {
     let payload = SecretPayload::new("OPENSSH_PRIVATE_KEY");
     let json = serde_json::to_string(&payload).expect("json");
