@@ -80,21 +80,18 @@ impl ArtifactAcquirer {
         else {
             unreachable!("git acquisition requires a buildkit source");
         };
-        let git_context = format!("context={repo_url}#{git_ref}:{context_path}");
-        let dockerfile = format!("filename={dockerfile_path}");
-        let output_path = self.config.artifact_dir.join("buildkit-output");
-        let output = format!("type=oci,dest={}", output_path.to_string_lossy());
+        let _ = (repo_url, git_ref);
+        let context = format!("context={context_path}");
+        let dockerfile = format!("dockerfile={dockerfile_path}");
         let program = self.config.buildkit_binary.to_string_lossy();
         let args = [
             "build",
             "--frontend",
             "dockerfile.v0",
-            "--opt",
-            git_context.as_str(),
-            "--opt",
+            "--local",
+            context.as_str(),
+            "--local",
             dockerfile.as_str(),
-            "--output",
-            output.as_str(),
         ];
 
         let output = runner.run(program.as_ref(), &args).await?;
@@ -110,12 +107,7 @@ impl ArtifactAcquirer {
             unreachable!("external image acquisition requires a registry source");
         };
         let from = format!("docker://{image}");
-        let image_name = image.replace(['/', ':', '@'], "_");
-        let to = format!(
-            "oci:{}/{}",
-            self.config.artifact_dir.to_string_lossy(),
-            image_name
-        );
+        let to = format!("oci:{}", self.config.artifact_dir.to_string_lossy());
         let program = self.config.registry_pull_binary.to_string_lossy();
         let args = ["copy", from.as_str(), to.as_str()];
 
