@@ -8,7 +8,7 @@ use denia::{
         ResourceLimits, ServiceConfig, ServiceSource,
     },
     metrics::parse_memory_current,
-    secrets::SecretRef,
+    secrets::{SecretPayload, SecretRef, SopsSecretStore},
     state::SqliteStore,
     traefik::{RouteSpec, render_file_provider_config},
 };
@@ -140,6 +140,50 @@ fn cgroup_memory_parser_reads_current_bytes() {
     assert_eq!(
         parse_memory_current("73400320\n").expect("memory"),
         73_400_320
+    );
+}
+
+#[test]
+fn sops_secret_store_resolves_secret_paths_under_data_dir() {
+    let store = SopsSecretStore::new("/var/lib/denia");
+    let path = store.secret_path(&SecretRef::new("git-main"));
+
+    assert_eq!(
+        path.to_string_lossy(),
+        "/var/lib/denia/secrets/git-main.sops.yaml"
+    );
+}
+
+#[test]
+fn secret_payload_serializes_without_exposing_metadata() {
+    let payload = SecretPayload::new("OPENSSH_PRIVATE_KEY");
+    let json = serde_json::to_string(&payload).expect("json");
+
+    assert_eq!(json, "{\"value\":\"OPENSSH_PRIVATE_KEY\"}");
+}
+
+#[tokio::test]
+async fn sops_secret_store_decrypts_payload_with_runner() {
+    let store = SopsSecretStore::new("/var/lib/denia");
+    let runner = FakeCommandRunner::new(vec![CommandOutput {
+        status: 0,
+        stdout: "{\"value\":\"registry-token\"}".to_string(),
+        stderr: String::new(),
+    }]);
+
+    let payload = store
+        .decrypt(
+            &runner,
+            std::path::Path::new("sops"),
+            &SecretRef::new("registry-main"),
+        )
+        .await
+        .expect("payload");
+
+    assert_eq!(payload.value, "registry-token");
+    assert_eq!(
+        runner.commands(),
+        vec!["sops --decrypt /var/lib/denia/secrets/registry-main.sops.yaml"]
     );
 }
 
