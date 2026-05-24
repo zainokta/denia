@@ -1,4 +1,9 @@
-use std::{collections::VecDeque, io, process::ExitStatus, sync::Mutex};
+use std::{
+    collections::VecDeque,
+    io,
+    process::ExitStatus,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -15,6 +20,8 @@ pub struct CommandOutput {
 pub enum CommandError {
     #[error("failed to run command: {0}")]
     Io(#[from] io::Error),
+    #[error("command failed with status {status}: {stderr}")]
+    Failed { status: i32, stderr: String },
     #[error("fake command runner has no output queued")]
     NoFakeOutput,
     #[error("fake command runner state is poisoned")]
@@ -34,17 +41,25 @@ impl CommandRunner for TokioCommandRunner {
     async fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput, CommandError> {
         let output = Command::new(program).args(args).output().await?;
 
-        Ok(CommandOutput {
+        let result = CommandOutput {
             status: status_code(output.status),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        };
+        if result.status == 0 {
+            Ok(result)
+        } else {
+            Err(CommandError::Failed {
+                status: result.status,
+                stderr: result.stderr,
+            })
+        }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FakeCommandRunner {
-    state: Mutex<FakeCommandRunnerState>,
+    state: Arc<Mutex<FakeCommandRunnerState>>,
 }
 
 #[derive(Debug)]
@@ -56,10 +71,10 @@ struct FakeCommandRunnerState {
 impl FakeCommandRunner {
     pub fn new(outputs: Vec<CommandOutput>) -> Self {
         Self {
-            state: Mutex::new(FakeCommandRunnerState {
+            state: Arc::new(Mutex::new(FakeCommandRunnerState {
                 commands: Vec::new(),
                 outputs: outputs.into(),
-            }),
+            })),
         }
     }
 
