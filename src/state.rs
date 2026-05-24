@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -75,6 +75,11 @@ impl SqliteStore {
                 digest TEXT NOT NULL UNIQUE,
                 record_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS promoted_deployments (
+                service_id TEXT PRIMARY KEY,
+                deployment_id TEXT NOT NULL
             );
             "#,
         )?;
@@ -198,6 +203,52 @@ impl SqliteStore {
             });
         }
         Ok(deployments)
+    }
+
+    pub fn update_deployment_status(
+        &self,
+        deployment_id: Uuid,
+        status: DeploymentStatus,
+    ) -> Result<(), StateError> {
+        let connection = self.connection()?;
+        connection.execute(
+            "UPDATE deployments SET status = ?1 WHERE id = ?2",
+            params![serde_json::to_string(&status)?, deployment_id.to_string(),],
+        )?;
+        Ok(())
+    }
+
+    pub fn promote_deployment(
+        &self,
+        service_id: Uuid,
+        deployment_id: Uuid,
+    ) -> Result<(), StateError> {
+        let connection = self.connection()?;
+        connection.execute(
+            r#"
+            INSERT INTO promoted_deployments (service_id, deployment_id)
+            VALUES (?1, ?2)
+            ON CONFLICT(service_id) DO UPDATE SET
+                deployment_id = excluded.deployment_id
+            "#,
+            params![service_id.to_string(), deployment_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn promoted_deployment(&self, service_id: Uuid) -> Result<Option<Uuid>, StateError> {
+        let connection = self.connection()?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT deployment_id FROM promoted_deployments WHERE service_id = ?1",
+                params![service_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value
+            .map(|id| Uuid::parse_str(&id))
+            .transpose()
+            .map_err(Into::into)
     }
 
     pub fn put_artifact(&self, artifact: ArtifactRecord) -> Result<ArtifactRecord, StateError> {
