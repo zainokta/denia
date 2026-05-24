@@ -161,6 +161,12 @@ fn secret_ref_parse_rejects_path_traversal() {
 }
 
 #[test]
+fn secret_ref_deserialize_rejects_path_traversal() {
+    let result = serde_json::from_str::<SecretRef>("\"../outside\"");
+    assert!(result.is_err());
+}
+
+#[test]
 fn secret_payload_serializes_without_exposing_metadata() {
     let payload = SecretPayload::new("OPENSSH_PRIVATE_KEY");
     let json = serde_json::to_string(&payload).expect("json");

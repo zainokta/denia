@@ -1,9 +1,9 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::command::{CommandError, CommandRunner};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SecretRef(String);
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -35,6 +35,29 @@ impl SecretRef {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    fn file_stem(&self) -> String {
+        self.0
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+                    byte as char
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -74,7 +97,7 @@ impl SopsSecretStore {
     pub fn secret_path(&self, secret_ref: &SecretRef) -> std::path::PathBuf {
         self.data_dir
             .join("secrets")
-            .join(format!("{}.sops.yaml", secret_ref.as_str()))
+            .join(format!("{}.sops.yaml", secret_ref.file_stem()))
     }
 
     pub async fn decrypt(
