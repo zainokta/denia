@@ -186,3 +186,24 @@ pub struct Deployment {
     pub status: DeploymentStatus,
     pub created_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeStartRequest {
+    pub service_name: String,
+    pub deployment_id: Uuid,
+    pub artifact: crate::artifacts::ArtifactRecord,
+    pub internal_port: u16,
+    pub socket_path: std::path::PathBuf,
+    pub cpu_millis: u32,
+    pub memory_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeStatus {
+    pub service_name: String,
+    pub deployment_id: Uuid,
+    pub state: String,
+    pub pid: Option<u32>,
+    pub cgroup_path: std::path::PathBuf,
+    pub socket_path: std::path::PathBuf,
+}
