@@ -54,3 +54,35 @@ impl Runtime for FakeRuntime {
         Ok(())
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct LinuxRuntime {
+    runtime_dir: std::path::PathBuf,
+}
+
+impl LinuxRuntime {
+    pub fn new(runtime_dir: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            runtime_dir: runtime_dir.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl Runtime for LinuxRuntime {
+    async fn start(&self, request: RuntimeStartRequest) -> Result<RuntimeStatus, RuntimeError> {
+        let cgroup_path = self.runtime_dir.join(&request.service_name).join("cgroup");
+        Ok(RuntimeStatus {
+            service_name: request.service_name,
+            deployment_id: request.deployment_id,
+            state: "planned".to_string(),
+            pid: None,
+            cgroup_path,
+            socket_path: request.socket_path,
+        })
+    }
+
+    async fn stop(&self, _service_name: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
