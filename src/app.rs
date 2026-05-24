@@ -38,6 +38,8 @@ pub fn build_router(state: AppState) -> Router {
             "/services/{service_id}/deployments",
             get(list_service_deployments),
         )
+        .route("/services/{service_id}/logs", get(service_logs))
+        .route("/services/{service_id}/metrics", get(service_metrics))
         .route("/services/{service_id}/{action}", post(lifecycle_command))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -71,6 +73,9 @@ async fn create_deployment(
     State(state): State<AppState>,
     Json(request): Json<DeploymentRequest>,
 ) -> Result<Json<crate::domain::Deployment>, ApiError> {
+    if state.store.get_service(request.service_id())?.is_none() {
+        return Err(ApiError::NotFound("service not found".to_string()));
+    }
     Ok(Json(state.store.create_deployment(request)?))
 }
 
@@ -100,6 +105,14 @@ async fn lifecycle_command(
         StatusCode::ACCEPTED,
         Json(LifecycleResponse { service_id, action }),
     )
+}
+
+async fn service_logs() -> Json<Vec<String>> {
+    Json(Vec::new())
+}
+
+async fn service_metrics() -> Json<Vec<crate::metrics::MetricSnapshot>> {
+    Json(Vec::new())
 }
 
 async fn require_admin_token(
@@ -142,6 +155,7 @@ struct LifecycleResponse {
 pub enum ApiError {
     State(crate::state::StateError),
     InvalidSecretRef(crate::secrets::SecretRefError),
+    NotFound(String),
 }
 
 impl From<crate::state::StateError> for ApiError {
@@ -155,6 +169,7 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             Self::State(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
             Self::InvalidSecretRef(error) => (StatusCode::BAD_REQUEST, error.to_string()),
+            Self::NotFound(message) => (StatusCode::NOT_FOUND, message),
         };
         (status, message).into_response()
     }

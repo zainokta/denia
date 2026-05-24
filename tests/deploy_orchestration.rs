@@ -1,5 +1,6 @@
 use denia::{
     artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource},
+    bridge::{BridgeAllocator, BridgeTarget},
     deploy::{DeploymentCoordinator, DeploymentPlan},
     domain::{
         DeploymentStatus, ExternalImageSource, HealthCheck, ResourceLimits, RuntimeStartRequest,
@@ -8,7 +9,27 @@ use denia::{
     health::FakeHealthChecker,
     runtime::{FakeRuntime, Runtime},
     state::SqliteStore,
+    traefik::{RouteSpec, render_file_provider_config},
 };
+
+#[test]
+fn bridge_allocator_assigns_stable_loopback_ports() {
+    let mut allocator = BridgeAllocator::new(19000);
+
+    let first = allocator.assign("web", "/var/lib/denia/runtime/web/current.sock".into());
+    let second = allocator.assign("web", "/var/lib/denia/runtime/web/current.sock".into());
+
+    assert_eq!(first.port, 19000);
+    assert_eq!(second.port, 19000);
+    assert_eq!(
+        first,
+        BridgeTarget {
+            service_name: "web".to_string(),
+            port: 19000,
+            socket_path: "/var/lib/denia/runtime/web/current.sock".into(),
+        }
+    );
+}
 
 #[tokio::test]
 async fn fake_runtime_starts_and_stops_service() {
@@ -95,4 +116,63 @@ async fn coordinator_promotes_only_after_health_check_passes() {
             .status,
         DeploymentStatus::Healthy
     );
+}
+
+#[tokio::test]
+async fn coordinator_writes_traefik_config_on_promotion() {
+    let store = SqliteStore::open_in_memory().expect("sqlite");
+    store.migrate().expect("migrate");
+    let runtime = FakeRuntime::default();
+    let health = FakeHealthChecker::healthy();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("denia.yml");
+    let coordinator = DeploymentCoordinator::new_with_routing(
+        store.clone(),
+        runtime,
+        health,
+        BridgeAllocator::new(19000),
+        config_path.clone(),
+    );
+
+    let service = store
+        .put_service(
+            ServiceConfig::new(
+                "web",
+                vec!["web.example.test".to_string()],
+                ServiceSource::ExternalImage(ExternalImageSource {
+                    image: "ghcr.io/acme/web:latest".to_string(),
+                    credential: None,
+                }),
+                3000,
+                HealthCheck::new("/ready", 5),
+                ResourceLimits::default(),
+            )
+            .expect("service"),
+        )
+        .expect("stored service");
+    let artifact = ArtifactRecord::new(
+        "sha256:abc123",
+        ArtifactKind::OciImage,
+        ArtifactSource::ExternalRegistry {
+            image: "ghcr.io/acme/web:latest".to_string(),
+        },
+    )
+    .expect("artifact");
+
+    coordinator
+        .deploy(DeploymentPlan { service, artifact })
+        .await
+        .expect("deployment");
+
+    let content = std::fs::read_to_string(config_path).expect("read config");
+    assert!(content.contains("Host(`web.example.test`)"));
+    assert!(content.contains("http://127.0.0.1:19000"));
+
+    let rendered = render_file_provider_config(&[RouteSpec {
+        service_name: "web".to_string(),
+        domains: vec!["web.example.test".to_string()],
+        bridge_port: 19000,
+    }])
+    .expect("rendered");
+    assert_eq!(content, rendered);
 }

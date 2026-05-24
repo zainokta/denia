@@ -146,6 +146,21 @@ impl SqliteStore {
         Ok(services)
     }
 
+    pub fn get_service(&self, service_id: Uuid) -> Result<Option<ServiceConfig>, StateError> {
+        let connection = self.connection()?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT config_json FROM services WHERE id = ?1",
+                params![service_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(Into::into)
+    }
+
     pub fn create_deployment(&self, request: DeploymentRequest) -> Result<Deployment, StateError> {
         let deployment = Deployment {
             id: Uuid::now_v7(),

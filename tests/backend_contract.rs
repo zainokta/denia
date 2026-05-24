@@ -8,7 +8,8 @@ use denia::{
         CredentialKind, DeploymentRequest, ExternalImageSource, GitSource, HealthCheck,
         ResourceLimits, ServiceConfig, ServiceSource,
     },
-    metrics::parse_memory_current,
+    logs::LogStore,
+    metrics::{parse_cpu_stat, parse_memory_current},
     secrets::{SecretPayload, SecretRef, SopsSecretStore},
     state::SqliteStore,
     traefik::{RouteSpec, render_file_provider_config},
@@ -191,6 +192,26 @@ fn cgroup_memory_parser_reads_current_bytes() {
     assert_eq!(
         parse_memory_current("73400320\n").expect("memory"),
         73_400_320
+    );
+}
+
+#[test]
+fn cpu_stat_parser_reads_usage_usec() {
+    let stat = parse_cpu_stat("usage_usec 12345\nuser_usec 100\nsystem_usec 50\n").expect("stat");
+    assert_eq!(stat.usage_usec, 12345);
+}
+
+#[test]
+fn log_store_appends_and_reads_service_lines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let logs = LogStore::new(dir.path());
+
+    logs.append("web", "first line\n").expect("append");
+    logs.append("web", "second line\n").expect("append");
+
+    assert_eq!(
+        logs.read_recent("web", 2).expect("lines"),
+        vec!["first line".to_string(), "second line".to_string()]
     );
 }
 
@@ -391,4 +412,31 @@ async fn axum_router_accepts_credentials_and_lifecycle_commands_with_admin_token
         .await
         .unwrap();
     assert_eq!(lifecycle_response.status(), http::StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn deployment_endpoint_rejects_unknown_service() {
+    let store = SqliteStore::open_in_memory().expect("open sqlite");
+    store.migrate().expect("migrate");
+    let app = build_router(AppState::new(AppConfig::for_test("test-token"), store));
+
+    let request =
+        DeploymentRequest::external_image(uuid::Uuid::now_v7(), "ghcr.io/acme/web:latest");
+
+    let response = app
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri("/v1/deployments")
+                .header(http::header::AUTHORIZATION, "Bearer test-token")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&request).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
 }

@@ -18,3 +18,4 @@ uuid = { version = "1", features = ["serde", "v7"] }
 
 [dev-dependencies]
 http = "1"
+tempfile = "3"
