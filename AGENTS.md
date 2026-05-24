@@ -24,6 +24,7 @@ Guidelines for AI agents working on Denia, a Rust backend PaaS that runs workloa
 - Tests: `cargo test`
 - Format: `cargo fmt --all`
 - Lints when available: `cargo clippy --all-targets --all-features`
+- Privileged runtime tests: `DENIA_RUN_PRIVILEGED_TESTS=1 cargo test --test linux_runtime_privileged -- --ignored`
 - Privileged runtime tests must be opt-in and clearly gated because they require root, namespaces, mounts, and cgroup changes.
 
 ## Rust Conventions

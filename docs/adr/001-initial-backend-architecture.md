@@ -54,6 +54,10 @@ Deployments are health-gated. Denia starts the new deployment, waits for the exp
 - The Traefik loopback bridge is an extra component Denia must supervise.
 - Multi-node scheduling, hosted registry push APIs, and rootless operation are deferred.
 
+### Implementation Boundary
+
+The first implementation branch establishes the deploy orchestration, state, artifact, secret, ingress, log, metric, and runtime interfaces. The dangerous Linux runtime internals are gated behind ignored privileged tests and must be implemented in a dedicated follow-up branch with root/cgroup verification.
+
 ## Alternatives Considered
 
 - **Docker runtime**: Rejected because Denia's core requirement is to avoid Docker for running workloads.
