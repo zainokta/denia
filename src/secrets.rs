@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::command::{CommandError, CommandRunner};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretRef(String);
 
@@ -28,6 +30,27 @@ impl SecretRef {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretPayload {
+    pub value: String,
+}
+
+impl SecretPayload {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum SecretError {
+    #[error(transparent)]
+    Command(#[from] CommandError),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SopsSecretStore {
     data_dir: std::path::PathBuf,
@@ -44,5 +67,21 @@ impl SopsSecretStore {
         self.data_dir
             .join("secrets")
             .join(format!("{}.sops.yaml", secret_ref.as_str()))
+    }
+
+    pub async fn decrypt(
+        &self,
+        runner: &dyn CommandRunner,
+        sops_binary: &std::path::Path,
+        secret_ref: &SecretRef,
+    ) -> Result<SecretPayload, SecretError> {
+        let secret_path = self.secret_path(secret_ref);
+        let secret_path = secret_path.to_string_lossy();
+        let sops_binary = sops_binary.to_string_lossy();
+        let output = runner
+            .run(&sops_binary, &["--decrypt", secret_path.as_ref()])
+            .await?;
+
+        Ok(serde_json::from_str(&output.stdout)?)
     }
 }
