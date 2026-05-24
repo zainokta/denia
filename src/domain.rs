@@ -1,0 +1,188 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use uuid::Uuid;
+
+use crate::secrets::SecretRef;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum DomainError {
+    #[error("service name cannot be empty")]
+    EmptyName,
+    #[error("service must have at least one domain")]
+    MissingDomain,
+    #[error("internal port must be between 1 and 65535")]
+    InvalidPort,
+    #[error("health check path must start with /")]
+    InvalidHealthPath,
+    #[error("health check timeout must be greater than zero")]
+    InvalidHealthTimeout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    pub cpu_millis: u32,
+    pub memory_bytes: u64,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            cpu_millis: 500,
+            memory_bytes: 512 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthCheck {
+    pub path: String,
+    pub timeout_seconds: u64,
+}
+
+impl HealthCheck {
+    pub fn new(path: impl Into<String>, timeout_seconds: u64) -> Self {
+        Self {
+            path: path.into(),
+            timeout_seconds,
+        }
+    }
+
+    fn validate(&self) -> Result<(), DomainError> {
+        if !self.path.starts_with('/') {
+            return Err(DomainError::InvalidHealthPath);
+        }
+        if self.timeout_seconds == 0 {
+            return Err(DomainError::InvalidHealthTimeout);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServiceSource {
+    Git(GitSource),
+    ExternalImage(ExternalImageSource),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitSource {
+    pub repo_url: String,
+    pub git_ref: String,
+    pub dockerfile_path: String,
+    pub context_path: String,
+    pub credential: SecretRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalImageSource {
+    pub image: String,
+    pub credential: Option<SecretRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceConfig {
+    pub id: Uuid,
+    pub name: String,
+    pub domains: Vec<String>,
+    pub source: ServiceSource,
+    pub internal_port: u16,
+    pub health_check: HealthCheck,
+    pub resource_limits: ResourceLimits,
+}
+
+impl ServiceConfig {
+    pub fn new(
+        name: impl Into<String>,
+        domains: Vec<String>,
+        source: ServiceSource,
+        internal_port: u16,
+        health_check: HealthCheck,
+        resource_limits: ResourceLimits,
+    ) -> Result<Self, DomainError> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(DomainError::EmptyName);
+        }
+        if domains.is_empty() {
+            return Err(DomainError::MissingDomain);
+        }
+        if internal_port == 0 {
+            return Err(DomainError::InvalidPort);
+        }
+        health_check.validate()?;
+        Ok(Self {
+            id: Uuid::now_v7(),
+            name,
+            domains,
+            source,
+            internal_port,
+            health_check,
+            resource_limits,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CredentialKind {
+    SshDeployKey,
+    RegistryBasic,
+    RegistryToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Credential {
+    pub id: Uuid,
+    pub name: String,
+    pub kind: CredentialKind,
+    pub secret_ref: SecretRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum DeploymentRequest {
+    Git {
+        service_id: Uuid,
+        repo_url: String,
+        git_ref: String,
+    },
+    ExternalImage {
+        service_id: Uuid,
+        image: String,
+    },
+}
+
+impl DeploymentRequest {
+    pub fn service_id(&self) -> Uuid {
+        match self {
+            Self::Git { service_id, .. } | Self::ExternalImage { service_id, .. } => *service_id,
+        }
+    }
+
+    pub fn external_image(service_id: Uuid, image: impl Into<String>) -> Self {
+        Self::ExternalImage {
+            service_id,
+            image: image.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeploymentStatus {
+    Pending,
+    Building,
+    Starting,
+    Healthy,
+    Failed,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deployment {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub request: DeploymentRequest,
+    pub status: DeploymentStatus,
+    pub created_at: DateTime<Utc>,
+}
