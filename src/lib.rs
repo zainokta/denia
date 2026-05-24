@@ -1,10 +1,12 @@
 pub mod app;
 pub mod artifacts;
+pub mod bridge;
 pub mod command;
 pub mod config;
 pub mod deploy;
 pub mod domain;
 pub mod health;
+pub mod logs;
 pub mod metrics;
 pub mod runtime;
 pub mod secrets;

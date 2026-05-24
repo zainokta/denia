@@ -1,11 +1,18 @@
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+
 use thiserror::Error;
 
 use crate::{
     artifacts::{ArtifactRecord, ArtifactSource},
+    bridge::BridgeAllocator,
     domain::{Deployment, DeploymentRequest, DeploymentStatus, RuntimeStartRequest, ServiceConfig},
     health::{HealthChecker, HealthError},
     runtime::{Runtime, RuntimeError},
     state::{SqliteStore, StateError},
+    traefik::{RouteSpec, TraefikError, render_file_provider_config},
 };
 
 pub struct DeploymentPlan {
@@ -21,12 +28,24 @@ pub enum DeployError {
     Runtime(#[from] RuntimeError),
     #[error("health error: {0}")]
     Health(#[from] HealthError),
+    #[error("traefik error: {0}")]
+    Traefik(#[from] TraefikError),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("bridge allocator lock poisoned")]
+    BridgeLockPoisoned,
 }
 
 pub struct DeploymentCoordinator<R, H> {
     store: SqliteStore,
     runtime: R,
     health: H,
+    routing: Option<RoutingState>,
+}
+
+struct RoutingState {
+    bridge: Arc<Mutex<BridgeAllocator>>,
+    traefik_config_path: PathBuf,
 }
 
 impl<R, H> DeploymentCoordinator<R, H>
@@ -39,6 +58,25 @@ where
             store,
             runtime,
             health,
+            routing: None,
+        }
+    }
+
+    pub fn new_with_routing(
+        store: SqliteStore,
+        runtime: R,
+        health: H,
+        bridge: BridgeAllocator,
+        traefik_config_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            store,
+            runtime,
+            health,
+            routing: Some(RoutingState {
+                bridge: Arc::new(Mutex::new(bridge)),
+                traefik_config_path: traefik_config_path.into(),
+            }),
         }
     }
 
@@ -70,11 +108,33 @@ where
 
         self.store
             .promote_deployment(plan.service.id, deployment.id)?;
+        self.write_routing_config(&plan.service, &runtime_status.socket_path)?;
         self.store
             .update_deployment_status(deployment.id, DeploymentStatus::Healthy)?;
         deployment.status = DeploymentStatus::Healthy;
-        let _ = runtime_status;
         Ok(deployment)
+    }
+
+    fn write_routing_config(
+        &self,
+        service: &ServiceConfig,
+        socket_path: &std::path::Path,
+    ) -> Result<(), DeployError> {
+        let Some(routing) = &self.routing else {
+            return Ok(());
+        };
+        let bridge_target = routing
+            .bridge
+            .lock()
+            .map_err(|_| DeployError::BridgeLockPoisoned)?
+            .assign(&service.name, socket_path.to_path_buf());
+        let yaml = render_file_provider_config(&[RouteSpec {
+            service_name: service.name.clone(),
+            domains: service.domains.clone(),
+            bridge_port: bridge_target.port,
+        }])?;
+        std::fs::write(&routing.traefik_config_path, yaml)?;
+        Ok(())
     }
 }
 
