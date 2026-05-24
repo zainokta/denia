@@ -1,5 +1,6 @@
 use denia::{
     app::{AppState, build_router},
+    artifacts::acquirer::{ArtifactAcquireRequest, ArtifactAcquirer},
     artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource},
     command::{CommandOutput, FakeCommandRunner},
     config::AppConfig,
@@ -120,6 +121,56 @@ fn sqlite_store_persists_local_artifacts_by_digest() {
     let artifacts = store.list_artifacts().expect("artifacts");
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].digest, artifact.digest);
+}
+
+#[tokio::test]
+async fn artifact_acquirer_builds_git_source_with_buildkit() {
+    let runner = FakeCommandRunner::new(vec![CommandOutput {
+        status: 0,
+        stdout: "sha256:build123\n".to_string(),
+        stderr: String::new(),
+    }]);
+    let config = AppConfig::for_test("test-token");
+    let acquirer = ArtifactAcquirer::new(config.clone());
+
+    let artifact = acquirer
+        .acquire(
+            &runner,
+            ArtifactAcquireRequest::Git {
+                repo_url: "git@example.com:acme/api.git".to_string(),
+                git_ref: "main".to_string(),
+                dockerfile_path: "Dockerfile".to_string(),
+                context_path: ".".to_string(),
+            },
+        )
+        .await
+        .expect("artifact");
+
+    assert_eq!(artifact.digest, "sha256:build123");
+    assert!(runner.commands()[0].starts_with("buildctl build"));
+}
+
+#[tokio::test]
+async fn artifact_acquirer_pulls_external_image() {
+    let runner = FakeCommandRunner::new(vec![CommandOutput {
+        status: 0,
+        stdout: "sha256:pull123\n".to_string(),
+        stderr: String::new(),
+    }]);
+    let acquirer = ArtifactAcquirer::new(AppConfig::for_test("test-token"));
+
+    let artifact = acquirer
+        .acquire(
+            &runner,
+            ArtifactAcquireRequest::ExternalImage {
+                image: "ghcr.io/acme/web:latest".to_string(),
+            },
+        )
+        .await
+        .expect("artifact");
+
+    assert_eq!(artifact.digest, "sha256:pull123");
+    assert!(runner.commands()[0].contains("copy docker://ghcr.io/acme/web:latest"));
 }
 
 #[test]
