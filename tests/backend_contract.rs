@@ -1,6 +1,7 @@
 use denia::{
     app::{AppState, build_router},
     artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource},
+    command::{CommandOutput, FakeCommandRunner},
     config::AppConfig,
     domain::{
         CredentialKind, DeploymentRequest, ExternalImageSource, GitSource, HealthCheck,
@@ -140,6 +141,39 @@ fn cgroup_memory_parser_reads_current_bytes() {
         parse_memory_current("73400320\n").expect("memory"),
         73_400_320
     );
+}
+
+#[tokio::test]
+async fn fake_command_runner_records_commands_and_returns_output() {
+    let runner = FakeCommandRunner::new(vec![CommandOutput {
+        status: 0,
+        stdout: "ok\n".to_string(),
+        stderr: String::new(),
+    }]);
+
+    let output = runner
+        .run(
+            "sops",
+            &["--decrypt", "/var/lib/denia/secrets/git-main.sops.yaml"],
+        )
+        .await
+        .expect("command output");
+
+    assert_eq!(output.stdout, "ok\n");
+    assert_eq!(
+        runner.commands(),
+        vec!["sops --decrypt /var/lib/denia/secrets/git-main.sops.yaml"]
+    );
+}
+
+#[test]
+fn test_config_defines_runtime_paths_and_tool_binaries() {
+    let config = AppConfig::for_test("test-token");
+
+    assert_eq!(config.buildkit_binary.to_string_lossy(), "buildctl");
+    assert_eq!(config.sops_binary.to_string_lossy(), "sops");
+    assert_eq!(config.runtime_dir, config.data_dir.join("runtime"));
+    assert_eq!(config.artifact_dir, config.data_dir.join("artifacts"));
 }
 
 #[tokio::test]

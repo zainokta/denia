@@ -1,5 +1,6 @@
 pub mod app;
 pub mod artifacts;
+pub mod command;
 pub mod config;
 pub mod domain;
 pub mod metrics;
