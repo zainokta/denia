@@ -4,6 +4,8 @@ import { useState } from 'react'
 import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
+import { useAuth } from '#/hooks/useAuth'
+import type { Role } from '#/effect/schema'
 
 const getProject = (id: string) =>
   Effect.gen(function* () {
@@ -17,6 +19,24 @@ const deleteProject = (id: string) =>
     return yield* api.deleteProject(id)
   })
 
+const listMembers = (projectId: string) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.listMembers(projectId)
+  })
+
+const addMember = (projectId: string, userId: string, role: Role) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.addMember(projectId, userId, role)
+  })
+
+const removeMember = (projectId: string, userId: string) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.removeMember(projectId, userId)
+  })
+
 export const Route = createFileRoute('/projects/$projectId')({
   component: ProjectDetail,
 })
@@ -25,11 +45,44 @@ export function ProjectDetail() {
   const { projectId } = Route.useParams()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const { isSuperAdmin, roleForActiveProject } = useAuth()
   const [deleteError, setDeleteError] = useState('')
+  const [newUserId, setNewUserId] = useState<string>('')
+  const [newRole, setNewRole] = useState<Role>('viewer')
 
   const { data: project, isFetching } = useQuery({
     queryKey: ['projects', projectId],
     queryFn: () => runQuery(getProject(projectId)),
+  })
+
+  const canManage =
+    isSuperAdmin || roleForActiveProject(projectId) === 'admin'
+
+  const { data: members = [] } = useQuery({
+    queryKey: ['projects', projectId, 'members'],
+    queryFn: () => runQuery(listMembers(projectId)),
+    enabled: projectId.length > 0,
+  })
+
+  const addMemberMutation = useMutation({
+    mutationFn: (input: { userId: string; role: Role }) =>
+      runQuery(addMember(projectId, input.userId, input.role)),
+    onSuccess: () => {
+      setNewUserId('')
+      queryClient.invalidateQueries({
+        queryKey: ['projects', projectId, 'members'],
+      })
+    },
+  })
+
+  const removeMemberMutation = useMutation({
+    mutationFn: (userId: string) =>
+      runQuery(removeMember(projectId, userId)),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ['projects', projectId, 'members'],
+      })
+    },
   })
 
   const del = useMutation({
@@ -136,6 +189,78 @@ export function ProjectDetail() {
           </dl>
         </section>
       )}
+
+      <section className="panel mb-8 overflow-hidden">
+        <p className="kicker border-b border-[var(--border)] px-4 py-2.5">
+          members
+        </p>
+        {members.length === 0 ? (
+          <p className="px-4 py-3 text-sm text-[var(--fg-muted)]">
+            No members yet.
+          </p>
+        ) : (
+          <ul className="m-0 list-none">
+            {members.map((m, i) => (
+              <li
+                key={`${m.user_id}-${m.project_id}`}
+                className={`flex items-center gap-4 px-4 py-2.5 text-sm ${
+                  i > 0 ? 'border-t border-[var(--border)]' : ''
+                }`}
+              >
+                <span className="font-mono text-xs text-[var(--fg-muted)]">
+                  {m.user_id}
+                </span>
+                <span className="kicker">{m.role}</span>
+                {canManage ? (
+                  <button
+                    type="button"
+                    className="btn text-xs ml-auto"
+                    onClick={() => removeMemberMutation.mutate(m.user_id)}
+                    disabled={removeMemberMutation.isPending}
+                  >
+                    remove
+                  </button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        )}
+        {canManage ? (
+          <form
+            className="flex flex-wrap items-end gap-2 border-t border-[var(--border)] px-4 py-3"
+            onSubmit={(e) => {
+              e.preventDefault()
+              const userId = newUserId.trim()
+              if (!userId) return
+              addMemberMutation.mutate({ userId, role: newRole })
+            }}
+          >
+            <input
+              type="text"
+              placeholder="user id (uuid)"
+              value={newUserId}
+              onChange={(e) => setNewUserId(e.target.value)}
+              className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono"
+            />
+            <select
+              value={newRole}
+              onChange={(e) => setNewRole(e.target.value as Role)}
+              className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm"
+            >
+              <option value="viewer">viewer</option>
+              <option value="operator">operator</option>
+              <option value="admin">admin</option>
+            </select>
+            <button
+              type="submit"
+              className="btn btn-primary text-xs"
+              disabled={addMemberMutation.isPending}
+            >
+              {addMemberMutation.isPending ? 'adding…' : 'add member'}
+            </button>
+          </form>
+        ) : null}
+      </section>
 
       <section className="mb-8">
         {deleteError && (

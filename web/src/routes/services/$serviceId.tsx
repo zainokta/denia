@@ -39,6 +39,12 @@ const stopService = (id: number) =>
     return yield* api.stopService(id)
   })
 
+const getRequests = (id: string) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.listServiceRequests(id)
+  })
+
 const listServices = Effect.gen(function* () {
   const api = yield* ApiClient
   return yield* api.listServices
@@ -90,6 +96,13 @@ export function ServiceDetail() {
     queryKey: ['services', id, 'metrics'],
     queryFn: () => runQuery(getMetrics(id)),
     refetchInterval: 3000,
+    refetchIntervalInBackground: false,
+  })
+
+  const { data: requests = [] } = useQuery({
+    queryKey: ['services', id, 'requests'],
+    queryFn: () => runQuery(getRequests(String(id))),
+    refetchInterval: 5000,
     refetchIntervalInBackground: false,
   })
 
@@ -285,6 +298,59 @@ export function ServiceDetail() {
                 </li>
               ))}
             </ul>
+          </div>
+        )}
+      </section>
+
+      <section className="mb-8">
+        <p className="kicker mb-2">recent requests</p>
+        {requests.length === 0 ? (
+          <p className="text-sm text-[var(--fg-muted)]">
+            No recent requests.
+          </p>
+        ) : (
+          <div className="panel overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-[var(--border)] text-xs text-[var(--fg-muted)]">
+                  <th className="px-4 py-2 font-semibold">time</th>
+                  <th className="px-4 py-2 font-semibold">method</th>
+                  <th className="px-4 py-2 font-semibold">path</th>
+                  <th className="px-4 py-2 font-semibold tnum">status</th>
+                  <th className="px-4 py-2 font-semibold tnum">bytes</th>
+                  <th className="px-4 py-2 font-semibold tnum">duration</th>
+                </tr>
+              </thead>
+              <tbody>
+                {requests.map((entry, i) => (
+                  <tr
+                    key={`${entry.recorded_at}-${i}`}
+                    className={i > 0 ? 'border-t border-[var(--border)]' : ''}
+                  >
+                    <td className="px-4 py-2 text-xs text-[var(--fg-muted)] tnum">
+                      {entry.recorded_at}
+                    </td>
+                    <td className="px-4 py-2 text-xs text-[var(--fg)]">
+                      {entry.method}
+                    </td>
+                    <td className="px-4 py-2 text-xs text-[var(--fg)] break-all">
+                      {entry.path}
+                    </td>
+                    <td className="px-4 py-2 tnum text-xs text-[var(--fg)]">
+                      {entry.status}
+                    </td>
+                    <td className="px-4 py-2 tnum text-xs text-[var(--fg-muted)]">
+                      {entry.bytes === null ? '—' : formatBytes(entry.bytes)}
+                    </td>
+                    <td className="px-4 py-2 tnum text-xs text-[var(--fg-muted)]">
+                      {entry.duration_ms === null
+                        ? '—'
+                        : `${entry.duration_ms}ms`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </section>

@@ -5,6 +5,7 @@ import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
 import { StatusSignal } from '#/components/StatusSignal'
 import { SecurityBadge } from '#/components/SecurityBadge'
+import { useAuth, can } from '#/hooks/useAuth'
 
 const listServices = Effect.gen(function* () {
   const api = yield* ApiClient
@@ -29,11 +30,18 @@ export const Route = createFileRoute('/services/')({
 
 export function ServicesIndex() {
   const queryClient = useQueryClient()
+  const { isSuperAdmin, roleForActiveProject } = useAuth()
 
   const { data: services = [], isFetching } = useQuery({
     queryKey: ['services'],
     queryFn: () => runQuery(listServices),
   })
+
+  const canOperate = (projectId: number): boolean => {
+    if (isSuperAdmin) return true
+    const role = roleForActiveProject(String(projectId))
+    return role !== undefined && can('operator', role)
+  }
 
   const deploy = useMutation({
     mutationFn: (id: number) =>
@@ -87,22 +95,26 @@ export function ServicesIndex() {
                     {svc.domains.join(', ') || `:${svc.internal_port}`}
                   </span>
                 </a>
-                <button
-                  className="btn btn-primary text-xs"
-                  type="button"
-                  onClick={() => deploy.mutate(svc.id)}
-                  disabled={deploy.isPending}
-                >
-                  {deploy.isPending ? 'deploying...' : 'deploy'}
-                </button>
-                <button
-                  className="btn text-xs"
-                  type="button"
-                  onClick={() => stop.mutate(svc.id)}
-                  disabled={stop.isPending}
-                >
-                  stop
-                </button>
+                {canOperate(svc.project_id) ? (
+                  <>
+                    <button
+                      className="btn btn-primary text-xs"
+                      type="button"
+                      onClick={() => deploy.mutate(svc.id)}
+                      disabled={deploy.isPending}
+                    >
+                      {deploy.isPending ? 'deploying...' : 'deploy'}
+                    </button>
+                    <button
+                      className="btn text-xs"
+                      type="button"
+                      onClick={() => stop.mutate(svc.id)}
+                      disabled={stop.isPending}
+                    >
+                      stop
+                    </button>
+                  </>
+                ) : null}
               </li>
             ))}
           </ul>

@@ -129,7 +129,7 @@ describe('Auth schema', () => {
         user: { id: 1, username: 'alice', created_at: '2026-01-01T00:00:00Z' },
       },
       is_super_admin: false,
-      memberships: [{ project_id: 1, role: 'operator' }],
+      memberships: [{ project_id: 'p1', role: 'operator' }],
     }).pipe(
       Effect.map((me) => {
         expect(me.principal.kind).toBe('user')
@@ -276,9 +276,9 @@ const mockApi = (success = true) =>
     listApiTokens: emptyApi() as never,
     createApiToken: ((_n: string) => emptyApi()) as never,
     deleteApiToken: ((_id: number) => emptyApi()) as never,
-    listMembers: ((_pid: number) => emptyApi()) as never,
-    addMember: ((_pid: number, _uid: number, _r: string) => emptyApi()) as never,
-    removeMember: ((_pid: number, _uid: number) => emptyApi()) as never,
+    listMembers: ((_pid: string) => emptyApi()) as never,
+    addMember: ((_pid: string, _uid: string, _r: string) => emptyApi()) as never,
+    removeMember: ((_pid: string, _uid: string) => emptyApi()) as never,
     listServices: emptyApi() as never,
     getServiceDeployments: ((_id: number) => emptyApi()) as never,
     getServiceLogs: ((_id: number) => emptyApi()) as never,
@@ -310,6 +310,9 @@ const mockApi = (success = true) =>
     runJob: ((_id: string) => Effect.succeed(FIXTURE_JOB_RUN)) as never,
     listJobRuns: ((_id: string) =>
       Effect.succeed([FIXTURE_JOB_RUN] as ReadonlyArray<typeof FIXTURE_JOB_RUN>)) as never,
+    getNodeMetrics: emptyApi() as never,
+    listWorkloads: emptyApi() as never,
+    listServiceRequests: ((_id: string) => emptyApi()) as never,
   })
 
 const FIXTURE_JOB = {
@@ -414,9 +417,9 @@ describe('ApiClient jobs', () => {
     listApiTokens: emptyApi() as never,
     createApiToken: ((_n: string) => emptyApi()) as never,
     deleteApiToken: ((_id: number) => emptyApi()) as never,
-    listMembers: ((_pid: number) => emptyApi()) as never,
-    addMember: ((_pid: number, _uid: number, _r: string) => emptyApi()) as never,
-    removeMember: ((_pid: number, _uid: number) => emptyApi()) as never,
+    listMembers: ((_pid: string) => emptyApi()) as never,
+    addMember: ((_pid: string, _uid: string, _r: string) => emptyApi()) as never,
+    removeMember: ((_pid: string, _uid: string) => emptyApi()) as never,
     listServices: emptyApi() as never,
     getServiceDeployments: ((_id: number) => emptyApi()) as never,
     getServiceLogs: ((_id: number) => emptyApi()) as never,
@@ -438,6 +441,9 @@ describe('ApiClient jobs', () => {
     runJob: ((_id: string) => Effect.succeed(FIXTURE_JOB_RUN)) as never,
     listJobRuns: ((_id: string) =>
       Effect.succeed([FIXTURE_JOB_RUN] as ReadonlyArray<typeof FIXTURE_JOB_RUN>)) as never,
+    getNodeMetrics: emptyApi() as never,
+    listWorkloads: emptyApi() as never,
+    listServiceRequests: ((_id: string) => emptyApi()) as never,
   })
 
   it.effect('jobs methods exist on ApiClient', () =>
@@ -705,9 +711,9 @@ const mockIngressApi = () =>
     listApiTokens: emptyApi() as never,
     createApiToken: ((_n: string) => emptyApi()) as never,
     deleteApiToken: ((_id: number) => emptyApi()) as never,
-    listMembers: ((_pid: number) => emptyApi()) as never,
-    addMember: ((_pid: number, _uid: number, _r: string) => emptyApi()) as never,
-    removeMember: ((_pid: number, _uid: number) => emptyApi()) as never,
+    listMembers: ((_pid: string) => emptyApi()) as never,
+    addMember: ((_pid: string, _uid: string, _r: string) => emptyApi()) as never,
+    removeMember: ((_pid: string, _uid: string) => emptyApi()) as never,
     listServices: emptyApi() as never,
     getServiceDeployments: ((_id: number) => emptyApi()) as never,
     getServiceLogs: ((_id: number) => emptyApi()) as never,
@@ -729,6 +735,9 @@ const mockIngressApi = () =>
     runJob: ((_id: string) => Effect.succeed(FIXTURE_JOB_RUN)) as never,
     listJobRuns: ((_id: string) =>
       Effect.succeed([FIXTURE_JOB_RUN] as ReadonlyArray<typeof FIXTURE_JOB_RUN>)) as never,
+    getNodeMetrics: emptyApi() as never,
+    listWorkloads: emptyApi() as never,
+    listServiceRequests: ((_id: string) => emptyApi()) as never,
   })
 
 describe('Ingress ApiClient methods', () => {
@@ -783,9 +792,9 @@ describe('putService', () => {
           listApiTokens: emptyApi() as never,
           createApiToken: ((_n: string) => emptyApi()) as never,
           deleteApiToken: ((_id: number) => emptyApi()) as never,
-          listMembers: ((_pid: number) => emptyApi()) as never,
-          addMember: ((_pid: number, _uid: number, _r: string) => emptyApi()) as never,
-          removeMember: ((_pid: number, _uid: number) => emptyApi()) as never,
+          listMembers: ((_pid: string) => emptyApi()) as never,
+          addMember: ((_pid: string, _uid: string, _r: string) => emptyApi()) as never,
+          removeMember: ((_pid: string, _uid: string) => emptyApi()) as never,
           listServices: emptyApi() as never,
           getServiceDeployments: ((_id: number) => emptyApi()) as never,
           getServiceLogs: ((_id: number) => emptyApi()) as never,
@@ -807,6 +816,9 @@ describe('putService', () => {
           runJob: ((_id: string) => Effect.succeed(FIXTURE_JOB_RUN)) as never,
           listJobRuns: ((_id: string) =>
             Effect.succeed([FIXTURE_JOB_RUN] as ReadonlyArray<typeof FIXTURE_JOB_RUN>)) as never,
+          getNodeMetrics: emptyApi() as never,
+          listWorkloads: emptyApi() as never,
+          listServiceRequests: ((_id: string) => emptyApi()) as never,
         }),
       ),
     ),

@@ -149,7 +149,7 @@ describe('ServiceDetail', () => {
     const deployFix = [
       { id: 1, service_id: 1, status: 'Building', created_at: '2026-05-25T00:00:00Z' },
     ]
-    allReturns([deployFix, [], [], fixServices])
+    allReturns([deployFix, [], [], [], fixServices])
 
     render(<ServiceDetail />, { wrapper: makeWrapper() })
 
@@ -168,7 +168,7 @@ describe('ServiceDetail', () => {
         artifact: { digest: 'sha256:abc123def456', kind: 'OciImage' },
       },
     ]
-    allReturns([deployFix, [], [], fixServices])
+    allReturns([deployFix, [], [], [], fixServices])
 
     render(<ServiceDetail />, { wrapper: makeWrapper() })
 
@@ -185,7 +185,7 @@ describe('ServiceDetail', () => {
         created_at: '2026-05-25T00:00:00Z',
       },
     ]
-    allReturns([deployFix, [], [], fixServices])
+    allReturns([deployFix, [], [], [], fixServices])
 
     render(<ServiceDetail />, { wrapper: makeWrapper() })
 
@@ -196,7 +196,7 @@ describe('ServiceDetail', () => {
     const deployFix = [
       { id: 1, service_id: 1, status: 'Healthy', created_at: '2026-05-25T00:00:00Z' },
     ]
-    allReturns([deployFix, [], [], fixServicesWithSecurity])
+    allReturns([deployFix, [], [], [], fixServicesWithSecurity])
 
     const { container } = render(<ServiceDetail />, { wrapper: makeWrapper() })
 
@@ -212,7 +212,7 @@ describe('ServiceDetail', () => {
     const deployFix = [
       { id: 1, service_id: 1, status: 'Healthy', created_at: '2026-05-25T00:00:00Z' },
     ]
-    allReturns([deployFix, [], [], fixServices])
+    allReturns([deployFix, [], [], [], fixServices])
 
     const { container } = render(<ServiceDetail />, { wrapper: makeWrapper() })
 

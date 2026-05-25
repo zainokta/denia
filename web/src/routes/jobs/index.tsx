@@ -77,7 +77,7 @@ export function JobsIndex() {
     enabled: projectId.length > 0,
   })
 
-  const userRole = projectId ? auth.roleForActiveProject(Number(projectId)) : undefined
+  const userRole = projectId ? auth.roleForActiveProject(projectId) : undefined
   const canOperate = userRole ? can('operator', userRole) : false
 
   const create = useMutation({

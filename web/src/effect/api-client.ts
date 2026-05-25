@@ -3,6 +3,8 @@ import { HttpClient, HttpBody } from 'effect/unstable/http'
 import { AppConfig } from './config'
 import { ApiError, DecodeError } from './errors'
 import {
+  AccessEntries,
+  AccessEntry,
   ApiToken,
   Deployment,
   Deployments,
@@ -12,13 +14,15 @@ import {
   Jobs,
   LoginResult,
   Me,
-  Membership,
   MetricSnapshot,
   Metrics,
   Node,
+  NodeSnapshot,
   Nodes,
   Project,
   ProjectInput,
+  ProjectMember,
+  ProjectMembers,
   Projects,
   type Role,
   RouteView,
@@ -26,6 +30,8 @@ import {
   Service,
   Services,
   User,
+  WorkloadView,
+  WorkloadViews,
 } from './schema'
 
 export class ApiClient extends Context.Service<
@@ -59,16 +65,16 @@ export class ApiClient extends Context.Service<
     ) => Effect.Effect<ApiToken, ApiError | DecodeError>
     readonly deleteApiToken: (id: number) => Effect.Effect<void, ApiError>
     readonly listMembers: (
-      projectId: number,
-    ) => Effect.Effect<ReadonlyArray<Membership>, ApiError | DecodeError>
+      projectId: string,
+    ) => Effect.Effect<ReadonlyArray<ProjectMember>, ApiError | DecodeError>
     readonly addMember: (
-      projectId: number,
-      userId: number,
+      projectId: string,
+      userId: string,
       role: Role,
-    ) => Effect.Effect<Membership, ApiError | DecodeError>
+    ) => Effect.Effect<ProjectMember, ApiError | DecodeError>
     readonly removeMember: (
-      projectId: number,
-      userId: number,
+      projectId: string,
+      userId: string,
     ) => Effect.Effect<void, ApiError>
     readonly listServices: Effect.Effect<
       ReadonlyArray<Service>,
@@ -133,6 +139,20 @@ export class ApiClient extends Context.Service<
       id: string,
     ) => Effect.Effect<
       ReadonlyArray<JobRun>,
+      ApiError | DecodeError
+    >
+    readonly getNodeMetrics: Effect.Effect<
+      NodeSnapshot,
+      ApiError | DecodeError
+    >
+    readonly listWorkloads: Effect.Effect<
+      ReadonlyArray<WorkloadView>,
+      ApiError | DecodeError
+    >
+    readonly listServiceRequests: (
+      id: string,
+    ) => Effect.Effect<
+      ReadonlyArray<AccessEntry>,
       ApiError | DecodeError
     >
   }
@@ -395,17 +415,17 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseDeleteResponse(response)
       })
 
-    const listMembers = (projectId: number) =>
+    const listMembers = (projectId: string) =>
       Effect.gen(function* () {
         const response = yield* http
           .get(url(`/v1/projects/${projectId}/members`), {
             headers: authHeaders(),
           })
           .pipe(Effect.mapError(httpError))
-        return yield* parseResponse(response, Schema.Array(Membership))
+        return yield* parseResponse(response, ProjectMembers)
       })
 
-    const addMember = (projectId: number, userId: number, role: Role) =>
+    const addMember = (projectId: string, userId: string, role: Role) =>
       Effect.gen(function* () {
         const response = yield* http
           .post(url(`/v1/projects/${projectId}/members`), {
@@ -416,10 +436,10 @@ export const ApiClientLive = Layer.effect(ApiClient)(
             body: jsonBody({ user_id: userId, role }),
           })
           .pipe(Effect.mapError(httpError))
-        return yield* parseResponse(response, Membership)
+        return yield* parseResponse(response, ProjectMember)
       })
 
-    const removeMember = (projectId: number, userId: number) =>
+    const removeMember = (projectId: string, userId: string) =>
       Effect.gen(function* () {
         const response = yield* http
           .del(url(`/v1/projects/${projectId}/members/${userId}`), {
@@ -635,6 +655,30 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, JobRuns)
       })
 
+    const getNodeMetrics = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/metrics/node'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, NodeSnapshot)
+    })
+
+    const listWorkloads = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/workloads'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, WorkloadViews)
+    })
+
+    const listServiceRequests = (id: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/services/${id}/requests`), {
+            headers: authHeaders(),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, AccessEntries)
+      })
+
     return {
       listNodes,
       login,
@@ -668,6 +712,9 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       deleteJob,
       runJob,
       listJobRuns,
+      getNodeMetrics,
+      listWorkloads,
+      listServiceRequests,
     }
   }),
 )
