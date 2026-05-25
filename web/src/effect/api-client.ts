@@ -6,6 +6,10 @@ import {
   ApiToken,
   Deployment,
   Deployments,
+  Job,
+  JobRun,
+  JobRuns,
+  Jobs,
   LoginResult,
   Me,
   Membership,
@@ -112,6 +116,25 @@ export class ApiClient extends Context.Service<
       ApiError | DecodeError
     >
     readonly getIngressConfig: Effect.Effect<string, ApiError>
+    readonly listJobs: (
+      projectId: string,
+    ) => Effect.Effect<ReadonlyArray<Job>, ApiError | DecodeError>
+    readonly getJob: (
+      id: string,
+    ) => Effect.Effect<Job, ApiError | DecodeError>
+    readonly createJob: (
+      input: Job,
+    ) => Effect.Effect<Job, ApiError | DecodeError>
+    readonly deleteJob: (id: string) => Effect.Effect<void, ApiError>
+    readonly runJob: (
+      id: string,
+    ) => Effect.Effect<JobRun, ApiError | DecodeError>
+    readonly listJobRuns: (
+      id: string,
+    ) => Effect.Effect<
+      ReadonlyArray<JobRun>,
+      ApiError | DecodeError
+    >
   }
 >()('ApiClient') {}
 
@@ -554,6 +577,64 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       return yield* parseTextResponse(response)
     })
 
+    const listJobs = (projectId: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/jobs?project_id=${projectId}`), {
+            headers: authHeaders(),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Jobs)
+      })
+
+    const getJob = (id: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/jobs/${id}`), { headers: authHeaders() })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Job)
+      })
+
+    const createJob = (input: Job) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url('/v1/jobs'), {
+            headers: {
+              ...authHeaders(),
+              'content-type': 'application/json',
+            },
+            body: jsonBody(input),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Job)
+      })
+
+    const deleteJob = (id: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .del(url(`/v1/jobs/${id}`), { headers: authHeaders() })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseDeleteResponse(response)
+      })
+
+    const runJob = (id: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url(`/v1/jobs/${id}/run`), {
+            headers: authHeaders(),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, JobRun)
+      })
+
+    const listJobRuns = (id: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/jobs/${id}/runs`), { headers: authHeaders() })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, JobRuns)
+      })
+
     return {
       listNodes,
       login,
@@ -581,6 +662,12 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       putService,
       listRoutes,
       getIngressConfig,
+      listJobs,
+      getJob,
+      createJob,
+      deleteJob,
+      runJob,
+      listJobRuns,
     }
   }),
 )
