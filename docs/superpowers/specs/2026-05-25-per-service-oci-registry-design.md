@@ -20,7 +20,8 @@ TODO.md item 16: "OCI registry should be able to be configured on each service"
 ## Goals
 
 - A reusable, project-scoped **Registry** entity that services reference by id.
-- Four auth kinds: `Basic`, `Token` (bearer), `EcrToken`, `GarToken`. ECR/GAR
+- Four credential-bearing auth kinds — `Basic`, `Token` (bearer), `EcrToken`,
+  `GarToken` — plus `Anonymous` for public registries. ECR/GAR
   use pre-minted tokens stored in SOPS (operator rotates externally); no AWS/GCP
   SDK dependency is added.
 - Backwards compatibility: existing services keep their full `image` reference
@@ -119,7 +120,7 @@ argument; it uses the passed `auth` directly.
 New resolver in `src/oci/credentials.rs`:
 
 ```rust
-pub fn resolve_auth(
+pub fn resolve_registry_auth(  // distinct from auth::resolve_auth (principal resolution)
     kind: RegistryAuthKind,
     payload: Option<&SecretPayload>,
 ) -> Result<RegistryAuth, OciError> {
@@ -142,7 +143,7 @@ pub fn resolve_auth(
 
 - `RegistryCredentialProvider` trait + `StaticCredentialProvider` deleted (unused).
 - `src/oci/ecr.rs`, `src/oci/gar.rs` env-var providers deleted. ECR/GAR become
-  plain auth-kinds resolved via `resolve_auth` from a SOPS-stored pre-minted
+  plain auth-kinds resolved via `resolve_registry_auth` from a SOPS-stored pre-minted
   token.
 - Cargo features `ecr` / `gar` removed (no gated provider code remains).
 
@@ -204,8 +205,10 @@ DELETE /v1/projects/{project_id}/registries/{id}
 `deploy_external_image_source` resolves auth before acquire:
 
 1. If `registry_id` set: load `Registry`, decrypt `credential_ref` via
-   `SopsSecretStore`, `resolve_auth(kind, payload)`, compose
-   `{endpoint}/{image_ref}`.
+   `SopsSecretStore::decrypt` (needs `&dyn CommandRunner` + `config.sops_binary`;
+   thread the store's data dir + sops binary into `deploy_external_image_source`,
+   which already receives `runner`), then `resolve_registry_auth(kind, payload)`,
+   compose `{endpoint}/{image_ref}`.
 2. Legacy path (`image` set): `RegistryAuth::Anonymous` (or `Basic` from legacy
    `credential` if present).
 3. Pass `(full_ref, auth)` into the acquirer.
@@ -226,7 +229,7 @@ Write tests before implementation (TDD):
 
 - **`domain.rs`**: `Registry` validation; `ExternalImageSource` ambiguity matrix
   (both / neither / new / legacy); ref composition `{endpoint}/{image_ref}`.
-- **`oci/credentials.rs`**: `resolve_auth` per kind — Basic split, malformed
+- **`oci/credentials.rs`**: `resolve_registry_auth` per kind — Basic split, malformed
   `user:password`, missing payload errors, ECR/GAR user mapping.
 - **`state.rs`**: registry CRUD; dup `(project_id, name)` rejected;
   `delete_registry` blocked when referenced (`RegistryInUse`); migration v5→v6
@@ -243,7 +246,7 @@ Write tests before implementation (TDD):
 
 - Decrypted SOPS payload is never logged; `Registry` and API responses carry
   only the `SecretRef` name.
-- `resolve_auth` errors are generic ("credential invalid" / "needs credential")
+- `resolve_registry_auth` errors are generic ("credential invalid" / "needs credential")
   — no payload contents in error text.
 - Decrypt happens at deploy time; the payload is dropped after the pull.
 
