@@ -394,6 +394,106 @@ describe('Job schemas', () => {
   )
 })
 
+describe('ApiClient jobs', () => {
+  const jobsMock = Layer.succeed(ApiClient)({
+    listNodes: emptyApi() as never,
+    login: ((_u: string, _p: string) => emptyApi()) as never,
+    logout: emptyApi() as never,
+    me: emptyApi() as never,
+    listUsers: emptyApi() as never,
+    createUser: ((_u: string, _p: string) => emptyApi()) as never,
+    deleteUser: ((_id: number) => emptyApi()) as never,
+    listApiTokens: emptyApi() as never,
+    createApiToken: ((_n: string) => emptyApi()) as never,
+    deleteApiToken: ((_id: number) => emptyApi()) as never,
+    listMembers: ((_pid: number) => emptyApi()) as never,
+    addMember: ((_pid: number, _uid: number, _r: string) => emptyApi()) as never,
+    removeMember: ((_pid: number, _uid: number) => emptyApi()) as never,
+    listServices: emptyApi() as never,
+    getServiceDeployments: ((_id: number) => emptyApi()) as never,
+    getServiceLogs: ((_id: number) => emptyApi()) as never,
+    getServiceMetrics: ((_id: number) => emptyApi()) as never,
+    createDeployment: ((_input: { service_id: number }) => emptyApi()) as never,
+    stopService: ((_id: number) => emptyApi()) as never,
+    listProjects: emptyApi() as never,
+    getProject: ((_id: string) => emptyApi()) as never,
+    createProject: ((_input: never) => emptyApi()) as never,
+    deleteProject: ((_id: string) => emptyApi()) as never,
+    putService: ((_svc: unknown) => emptyApi()) as never,
+    listRoutes: emptyApi() as never,
+    getIngressConfig: emptyApi() as never,
+    listJobs: ((_pid: string) =>
+      Effect.succeed([FIXTURE_JOB] as ReadonlyArray<typeof FIXTURE_JOB>)) as never,
+    getJob: ((_id: string) => Effect.succeed(FIXTURE_JOB)) as never,
+    createJob: ((_input: never) => Effect.succeed(FIXTURE_JOB)) as never,
+    deleteJob: ((_id: string) => Effect.void) as never,
+    runJob: ((_id: string) => Effect.succeed(FIXTURE_JOB_RUN)) as never,
+    listJobRuns: ((_id: string) =>
+      Effect.succeed([FIXTURE_JOB_RUN] as ReadonlyArray<typeof FIXTURE_JOB_RUN>)) as never,
+  })
+
+  it.effect('jobs methods exist on ApiClient', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      expect(typeof api.listJobs).toBe('function')
+      expect(typeof api.getJob).toBe('function')
+      expect(typeof api.createJob).toBe('function')
+      expect(typeof api.deleteJob).toBe('function')
+      expect(typeof api.runJob).toBe('function')
+      expect(typeof api.listJobRuns).toBe('function')
+    }).pipe(Effect.provide(jobsMock)),
+  )
+
+  it.effect('listJobs decodes an array of jobs', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      const jobs = yield* api.listJobs('p1')
+      expect(jobs.length).toBe(1)
+      expect(jobs[0].name).toBe('daily-backup')
+    }).pipe(Effect.provide(jobsMock)),
+  )
+
+  it.effect('getJob returns a single job', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      const job = yield* api.getJob('j1')
+      expect(job.name).toBe('daily-backup')
+    }).pipe(Effect.provide(jobsMock)),
+  )
+
+  it.effect('createJob returns created job', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      const job = yield* api.createJob({ name: 'test' } as never)
+      expect(job.name).toBe('daily-backup')
+    }).pipe(Effect.provide(jobsMock)),
+  )
+
+  it.effect('deleteJob succeeds', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      yield* api.deleteJob('j1')
+    }).pipe(Effect.provide(jobsMock)),
+  )
+
+  it.effect('runJob returns a JobRun', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      const run = yield* api.runJob('j1')
+      expect(run.status).toBe('Succeeded')
+    }).pipe(Effect.provide(jobsMock)),
+  )
+
+  it.effect('listJobRuns decodes an array of runs', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      const runs = yield* api.listJobRuns('j1')
+      expect(runs.length).toBe(1)
+      expect(runs[0].attempt).toBe(1)
+    }).pipe(Effect.provide(jobsMock)),
+  )
+})
+
 describe('ArtifactRef schema', () => {
   const FIXTURE_DEPLOY_WITH_ARTIFACT = {
     id: 1,
