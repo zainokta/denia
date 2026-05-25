@@ -148,6 +148,10 @@ user session / API token issued by `/v1/auth/login` (ADR-008).
 | `GET` | `/v1/services/{id}/logs` | operator | Service logs |
 | `GET` | `/v1/services/{id}/metrics` | viewer | cgroup snapshots |
 | `GET` | `/v1/services/{id}/requests` | operator | Recent access-log entries |
+| `GET` / `POST` | `/v1/services/{id}/domains` | viewer / operator | List / add a domain (HTTP-verified before routing) |
+| `POST` | `/v1/services/{id}/domains/{domain_id}/verify` | operator | Trigger HTTP file verification (409 if in flight) |
+| `DELETE` | `/v1/services/{id}/domains/{domain_id}` | operator | Remove a domain |
+| `GET` | `/.well-known/denia-challenge/{token}` | public | Verification challenge file (no auth; token is the secret) |
 | `POST` | `/v1/services/{id}/{action}` | operator | Lifecycle (`stop`) |
 | `GET` | `/v1/jobs?project_id=...` | viewer | List jobs |
 | `POST` | `/v1/jobs` | operator | Create a job (cron or manual) |
