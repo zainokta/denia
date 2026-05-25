@@ -27,7 +27,7 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-
 tower = "0.5"
 uuid = { version = "1", features = ["serde", "v7"] }
 zstd = "0.13.3"
-reqwest = { version = "0.12", default-features = false, features = ["http2"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["http2"] }
 subtle = "2"
 
 [features]
