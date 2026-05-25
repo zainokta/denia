@@ -623,11 +623,17 @@ pub async fn deploy_external_image_source(
             .map_err(|_| DeployError::UnsupportedServiceSource)?;
         (full_ref, auth)
     } else {
-        // legacy full-image path
+        // legacy full-image path: decrypt legacy `credential` as Basic if present, else Anonymous
         let (full_ref, _) = source.resolve_ref("")
             .map_err(|_| DeployError::UnsupportedServiceSource)?;
         let auth = match &source.credential {
-            Some(_secret_ref) => oci_client::secrets::RegistryAuth::Anonymous, // legacy creds unsupported beyond anon; keep behavior
+            Some(secret_ref) => {
+                let payload = secret_store.decrypt(runner, sops_binary, secret_ref).await?;
+                crate::oci::credentials::resolve_registry_auth(
+                    crate::domain::RegistryAuthKind::Basic,
+                    Some(&payload),
+                )?
+            }
             None => oci_client::secrets::RegistryAuth::Anonymous,
         };
         (full_ref, auth)
