@@ -10,8 +10,6 @@ pub struct AppConfig {
     pub data_dir: PathBuf,
     pub buildkit_binary: PathBuf,
     pub sops_binary: PathBuf,
-    pub registry_pull_binary: PathBuf,
-    pub oci_unpack_binary: PathBuf,
     pub runtime_dir: PathBuf,
     pub cgroup_root: PathBuf,
     pub artifact_dir: PathBuf,
@@ -23,6 +21,7 @@ pub struct AppConfig {
     pub acme_resolver: String,
     pub control_domain: Option<String>,
     pub control_tls: bool,
+    pub node_disk_path: PathBuf,
 }
 
 #[derive(Debug, Error)]
@@ -51,12 +50,6 @@ impl AppConfig {
         );
         let sops_binary =
             PathBuf::from(env::var("DENIA_SOPS_BINARY").unwrap_or_else(|_| "sops".to_string()));
-        let registry_pull_binary = PathBuf::from(
-            env::var("DENIA_REGISTRY_PULL_BINARY").unwrap_or_else(|_| "skopeo".to_string()),
-        );
-        let oci_unpack_binary = PathBuf::from(
-            env::var("DENIA_OCI_UNPACK_BINARY").unwrap_or_else(|_| "umoci".to_string()),
-        );
         let runtime_dir = data_dir.join("runtime");
         let cgroup_root = env::var("DENIA_CGROUP_ROOT")
             .map(PathBuf::from)
@@ -83,6 +76,9 @@ impl AppConfig {
         let control_tls = env::var("DENIA_CONTROL_TLS")
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false);
+        let node_disk_path = env::var("DENIA_NODE_DISK_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| data_dir.clone());
 
         Ok(Self {
             bind_addr,
@@ -91,8 +87,6 @@ impl AppConfig {
             data_dir,
             buildkit_binary,
             sops_binary,
-            registry_pull_binary,
-            oci_unpack_binary,
             runtime_dir,
             cgroup_root,
             artifact_dir,
@@ -104,6 +98,7 @@ impl AppConfig {
             acme_resolver,
             control_domain,
             control_tls,
+            node_disk_path,
         })
     }
 
@@ -116,8 +111,6 @@ impl AppConfig {
             data_dir: data_dir.clone(),
             buildkit_binary: PathBuf::from("buildctl"),
             sops_binary: PathBuf::from("sops"),
-            registry_pull_binary: PathBuf::from("skopeo"),
-            oci_unpack_binary: PathBuf::from("umoci"),
             runtime_dir: data_dir.join("runtime"),
             cgroup_root: data_dir.join("cgroup"),
             artifact_dir: data_dir.join("artifacts"),
@@ -129,6 +122,7 @@ impl AppConfig {
             acme_resolver: "le".to_string(),
             control_domain: None,
             control_tls: false,
+            node_disk_path: data_dir,
         }
     }
 }

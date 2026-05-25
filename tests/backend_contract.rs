@@ -162,15 +162,51 @@ async fn artifact_acquirer_builds_git_source_with_buildkit() {
 
 #[tokio::test]
 async fn artifact_acquirer_pulls_external_image() {
-    let runner = FakeCommandRunner::new(vec![CommandOutput {
-        status: 0,
-        stdout: "sha256:pull123\n".to_string(),
-        stderr: String::new(),
-    }]);
-    let acquirer = ArtifactAcquirer::new(AppConfig::for_test("test-token"));
+    use async_trait::async_trait;
+    use denia::oci::{
+        LayerBlob, OciError, OciImagePuller, OciRootfsUnpacker, PulledImage,
+        config::OciImageConfig as OciCfg, config::OciImageProcessConfig,
+    };
+    use std::sync::Arc;
+
+    struct FakePuller;
+    #[async_trait]
+    impl OciImagePuller for FakePuller {
+        async fn pull(&self, _image: &str) -> Result<PulledImage, OciError> {
+            Ok(PulledImage {
+                digest: "sha256:pull123".to_string(),
+                config: OciCfg {
+                    config: Some(OciImageProcessConfig {
+                        entrypoint: Some(vec!["/app".to_string()]),
+                        cmd: None,
+                        env_vars: None,
+                        working_dir: None,
+                    }),
+                    rootfs: None,
+                },
+                layers: vec![],
+            })
+        }
+        async fn read_layout(&self, _dir: &std::path::Path) -> Result<PulledImage, OciError> {
+            unreachable!()
+        }
+    }
+    struct NoopUnpacker;
+    impl OciRootfsUnpacker for NoopUnpacker {
+        fn unpack(&self, _layers: &[LayerBlob], rootfs: &std::path::Path) -> Result<(), OciError> {
+            std::fs::create_dir_all(rootfs).map_err(OciError::Io)
+        }
+    }
+
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let mut config = AppConfig::for_test("test-token");
+    config.artifact_dir = tmp.path().to_path_buf();
+    let runner = FakeCommandRunner::new(vec![]);
+    let acquirer =
+        ArtifactAcquirer::with_traits(config, Arc::new(FakePuller), Arc::new(NoopUnpacker));
 
     let artifact = acquirer
-        .acquire(
+        .acquire_rootfs_bundle_from_image_config(
             &runner,
             ArtifactAcquireRequest::ExternalImage {
                 image: "ghcr.io/acme/web:latest".to_string(),
@@ -180,7 +216,7 @@ async fn artifact_acquirer_pulls_external_image() {
         .expect("artifact");
 
     assert_eq!(artifact.digest, "sha256:pull123");
-    assert!(runner.commands()[0].contains("copy docker://ghcr.io/acme/web:latest"));
+    assert_eq!(artifact.kind, ArtifactKind::RootfsBundle);
 }
 
 #[test]

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -5,6 +7,10 @@ use crate::{
     artifacts::{ArtifactError, ArtifactKind, ArtifactRecord, ArtifactSource},
     command::{CommandError, CommandRunner},
     config::AppConfig,
+    oci::{
+        OciError, OciImagePuller, OciRootfsUnpacker, credentials::StaticCredentialProvider,
+        registry::RegistryImagePuller, unpack::TarRootfsUnpacker,
+    },
     syscall,
 };
 
@@ -59,16 +65,37 @@ pub enum ArtifactAcquireError {
     MissingProcessArgv,
     #[error("image config environment entry is invalid: {entry}")]
     InvalidEnvironmentEntry { entry: String },
+    #[error("oci error: {0}")]
+    Oci(#[from] OciError),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ArtifactAcquirer {
     config: AppConfig,
+    puller: Arc<dyn OciImagePuller>,
+    unpacker: Arc<dyn OciRootfsUnpacker>,
 }
 
 impl ArtifactAcquirer {
     pub fn new(config: AppConfig) -> Self {
-        Self { config }
+        let credentials = Arc::new(StaticCredentialProvider::new());
+        Self {
+            config,
+            puller: Arc::new(RegistryImagePuller::new(credentials)),
+            unpacker: Arc::new(TarRootfsUnpacker::new()),
+        }
+    }
+
+    pub fn with_traits(
+        config: AppConfig,
+        puller: Arc<dyn OciImagePuller>,
+        unpacker: Arc<dyn OciRootfsUnpacker>,
+    ) -> Self {
+        Self {
+            config,
+            puller,
+            unpacker,
+        }
     }
 
     pub async fn acquire(
@@ -108,7 +135,7 @@ impl ArtifactAcquirer {
     ) -> Result<ArtifactRecord, ArtifactAcquireError> {
         let image_artifact = self.acquire(runner, request).await?;
         let bundle_dir = self
-            .materialize_rootfs_bundle(runner, &image_artifact)
+            .materialize_rootfs_bundle_inprocess(&image_artifact)
             .await?;
         std::fs::write(
             bundle_dir.join("process.json"),
@@ -128,23 +155,83 @@ impl ArtifactAcquirer {
         runner: &dyn CommandRunner,
         request: ArtifactAcquireRequest,
     ) -> Result<ArtifactRecord, ArtifactAcquireError> {
-        let image_artifact = self.acquire(runner, request).await?;
-        let bundle_dir = self
-            .materialize_rootfs_bundle(runner, &image_artifact)
-            .await?;
-        let config = self.inspect_image_config(runner).await?;
-        let process = RootfsBundleSpec::try_from(config)?;
+        match &request {
+            ArtifactAcquireRequest::ExternalImage { image } => {
+                let source = ArtifactSource::ExternalRegistry {
+                    image: image.clone(),
+                };
+                self.pull_and_unpack_external(&source).await
+            }
+            ArtifactAcquireRequest::Git { .. } => {
+                let image_artifact = self.acquire(runner, request).await?;
+                let _bundle_dir = self
+                    .materialize_rootfs_bundle_inprocess(&image_artifact)
+                    .await?;
+                ArtifactRecord::new(
+                    image_artifact.digest,
+                    ArtifactKind::RootfsBundle,
+                    image_artifact.source,
+                )
+                .map_err(ArtifactAcquireError::Artifact)
+            }
+        }
+    }
+
+    async fn pull_and_unpack_external(
+        &self,
+        source: &ArtifactSource,
+    ) -> Result<ArtifactRecord, ArtifactAcquireError> {
+        let ArtifactSource::ExternalRegistry { image } = source else {
+            unreachable!();
+        };
+        let pulled = self.puller.pull(image).await?;
+        let digest = if pulled.digest.is_empty() {
+            short_digest(image)
+        } else {
+            pulled.digest.clone()
+        };
+        let bundle_dir = self.write_bundle(&digest, &pulled.layers)?;
+        let process = rootfs_bundle_from_oci_config(&pulled.config)?;
         std::fs::write(
             bundle_dir.join("process.json"),
             serde_json::to_vec_pretty(&process)?,
         )?;
+        ArtifactRecord::new(digest, ArtifactKind::RootfsBundle, source.clone())
+            .map_err(ArtifactAcquireError::Artifact)
+    }
 
-        ArtifactRecord::new(
-            image_artifact.digest,
-            ArtifactKind::RootfsBundle,
-            image_artifact.source,
-        )
-        .map_err(ArtifactAcquireError::Artifact)
+    async fn materialize_rootfs_bundle_inprocess(
+        &self,
+        artifact: &ArtifactRecord,
+    ) -> Result<std::path::PathBuf, ArtifactAcquireError> {
+        let layout = self.config.artifact_dir.clone();
+        let pulled = self.puller.read_layout(&layout).await?;
+        let bundle_dir = self.write_bundle(&artifact.digest, &pulled.layers)?;
+        let process = rootfs_bundle_from_oci_config(&pulled.config)?;
+        std::fs::write(
+            bundle_dir.join("process.json"),
+            serde_json::to_vec_pretty(&process)?,
+        )?;
+        Ok(bundle_dir)
+    }
+
+    fn write_bundle(
+        &self,
+        digest: &str,
+        layers: &[crate::oci::LayerBlob],
+    ) -> Result<std::path::PathBuf, ArtifactAcquireError> {
+        let bundle_dir = self.config.artifact_dir.join(safe_artifact_name(digest));
+        std::fs::create_dir_all(&bundle_dir)?;
+        let rootfs = bundle_dir.join("rootfs");
+        self.unpacker.unpack(layers, &rootfs)?;
+        let base = self.config.userns_base;
+        if let Err(error) = syscall::chown::recursive_lchown(&rootfs, base, base) {
+            let io_err = error.to_string();
+            if !io_err.contains("Operation not permitted") {
+                return Err(ArtifactAcquireError::Io(std::io::Error::other(io_err)));
+            }
+        }
+        Ok(bundle_dir)
     }
 
     async fn acquire_git(
@@ -187,89 +274,45 @@ impl ArtifactAcquirer {
 
     async fn acquire_external_image(
         &self,
-        runner: &dyn CommandRunner,
+        _runner: &dyn CommandRunner,
         source: &ArtifactSource,
     ) -> Result<String, ArtifactAcquireError> {
         let ArtifactSource::ExternalRegistry { image } = source else {
             unreachable!("external image acquisition requires a registry source");
         };
-        let from = format!("docker://{image}");
-        let to = format!("oci:{}", self.config.artifact_dir.to_string_lossy());
-        let program = self.config.registry_pull_binary.to_string_lossy();
-        let args = ["copy", from.as_str(), to.as_str()];
-
-        let output = runner.run(program.as_ref(), &args).await?;
-        Ok(output.stdout.trim().to_string())
-    }
-
-    async fn materialize_rootfs_bundle(
-        &self,
-        runner: &dyn CommandRunner,
-        artifact: &ArtifactRecord,
-    ) -> Result<std::path::PathBuf, ArtifactAcquireError> {
-        let bundle_name = safe_artifact_name(&artifact.digest);
-        let bundle_dir = self.config.artifact_dir.join(bundle_name);
-        std::fs::create_dir_all(&bundle_dir)?;
-
-        let image = format!("oci:{}", self.config.artifact_dir.to_string_lossy());
-        let bundle = bundle_dir.to_string_lossy();
-        let program = self.config.oci_unpack_binary.to_string_lossy();
-        runner
-            .run(
-                program.as_ref(),
-                &["unpack", "--image", image.as_str(), bundle.as_ref()],
-            )
-            .await?;
-        std::fs::create_dir_all(bundle_dir.join("rootfs"))?;
-
-        let base = self.config.userns_base;
-        let rootfs = bundle_dir.join("rootfs");
-        syscall::chown::recursive_lchown(&rootfs, base, base)
-            .map_err(|e| ArtifactAcquireError::Io(std::io::Error::other(e.to_string())))?;
-
-        Ok(bundle_dir)
-    }
-
-    async fn inspect_image_config(
-        &self,
-        runner: &dyn CommandRunner,
-    ) -> Result<OciImageConfig, ArtifactAcquireError> {
-        let image = format!("oci:{}", self.config.artifact_dir.to_string_lossy());
-        let program = self.config.registry_pull_binary.to_string_lossy();
-        let output = runner
-            .run(program.as_ref(), &["inspect", "--config", image.as_str()])
-            .await?;
-        Ok(serde_json::from_str(&output.stdout)?)
+        let pulled = self.puller.pull(image).await?;
+        if pulled.digest.is_empty() {
+            Ok(short_digest(image))
+        } else {
+            Ok(pulled.digest)
+        }
     }
 }
 
-impl TryFrom<OciImageConfig> for RootfsBundleSpec {
-    type Error = ArtifactAcquireError;
-
-    fn try_from(value: OciImageConfig) -> Result<Self, Self::Error> {
-        let mut argv = value.config.entrypoint;
-        argv.extend(value.config.cmd);
-        if argv.is_empty() {
-            return Err(ArtifactAcquireError::MissingProcessArgv);
+fn rootfs_bundle_from_oci_config(
+    cfg: &crate::oci::config::OciImageConfig,
+) -> Result<RootfsBundleSpec, ArtifactAcquireError> {
+    let oci_spec = crate::oci::config::RootfsBundleSpec::try_from(cfg).map_err(|e| match e {
+        crate::oci::config::ConfigError::MissingProcessConfig
+        | crate::oci::config::ConfigError::MissingProcessArgv => {
+            ArtifactAcquireError::MissingProcessArgv
         }
-
-        let mut env = Vec::new();
-        for entry in value.config.env {
-            let Some((key, value)) = entry.split_once('=') else {
-                return Err(ArtifactAcquireError::InvalidEnvironmentEntry { entry });
-            };
-            if key.is_empty() {
-                return Err(ArtifactAcquireError::InvalidEnvironmentEntry { entry });
-            }
-            env.push((key.to_string(), value.to_string()));
+        crate::oci::config::ConfigError::InvalidEnvironmentEntry(entry) => {
+            ArtifactAcquireError::InvalidEnvironmentEntry { entry }
         }
+    })?;
+    Ok(RootfsBundleSpec {
+        argv: oci_spec.argv,
+        env: oci_spec.env,
+        workdir: oci_spec.workdir,
+    })
+}
 
-        Ok(Self {
-            argv,
-            env,
-            workdir: value.config.workdir,
-        })
-    }
+fn short_digest(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(input.as_bytes());
+    format!("sha256:{}", hex::encode(h.finalize()))
 }
 
 fn safe_artifact_name(digest: &str) -> String {

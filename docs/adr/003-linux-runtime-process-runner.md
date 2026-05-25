@@ -21,8 +21,8 @@ The runner must keep host root as the trust boundary, place workloads into Denia
 - Runtime input must reference a `RootfsBundle` artifact.
 - Rootfs bundles live under `artifact_dir/<safe-digest>/rootfs`.
 - Each bundle has `process.json`, containing `argv`, `env`, and `workdir`.
-- External images are copied into the local OCI layout with `skopeo`, then unpacked into the rootfs bundle directory with `umoci unpack`.
-- Git/Dockerfile builds export OCI layout output from BuildKit, then use the same `umoci unpack` rootfs bundle path.
+- External images are pulled in-process via `oci-client` (`OciImagePuller`) and unpacked into the rootfs bundle directory with the in-process `TarRootfsUnpacker` (`OciRootfsUnpacker`). See ADR-011 for the in-process OCI acquisition.
+- Git/Dockerfile builds export OCI layout output from BuildKit, then use `OciImagePuller::read_layout` + the in-process `TarRootfsUnpacker` to materialize the rootfs bundle (no `umoci`).
 - Rootfs bundle ownership is adjusted to the configured host user-namespace base uid/gid so container uid/gid 0 maps to non-host-root ownership.
 - `process.json` is derived from OCI image config `Entrypoint`, `Cmd`, `Env`, and `WorkingDir` when Denia materializes an external image bundle.
 - The deployment coordinator has external-image and Git paths that materialize a rootfs bundle before calling `Runtime::start`.
@@ -96,7 +96,7 @@ The normal test suite verifies planning, path safety, and cgroup file preparatio
 ### Negative
 
 - `unshare` is currently used as the namespace launcher binary, so hosts must provide util-linux.
-- Hosts must provide `skopeo` and `umoci` for external image acquisition and unpacking.
+- External image acquisition and unpacking are now in-process (`oci-client` + `TarRootfsUnpacker`); `skopeo` and `umoci` are no longer host dependencies (ADR-011 amendment).
 - Runtime launch now depends on the Denia binary being callable in host-side `__denia_cgroup_launcher` mode before entering `unshare`.
 - The injected `/.denia/socket-proxy` must be usable inside the target rootfs. A fully static Denia release binary is the expected production packaging shape for scratch/distroless images.
 - Broader network device setup, veth links, and DNS policy inside the workload network namespace are not yet complete.
