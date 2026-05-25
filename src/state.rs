@@ -266,6 +266,15 @@ impl SqliteStore {
             .map_err(Into::into)
     }
 
+    pub fn clear_promoted_deployment(&self, service_id: Uuid) -> Result<(), StateError> {
+        let connection = self.connection()?;
+        connection.execute(
+            "DELETE FROM promoted_deployments WHERE service_id = ?1",
+            params![service_id.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn put_artifact(&self, artifact: ArtifactRecord) -> Result<ArtifactRecord, StateError> {
         let connection = self.connection()?;
         connection.execute(

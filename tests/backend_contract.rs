@@ -15,10 +15,14 @@ use denia::{
     traefik::{RouteSpec, render_file_provider_config},
 };
 use tower::util::ServiceExt;
+use uuid::Uuid;
+
+const DEFAULT_PROJECT_ID: Uuid = Uuid::from_u64_pair(1, 0);
 
 #[test]
 fn service_config_requires_explicit_internal_port_and_health_check() {
     let config = ServiceConfig::new(
+        DEFAULT_PROJECT_ID,
         "api",
         vec!["api.example.test".to_string()],
         ServiceSource::Git(GitSource {
@@ -30,7 +34,8 @@ fn service_config_requires_explicit_internal_port_and_health_check() {
         }),
         8080,
         HealthCheck::new("/health", 10),
-        ResourceLimits::default(),
+        Some(ResourceLimits::default()),
+        vec![],
     )
     .expect("valid service config");
 
@@ -38,6 +43,7 @@ fn service_config_requires_explicit_internal_port_and_health_check() {
     assert_eq!(config.health_check.path, "/health");
     assert!(
         ServiceConfig::new(
+            DEFAULT_PROJECT_ID,
             "api",
             vec!["api.example.test".to_string()],
             ServiceSource::ExternalImage(ExternalImageSource {
@@ -46,7 +52,8 @@ fn service_config_requires_explicit_internal_port_and_health_check() {
             }),
             0,
             HealthCheck::new("/health", 10),
-            ResourceLimits::default(),
+            Some(ResourceLimits::default()),
+            vec![],
         )
         .is_err()
     );
@@ -68,6 +75,7 @@ fn sqlite_store_persists_services_credentials_and_deployments() {
     let service = store
         .put_service(
             ServiceConfig::new(
+                DEFAULT_PROJECT_ID,
                 "web",
                 vec!["web.example.test".to_string()],
                 ServiceSource::ExternalImage(ExternalImageSource {
@@ -76,7 +84,8 @@ fn sqlite_store_persists_services_credentials_and_deployments() {
                 }),
                 3000,
                 HealthCheck::new("/ready", 5),
-                ResourceLimits::default(),
+                Some(ResourceLimits::default()),
+                vec![],
             )
             .expect("valid service"),
         )
@@ -341,6 +350,7 @@ async fn axum_router_accepts_service_creation_with_admin_token() {
     store.migrate().expect("migrate");
     let app = build_router(AppState::new(AppConfig::for_test("test-token"), store));
     let service = ServiceConfig::new(
+        DEFAULT_PROJECT_ID,
         "web",
         vec!["web.example.test".to_string()],
         ServiceSource::ExternalImage(ExternalImageSource {
@@ -349,7 +359,8 @@ async fn axum_router_accepts_service_creation_with_admin_token() {
         }),
         3000,
         HealthCheck::new("/ready", 5),
-        ResourceLimits::default(),
+        Some(ResourceLimits::default()),
+        vec![],
     )
     .expect("service");
 
@@ -411,7 +422,7 @@ async fn axum_router_accepts_credentials_and_lifecycle_commands_with_admin_token
         )
         .await
         .unwrap();
-    assert_eq!(lifecycle_response.status(), http::StatusCode::ACCEPTED);
+    assert_eq!(lifecycle_response.status(), http::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

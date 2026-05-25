@@ -1,0 +1,241 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/*
+  Denia design system. North Star: "Stagecraft and Breakdown".
+  Mono-forward, dark-primary, flat-by-default. Pink/Violet are signal, never decoration.
+  Theme is driven by `html.dark` / `html.light` (set by ThemeToggle + inline init script).
+  Default (no class) = dark, because dark is primary.
+*/
+
+@theme {
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo,
+    Consolas, monospace;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+:root,
+html.dark {
+  /* Black-hole base, tinted toward violet */
+  --bg: oklch(16% 0.012 315);
+  --surface: oklch(21% 0.012 315);
+  --surface-2: oklch(25% 0.013 315);
+  --border: oklch(31% 0.012 315);
+  --fg: oklch(92% 0.008 315);
+  --fg-muted: oklch(70% 0.012 315);
+  /* Signal accents */
+  --pink: oklch(74% 0.15 350); /* Stagecraft: steady / primary action */
+  --violet: oklch(64% 0.15 305); /* Breakdown: fault / attention */
+  --warn: oklch(80% 0.13 75);
+  --ok: oklch(74% 0.13 150);
+  color-scheme: dark;
+}
+
+html.light {
+  --bg: oklch(97% 0.006 315);
+  --surface: oklch(99.5% 0.004 315);
+  --surface-2: oklch(94% 0.007 315);
+  --border: oklch(86% 0.009 315);
+  --fg: oklch(25% 0.013 315);
+  --fg-muted: oklch(46% 0.014 315);
+  --pink: oklch(53% 0.17 350);
+  --violet: oklch(48% 0.17 305);
+  --warn: oklch(58% 0.14 75);
+  --ok: oklch(50% 0.14 150);
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--fg);
+  background-color: var(--bg);
+  font-family: var(--font-mono);
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* The Aligned-Number Rule: metrics/IDs/ports/durations use tabular figures. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+a {
+  color: var(--pink);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+pre code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+}
+
+.page-wrap {
+  width: min(1080px, calc(100% - 2rem));
+  margin-inline: auto;
+}
+
+/* Prose runs in sans; mono is the default UI voice. */
+.prose-sans {
+  font-family: var(--font-sans);
+  line-height: 1.7;
+  max-width: 70ch;
+}
+
+/* Flat-by-default: tonal layering, 1px hairline, no shadow at rest. */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+/* Mono uppercase metadata label. */
+.kicker {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+
+/* Signal dot. Color carries state; never decorative. */
+.signal {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.signal-steady {
+  color: var(--pink);
+}
+.signal-fault {
+  color: var(--violet);
+}
+.signal-ok {
+  color: var(--ok);
+}
+.signal-warn {
+  color: var(--warn);
+}
+
+/* Buttons: rectangular, terminal-native. Primary = Stagecraft pink. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  border-radius: 6px;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: var(--surface-2);
+  text-decoration: none;
+}
+
+.btn-primary {
+  border-color: color-mix(in oklab, var(--pink) 55%, var(--border));
+  background: color-mix(in oklab, var(--pink) 14%, var(--surface));
+  color: var(--fg);
+}
+
+.btn-primary:hover {
+  background: color-mix(in oklab, var(--pink) 22%, var(--surface));
+}
+
+/* Nav link with state underline. */
+.nav-link {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.8125rem;
+  color: var(--fg-muted);
+}
+
+.nav-link::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -5px;
+  width: 100%;
+  height: 1px;
+  background: var(--pink);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.nav-link:hover,
+.nav-link.is-active {
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.nav-link:hover::after,
+.nav-link.is-active::after {
+  transform: scaleX(1);
+}
+
+/* Restrained, state-only motion. */
+.btn,
+.nav-link,
+a,
+.panel {
+  transition: background-color 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 150ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:focus-visible {
+  outline: 2px solid var(--pink);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Motion is never required to understand state. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
