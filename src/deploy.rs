@@ -264,26 +264,33 @@ where
             .map_err(|_| DeployError::BridgeLockPoisoned)?
             .assign(&service.name, socket_path.to_path_buf());
         routing.manager.activate(bridge_target.clone()).await?;
-        let yaml = {
-            let mut routes = routing
-                .routes
-                .lock()
-                .map_err(|_| DeployError::BridgeLockPoisoned)?;
-            routes.insert(
-                service.name.clone(),
-                RouteSpec {
-                    route_key: format!("svc-{}", service.id),
-                    service_name: service.name.clone(),
-                    domains: service.domains.clone(),
-                    bridge_port: bridge_target.port,
-                    tls: service.tls_enabled,
-                },
-            );
-            render_file_provider_config(
-                &routes.values().cloned().collect::<Vec<_>>(),
-                &routing.ingress_options,
-            )?
-        };
+
+        let hostnames = self.store.list_verified_hostnames(service.id)?;
+        if hostnames.is_empty() {
+            // No verified domains yet — bridge is allocated but Traefik is not told
+            // to route this service. A future verify call will not retroactively add
+            // the route either (the routes map has no entry to update); the operator
+            // can verify a domain before deploy, or re-deploy after verifying.
+            return Ok(());
+        }
+        let mut routes = routing
+            .routes
+            .lock()
+            .map_err(|_| DeployError::BridgeLockPoisoned)?;
+        routes.insert(
+            service.name.clone(),
+            RouteSpec {
+                route_key: format!("svc-{}", service.id),
+                service_name: service.name.clone(),
+                domains: hostnames,
+                bridge_port: bridge_target.port,
+                tls: service.tls_enabled,
+            },
+        );
+        let yaml = render_file_provider_config(
+            &routes.values().cloned().collect::<Vec<_>>(),
+            &routing.ingress_options,
+        )?;
         std::fs::write(&routing.traefik_config_path, yaml)?;
         Ok(())
     }
@@ -313,9 +320,38 @@ fn deployment_request(service: &ServiceConfig, artifact: &ArtifactRecord) -> Dep
     }
 }
 
-/// Stub. Task 12 replaces the body with the real implementation that filters
-/// verified domains from `service_domains` and re-renders the Traefik dynamic
-/// config file. For now it is a no-op so verify/delete handlers compile.
-pub fn rerender_traefik(_state: &crate::app::AppState) -> Result<(), DeployError> {
+pub fn rerender_traefik(state: &crate::app::AppState) -> Result<(), DeployError> {
+    let services = state.store.list_services()?;
+    let mut routes_guard = state
+        .routes
+        .lock()
+        .map_err(|_| DeployError::BridgeLockPoisoned)?;
+    let existing = routes_guard.clone();
+    routes_guard.clear();
+    for svc in services {
+        let hostnames = state.store.list_verified_hostnames(svc.id)?;
+        if hostnames.is_empty() {
+            continue;
+        }
+        let Some(prev) = existing.get(&svc.name) else {
+            // Service has never been routed (no bridge_port known). Stays unrouted.
+            continue;
+        };
+        routes_guard.insert(
+            svc.name.clone(),
+            RouteSpec {
+                route_key: prev.route_key.clone(),
+                service_name: svc.name.clone(),
+                domains: hostnames,
+                bridge_port: prev.bridge_port,
+                tls: svc.tls_enabled,
+            },
+        );
+    }
+    let yaml = render_file_provider_config(
+        &routes_guard.values().cloned().collect::<Vec<_>>(),
+        &state.ingress_options,
+    )?;
+    std::fs::write(&state.config.traefik_dynamic_config_path, yaml)?;
     Ok(())
 }

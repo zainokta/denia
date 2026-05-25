@@ -1,15 +1,33 @@
+use chrono::Utc;
 use denia::{
     artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource},
     bridge::{BridgeAllocator, BridgeTarget, FakeBridgeManager},
     deploy::{DeploymentCoordinator, DeploymentPlan},
     domain::{
-        DeploymentStatus, ExternalImageSource, HealthCheck, ResourceLimits, RuntimeStartRequest,
-        ServiceConfig, ServiceSource,
+        DeploymentStatus, DomainStatus, ExternalImageSource, HealthCheck, ResourceLimits,
+        RuntimeStartRequest, ServiceConfig, ServiceDomain, ServiceSource,
     },
     health::FakeHealthChecker,
     runtime::{FakeRuntime, Runtime},
     state::SqliteStore,
 };
+use uuid::Uuid;
+
+fn seed_verified_domain(store: &SqliteStore, service_id: Uuid, hostname: &str) {
+    store
+        .put_service_domain(&ServiceDomain {
+            id: Uuid::now_v7(),
+            service_id,
+            hostname: hostname.into(),
+            status: DomainStatus::Verified,
+            challenge_token: denia::domains::generate_token(),
+            verified_at: Some(Utc::now()),
+            last_check_at: None,
+            last_error: None,
+            created_at: Utc::now(),
+        })
+        .unwrap();
+}
 
 #[test]
 fn bridge_allocator_assigns_stable_loopback_ports() {
@@ -166,6 +184,8 @@ async fn coordinator_writes_traefik_config_on_promotion() {
         },
     )
     .expect("artifact");
+
+    seed_verified_domain(&store, service.id, "web.example.test");
 
     coordinator
         .deploy(DeploymentPlan { service, artifact })
