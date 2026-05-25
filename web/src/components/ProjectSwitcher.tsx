@@ -11,8 +11,8 @@ const listProjects = Effect.gen(function* () {
 
 export function ProjectSwitcher() {
   const navigate = useNavigate()
-  const search = useSearch({ strict: false }) as { project?: string }
-  const activeProject = search.project ?? ''
+  const search = useSearch({ strict: false }) as Record<string, string>
+  const activeProject = (search.project as string) ?? ''
 
   const { data: projects = [] } = useQuery({
     queryKey: ['projects'],
@@ -21,11 +21,12 @@ export function ProjectSwitcher() {
 
   const handleChange = (projectId: string) => {
     navigate({
+      to: '.',
       search: (prev: Record<string, string>) => ({
         ...prev,
         project: projectId || undefined,
       }),
-    })
+    } as never)
   }
 
   if (projects.length === 0) return null
