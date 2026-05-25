@@ -99,6 +99,7 @@ pub struct ServiceConfig {
 }
 
 impl ServiceConfig {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         project_id: Uuid,
         name: impl Into<String>,
@@ -213,6 +214,7 @@ pub struct Deployment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStartRequest {
     pub service_name: String,
+    pub service_id: Uuid,
     pub deployment_id: Uuid,
     pub artifact: crate::artifacts::ArtifactRecord,
     pub internal_port: u16,

@@ -16,7 +16,7 @@ use crate::{
     command::{CommandRunner, TokioCommandRunner},
     config::AppConfig,
     deploy::{DeployError, DeploymentCoordinator},
-    domain::{Credential, CredentialKind, DeploymentRequest, ServiceConfig},
+    domain::{Credential, CredentialKind, DeploymentRequest, Project, ServiceConfig},
     health::{FakeHealthChecker, HealthChecker},
     logs::LogStore,
     metrics::{CgroupMetricsReader, MetricsError},
@@ -101,6 +101,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/services/{service_id}/logs", get(service_logs))
         .route("/services/{service_id}/metrics", get(service_metrics))
         .route("/services/{service_id}/{action}", post(lifecycle_command))
+        .route("/projects", get(list_projects).post(create_project))
+        .route(
+            "/projects/{project_id}",
+            get(get_project).delete(delete_project),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_admin_token,
@@ -175,6 +180,36 @@ async fn create_deployment(
             ))
         }
     }
+}
+
+async fn list_projects(State(state): State<AppState>) -> Result<Json<Vec<Project>>, ApiError> {
+    Ok(Json(state.store.list_projects()?))
+}
+
+async fn get_project(
+    State(state): State<AppState>,
+    axum::extract::Path(project_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<Project>, ApiError> {
+    let project = state
+        .store
+        .get_project(project_id)?
+        .ok_or_else(|| ApiError::NotFound("project not found".to_string()))?;
+    Ok(Json(project))
+}
+
+async fn create_project(
+    State(state): State<AppState>,
+    Json(project): Json<Project>,
+) -> Result<Json<Project>, ApiError> {
+    Ok(Json(state.store.put_project(project)?))
+}
+
+async fn delete_project(
+    State(state): State<AppState>,
+    axum::extract::Path(project_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.store.delete_project(project_id)?;
+    Ok(Json(serde_json::json!({"deleted": true})))
 }
 
 async fn put_credential(
@@ -298,6 +333,7 @@ pub enum ApiError {
     InvalidSecretRef(crate::secrets::SecretRefError),
     BadRequest(String),
     NotFound(String),
+    Conflict(String),
     Deploy(DeployError),
     Log(std::io::Error),
     Metrics(MetricsError),
@@ -324,10 +360,19 @@ impl From<MetricsError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            Self::State(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+            Self::State(error) => match &error {
+                crate::state::StateError::ProjectNotEmpty => {
+                    (StatusCode::CONFLICT, error.to_string())
+                }
+                crate::state::StateError::UnknownProject => {
+                    (StatusCode::NOT_FOUND, error.to_string())
+                }
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+            },
             Self::InvalidSecretRef(error) => (StatusCode::BAD_REQUEST, error.to_string()),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             Self::NotFound(message) => (StatusCode::NOT_FOUND, message),
+            Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::Deploy(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
             Self::Log(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
             Self::Metrics(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),

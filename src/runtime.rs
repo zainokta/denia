@@ -738,6 +738,7 @@ mod tests {
     ) -> RuntimeStartRequest {
         RuntimeStartRequest {
             service_name: service_name.to_string(),
+            service_id: uuid::Uuid::now_v7(),
             deployment_id: uuid::Uuid::now_v7(),
             artifact,
             internal_port: 8080,

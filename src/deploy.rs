@@ -124,6 +124,7 @@ where
             .runtime
             .start(RuntimeStartRequest {
                 service_name: plan.service.name.clone(),
+                service_id: plan.service.id,
                 deployment_id: deployment.id,
                 artifact: plan.artifact,
                 internal_port: plan.service.internal_port,
