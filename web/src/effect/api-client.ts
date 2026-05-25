@@ -1,56 +1,469 @@
 import { Context, Effect, Layer, Schema } from 'effect'
-import { HttpClient } from 'effect/unstable/http'
+import { HttpClient, HttpBody } from 'effect/unstable/http'
 import { AppConfig } from './config'
 import { ApiError, DecodeError } from './errors'
-import { Node, Nodes } from './schema'
+import {
+  ApiToken,
+  Deployment,
+  Deployments,
+  LoginResult,
+  Me,
+  Membership,
+  MetricSnapshot,
+  Metrics,
+  Node,
+  Nodes,
+  type Role,
+  Service,
+  Services,
+  User,
+} from './schema'
 
 export class ApiClient extends Context.Service<
   ApiClient,
   {
-    readonly listNodes: Effect.Effect<ReadonlyArray<Node>, ApiError | DecodeError>
+    readonly listNodes: Effect.Effect<
+      ReadonlyArray<Node>,
+      ApiError | DecodeError
+    >
+    readonly login: (
+      username: string,
+      password: string,
+    ) => Effect.Effect<LoginResult, ApiError | DecodeError>
+    readonly logout: Effect.Effect<void>
+    readonly me: Effect.Effect<Me, ApiError | DecodeError>
+    readonly listUsers: Effect.Effect<
+      ReadonlyArray<User>,
+      ApiError | DecodeError
+    >
+    readonly createUser: (
+      username: string,
+      password: string,
+    ) => Effect.Effect<User, ApiError | DecodeError>
+    readonly deleteUser: (id: number) => Effect.Effect<void, ApiError>
+    readonly listApiTokens: Effect.Effect<
+      ReadonlyArray<ApiToken>,
+      ApiError | DecodeError
+    >
+    readonly createApiToken: (
+      name: string,
+    ) => Effect.Effect<ApiToken, ApiError | DecodeError>
+    readonly deleteApiToken: (id: number) => Effect.Effect<void, ApiError>
+    readonly listMembers: (
+      projectId: number,
+    ) => Effect.Effect<ReadonlyArray<Membership>, ApiError | DecodeError>
+    readonly addMember: (
+      projectId: number,
+      userId: number,
+      role: Role,
+    ) => Effect.Effect<Membership, ApiError | DecodeError>
+    readonly removeMember: (
+      projectId: number,
+      userId: number,
+    ) => Effect.Effect<void, ApiError>
+    readonly listServices: Effect.Effect<
+      ReadonlyArray<Service>,
+      ApiError | DecodeError
+    >
+    readonly getServiceDeployments: (
+      id: number,
+    ) => Effect.Effect<
+      ReadonlyArray<Deployment>,
+      ApiError | DecodeError
+    >
+    readonly getServiceLogs: (
+      id: number,
+    ) => Effect.Effect<ReadonlyArray<string>, ApiError | DecodeError>
+    readonly getServiceMetrics: (
+      id: number,
+    ) => Effect.Effect<
+      ReadonlyArray<MetricSnapshot>,
+      ApiError | DecodeError
+    >
+    readonly createDeployment: (
+      input: { service_id: number },
+    ) => Effect.Effect<Deployment, ApiError | DecodeError>
+    readonly stopService: (
+      id: number,
+    ) => Effect.Effect<void, ApiError>
   }
 >()('ApiClient') {}
 
-// Stand-in for the wire payload until the control-plane /v1/nodes endpoint is wired.
 const FIXTURE: unknown = [
   { id: 1, name: 'alice' },
   { id: 2, name: 'bob' },
   { id: 3, name: 'charlie' },
 ]
 
+const FIXTURE_SERVICES: unknown = [
+  {
+    id: 1,
+    project_id: 42,
+    name: 'web',
+    domains: ['example.com'],
+    internal_port: 3000,
+  },
+  {
+    id: 2,
+    project_id: 42,
+    name: 'api',
+    domains: ['api.example.com'],
+    internal_port: 8080,
+  },
+]
+
+const FIXTURE_DEPLOYMENTS: unknown = [
+  {
+    id: 1,
+    service_id: 1,
+    status: 'Healthy',
+    created_at: '2026-05-25T00:00:00Z',
+  },
+  {
+    id: 2,
+    service_id: 1,
+    status: 'Failed',
+    created_at: '2026-05-25T01:00:00Z',
+  },
+]
+
+const FIXTURE_LOGS: unknown = [
+  '2026-05-25T00:00:00Z [init] starting',
+  '2026-05-25T00:00:01Z [http] listening on :3000',
+]
+
+const FIXTURE_METRICS: unknown = [
+  {
+    service_id: 1,
+    cpu_percent: 0.23,
+    memory_bytes: 134217728,
+    recorded_at: '2026-05-25T00:00:00Z',
+  },
+]
+
+function decode<A>(schema: Schema.Schema<A>) {
+  return (input: unknown) =>
+    Schema.decodeUnknownEffect(schema)(input).pipe(
+      Effect.mapError(
+        (error) => new DecodeError({ message: String(error) }),
+      ),
+    )
+}
+
+function httpError(error: unknown): ApiError {
+  return new ApiError({ message: String(error), status: 0 })
+}
+
+function unauthorized(): ApiError {
+  return new ApiError({ message: 'Unauthorized', status: 401 })
+}
+
+function forbidden(): ApiError {
+  return new ApiError({ message: 'Forbidden', status: 403 })
+}
+
+function jsonBody(obj: unknown) {
+  return HttpBody.jsonUnsafe(obj)
+}
+
+function parseResponse<A>(
+  response: { readonly status: number; readonly json: Effect.Effect<unknown, unknown> },
+  schema: Schema.Schema<A>,
+): Effect.Effect<A, ApiError | DecodeError> {
+  return Effect.gen(function* () {
+    if (response.status === 401)
+      return yield* Effect.fail(unauthorized())
+    if (response.status === 403)
+      return yield* Effect.fail(forbidden())
+    const body = yield* (response.json as Effect.Effect<unknown, ApiError>).pipe(
+      Effect.mapError(httpError),
+    )
+    if (response.status < 200 || response.status >= 300)
+      return yield* Effect.fail(
+        new ApiError({
+          message:
+            typeof (body as Record<string, unknown>).message === 'string'
+              ? String((body as Record<string, unknown>).message)
+              : `HTTP ${response.status}`,
+          status: response.status,
+        }),
+      )
+    return yield* decode(schema)(body)
+  }) as Effect.Effect<A, ApiError | DecodeError>
+}
+
+function parseDeleteResponse(
+  response: { readonly status: number; readonly json: Effect.Effect<unknown, unknown> },
+): Effect.Effect<void, ApiError> {
+  return Effect.gen(function* () {
+    if (response.status === 401)
+      return yield* Effect.fail(unauthorized())
+    if (response.status === 403)
+      return yield* Effect.fail(forbidden())
+    if (response.status < 200 || response.status >= 300) {
+      const body = yield* (response.json as Effect.Effect<unknown, ApiError>).pipe(
+        Effect.mapError(httpError),
+      )
+      return yield* Effect.fail(
+        new ApiError({
+          message:
+            typeof (body as Record<string, unknown>).message === 'string'
+              ? String((body as Record<string, unknown>).message)
+              : `HTTP ${response.status}`,
+          status: response.status,
+        }),
+      )
+    }
+  }) as Effect.Effect<void, ApiError>
+}
+
 export const ApiClientLive = Layer.effect(ApiClient)(
   Effect.gen(function* () {
     const config = yield* AppConfig
     const http = yield* HttpClient.HttpClient
 
-    const decode = (input: unknown) =>
-      Schema.decodeUnknownEffect(Nodes)(input).pipe(
-        Effect.mapError(
-          (error) => new DecodeError({ message: String(error) }),
-        ),
-      )
-
-    const fromHttp = Effect.gen(function* () {
+    const authHeaders = () => {
       const token = config.getAuthToken()
-      const headers = token
-        ? { authorization: `Bearer ${token}` }
-        : {}
-      const response = yield* http
-        .get(`${config.baseUrl}/v1/nodes`, { headers })
-        .pipe(
-          Effect.mapError((error) => new ApiError({ message: String(error) })),
-        )
-      const body = yield* response.json.pipe(
-        Effect.mapError((error) => new ApiError({ message: String(error) })),
-      )
-      return yield* decode(body)
+      return token ? { authorization: `Bearer ${token}` } : {}
+    }
+
+    const url = (path: string) => `${config.baseUrl}${path}`
+
+    const listNodes = (
+      config.baseUrl === ''
+        ? decode(Nodes)(FIXTURE)
+        : Effect.gen(function* () {
+            const headers = authHeaders()
+            const response = yield* http
+              .get(url('/v1/nodes'), { headers })
+              .pipe(Effect.mapError(httpError))
+            return yield* parseResponse(response, Nodes)
+          })
+    ) as Effect.Effect<ReadonlyArray<Node>, ApiError | DecodeError>
+
+    const login = (username: string, password: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url('/v1/auth/login'), {
+            headers: { 'content-type': 'application/json' },
+            body: jsonBody({ username, password }),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, LoginResult)
+      })
+
+    const logout = Effect.gen(function* () {
+      const token = config.getAuthToken()
+      if (!token) return
+      yield* http
+        .post(url('/v1/auth/logout'), {
+          headers: { authorization: `Bearer ${token}` },
+        })
+        .pipe(Effect.mapError(httpError), Effect.ignore)
     })
 
-    const listNodes: Effect.Effect<
-      ReadonlyArray<Node>,
-      ApiError | DecodeError
-    > = config.baseUrl === '' ? decode(FIXTURE) : fromHttp
+    const me = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/me'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, Me)
+    })
 
-    return { listNodes }
+    const listUsers = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/users'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, Schema.Array(User))
+    })
+
+    const createUser = (username: string, password: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url('/v1/users'), {
+            headers: {
+              ...authHeaders(),
+              'content-type': 'application/json',
+            },
+            body: jsonBody({ username, password }),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, User)
+      })
+
+    const deleteUser = (id: number) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .del(url(`/v1/users/${id}`), { headers: authHeaders() })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseDeleteResponse(response)
+      })
+
+    const listApiTokens = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/api-tokens'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, Schema.Array(ApiToken))
+    })
+
+    const createApiToken = (name: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url('/v1/api-tokens'), {
+            headers: {
+              ...authHeaders(),
+              'content-type': 'application/json',
+            },
+            body: jsonBody({ name }),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, ApiToken)
+      })
+
+    const deleteApiToken = (id: number) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .del(url(`/v1/api-tokens/${id}`), { headers: authHeaders() })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseDeleteResponse(response)
+      })
+
+    const listMembers = (projectId: number) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/projects/${projectId}/members`), {
+            headers: authHeaders(),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Schema.Array(Membership))
+      })
+
+    const addMember = (projectId: number, userId: number, role: Role) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url(`/v1/projects/${projectId}/members`), {
+            headers: {
+              ...authHeaders(),
+              'content-type': 'application/json',
+            },
+            body: jsonBody({ user_id: userId, role }),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Membership)
+      })
+
+    const removeMember = (projectId: number, userId: number) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .del(url(`/v1/projects/${projectId}/members/${userId}`), {
+            headers: authHeaders(),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseDeleteResponse(response)
+      })
+
+    const listServices = (
+      config.baseUrl === ''
+        ? decode(Services)(FIXTURE_SERVICES)
+        : Effect.gen(function* () {
+            const response = yield* http
+              .get(url('/v1/services'), { headers: authHeaders() })
+              .pipe(Effect.mapError(httpError))
+            return yield* parseResponse(response, Services)
+          })
+    ) as Effect.Effect<ReadonlyArray<Service>, ApiError | DecodeError>
+
+    const getServiceDeployments = (id: number) =>
+      (config.baseUrl === ''
+        ? decode(Deployments)(FIXTURE_DEPLOYMENTS)
+        : Effect.gen(function* () {
+            const response = yield* http
+              .get(url(`/v1/services/${id}/deployments`), {
+                headers: authHeaders(),
+              })
+              .pipe(Effect.mapError(httpError))
+            return yield* parseResponse(response, Deployments)
+          })) as Effect.Effect<
+        ReadonlyArray<Deployment>,
+        ApiError | DecodeError
+      >
+
+    const getServiceLogs = (id: number) =>
+      (config.baseUrl === ''
+        ? decode(Schema.Array(Schema.String))(FIXTURE_LOGS)
+        : Effect.gen(function* () {
+            const response = yield* http
+              .get(url(`/v1/services/${id}/logs`), {
+                headers: authHeaders(),
+              })
+              .pipe(Effect.mapError(httpError))
+            return yield* parseResponse(
+              response,
+              Schema.Array(Schema.String),
+            )
+          })) as Effect.Effect<
+        ReadonlyArray<string>,
+        ApiError | DecodeError
+      >
+
+    const getServiceMetrics = (id: number) =>
+      (config.baseUrl === ''
+        ? decode(Metrics)(FIXTURE_METRICS)
+        : Effect.gen(function* () {
+            const response = yield* http
+              .get(url(`/v1/services/${id}/metrics`), {
+                headers: authHeaders(),
+              })
+              .pipe(Effect.mapError(httpError))
+            return yield* parseResponse(response, Metrics)
+          })) as Effect.Effect<
+        ReadonlyArray<MetricSnapshot>,
+        ApiError | DecodeError
+      >
+
+    const createDeployment = (input: { service_id: number }) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url(`/v1/services/${input.service_id}/deployments`), {
+            headers: {
+              ...authHeaders(),
+              'content-type': 'application/json',
+            },
+            body: jsonBody({}),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Deployment)
+      })
+
+    const stopService = (id: number) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url(`/v1/services/${id}/stop`), {
+            headers: authHeaders(),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseDeleteResponse(response)
+      })
+
+    return {
+      listNodes,
+      login,
+      logout,
+      me,
+      listUsers,
+      createUser,
+      deleteUser,
+      listApiTokens,
+      createApiToken,
+      deleteApiToken,
+      listMembers,
+      addMember,
+      removeMember,
+      listServices,
+      getServiceDeployments,
+      getServiceLogs,
+      getServiceMetrics,
+      createDeployment,
+      stopService,
+    }
   }),
 )
