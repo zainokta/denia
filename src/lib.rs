@@ -15,5 +15,6 @@ pub mod runtime;
 pub mod secrets;
 pub mod socket_proxy;
 pub mod state;
+pub mod syscall;
 pub mod traefik;
 pub mod web;

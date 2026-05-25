@@ -10,19 +10,26 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as IngressRouteImport } from './routes/ingress'
 import { Route as AboutRouteImport } from './routes/about'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ServicesIndexRouteImport } from './routes/services/index'
 import { Route as ProjectsIndexRouteImport } from './routes/projects/index'
+import { Route as JobsIndexRouteImport } from './routes/jobs/index'
 import { Route as SettingsUsersRouteImport } from './routes/settings/users'
 import { Route as SettingsTokensRouteImport } from './routes/settings/tokens'
 import { Route as ServicesServiceIdRouteImport } from './routes/services/$serviceId'
 import { Route as ProjectsProjectIdRouteImport } from './routes/projects/$projectId'
-import { Route as DemoTanstackQueryRouteImport } from './routes/demo/tanstack-query'
+import { Route as JobsJobIdRouteImport } from './routes/jobs/$jobId'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const IngressRoute = IngressRouteImport.update({
+  id: '/ingress',
+  path: '/ingress',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AboutRoute = AboutRouteImport.update({
@@ -45,6 +52,11 @@ const ProjectsIndexRoute = ProjectsIndexRouteImport.update({
   path: '/projects/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const JobsIndexRoute = JobsIndexRouteImport.update({
+  id: '/jobs/',
+  path: '/jobs/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SettingsUsersRoute = SettingsUsersRouteImport.update({
   id: '/settings/users',
   path: '/settings/users',
@@ -65,33 +77,37 @@ const ProjectsProjectIdRoute = ProjectsProjectIdRouteImport.update({
   path: '/projects/$projectId',
   getParentRoute: () => rootRouteImport,
 } as any)
-const DemoTanstackQueryRoute = DemoTanstackQueryRouteImport.update({
-  id: '/demo/tanstack-query',
-  path: '/demo/tanstack-query',
+const JobsJobIdRoute = JobsJobIdRouteImport.update({
+  id: '/jobs/$jobId',
+  path: '/jobs/$jobId',
   getParentRoute: () => rootRouteImport,
 } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
+  '/ingress': typeof IngressRoute
   '/login': typeof LoginRoute
-  '/demo/tanstack-query': typeof DemoTanstackQueryRoute
+  '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/settings/users': typeof SettingsUsersRoute
+  '/jobs/': typeof JobsIndexRoute
   '/projects/': typeof ProjectsIndexRoute
   '/services/': typeof ServicesIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
+  '/ingress': typeof IngressRoute
   '/login': typeof LoginRoute
-  '/demo/tanstack-query': typeof DemoTanstackQueryRoute
+  '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/settings/users': typeof SettingsUsersRoute
+  '/jobs': typeof JobsIndexRoute
   '/projects': typeof ProjectsIndexRoute
   '/services': typeof ServicesIndexRoute
 }
@@ -99,12 +115,14 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
+  '/ingress': typeof IngressRoute
   '/login': typeof LoginRoute
-  '/demo/tanstack-query': typeof DemoTanstackQueryRoute
+  '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/settings/users': typeof SettingsUsersRoute
+  '/jobs/': typeof JobsIndexRoute
   '/projects/': typeof ProjectsIndexRoute
   '/services/': typeof ServicesIndexRoute
 }
@@ -113,36 +131,42 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/about'
+    | '/ingress'
     | '/login'
-    | '/demo/tanstack-query'
+    | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
     | '/settings/tokens'
     | '/settings/users'
+    | '/jobs/'
     | '/projects/'
     | '/services/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/about'
+    | '/ingress'
     | '/login'
-    | '/demo/tanstack-query'
+    | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
     | '/settings/tokens'
     | '/settings/users'
+    | '/jobs'
     | '/projects'
     | '/services'
   id:
     | '__root__'
     | '/'
     | '/about'
+    | '/ingress'
     | '/login'
-    | '/demo/tanstack-query'
+    | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
     | '/settings/tokens'
     | '/settings/users'
+    | '/jobs/'
     | '/projects/'
     | '/services/'
   fileRoutesById: FileRoutesById
@@ -150,12 +174,14 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AboutRoute: typeof AboutRoute
+  IngressRoute: typeof IngressRoute
   LoginRoute: typeof LoginRoute
-  DemoTanstackQueryRoute: typeof DemoTanstackQueryRoute
+  JobsJobIdRoute: typeof JobsJobIdRoute
   ProjectsProjectIdRoute: typeof ProjectsProjectIdRoute
   ServicesServiceIdRoute: typeof ServicesServiceIdRoute
   SettingsTokensRoute: typeof SettingsTokensRoute
   SettingsUsersRoute: typeof SettingsUsersRoute
+  JobsIndexRoute: typeof JobsIndexRoute
   ProjectsIndexRoute: typeof ProjectsIndexRoute
   ServicesIndexRoute: typeof ServicesIndexRoute
 }
@@ -167,6 +193,13 @@ declare module '@tanstack/react-router' {
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/ingress': {
+      id: '/ingress'
+      path: '/ingress'
+      fullPath: '/ingress'
+      preLoaderRoute: typeof IngressRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/about': {
@@ -197,6 +230,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProjectsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/jobs/': {
+      id: '/jobs/'
+      path: '/jobs'
+      fullPath: '/jobs/'
+      preLoaderRoute: typeof JobsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/settings/users': {
       id: '/settings/users'
       path: '/settings/users'
@@ -225,11 +265,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProjectsProjectIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/demo/tanstack-query': {
-      id: '/demo/tanstack-query'
-      path: '/demo/tanstack-query'
-      fullPath: '/demo/tanstack-query'
-      preLoaderRoute: typeof DemoTanstackQueryRouteImport
+    '/jobs/$jobId': {
+      id: '/jobs/$jobId'
+      path: '/jobs/$jobId'
+      fullPath: '/jobs/$jobId'
+      preLoaderRoute: typeof JobsJobIdRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -238,12 +278,14 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AboutRoute: AboutRoute,
+  IngressRoute: IngressRoute,
   LoginRoute: LoginRoute,
-  DemoTanstackQueryRoute: DemoTanstackQueryRoute,
+  JobsJobIdRoute: JobsJobIdRoute,
   ProjectsProjectIdRoute: ProjectsProjectIdRoute,
   ServicesServiceIdRoute: ServicesServiceIdRoute,
   SettingsTokensRoute: SettingsTokensRoute,
   SettingsUsersRoute: SettingsUsersRoute,
+  JobsIndexRoute: JobsIndexRoute,
   ProjectsIndexRoute: ProjectsIndexRoute,
   ServicesIndexRoute: ServicesIndexRoute,
 }
