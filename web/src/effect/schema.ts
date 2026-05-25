@@ -97,11 +97,17 @@ export const DeploymentStatus = Schema.Literals([
   'Stopped',
 ])
 
+export const ArtifactRef = Schema.Struct({
+  digest: Schema.String,
+  kind: Schema.Literal('OciImage', 'RootfsBundle'),
+})
+
 export class Deployment extends Schema.Class<Deployment>('Deployment')({
   id: Schema.Number,
   service_id: Schema.Number,
   status: Schema.String,
   created_at: Schema.String,
+  artifact: Schema.optional(ArtifactRef),
 }) {}
 
 export const Deployments = Schema.Array(Deployment)
@@ -122,3 +128,60 @@ export class RouteView extends Schema.Class<RouteView>('RouteView')({
   tls: Schema.Boolean,
 }) {}
 export const RouteViews = Schema.Array(RouteView)
+
+export const JobRunStatus = Schema.Literals([
+  'Pending',
+  'Running',
+  'Succeeded',
+  'Failed',
+  'Skipped',
+])
+export type JobRunStatus = typeof JobRunStatus.Type
+
+const GitSource = Schema.Struct({
+  type: Schema.Literal('git'),
+  repo_url: Schema.String,
+  git_ref: Schema.String,
+  dockerfile_path: Schema.String,
+  context_path: Schema.String,
+  credential: Schema.Struct({ name: Schema.String, key: Schema.String }),
+})
+
+const ExternalImageSource = Schema.Struct({
+  type: Schema.Literal('external_image'),
+  image: Schema.String,
+  credential: Schema.NullOr(
+    Schema.Struct({ name: Schema.String, key: Schema.String }),
+  ),
+})
+
+const ServiceSource = Schema.Union([GitSource, ExternalImageSource])
+
+export class Job extends Schema.Class<Job>('Job')({
+  id: Schema.String,
+  project_id: Schema.String,
+  name: Schema.String,
+  source: ServiceSource,
+  command: Schema.NullOr(Schema.Array(Schema.String)),
+  env: Schema.Array(Schema.Tuple([Schema.String, Schema.String])),
+  schedule: Schema.NullOr(Schema.String),
+  max_retries: Schema.Number,
+  next_run_at: Schema.NullOr(Schema.String),
+  last_enqueued_at: Schema.NullOr(Schema.String),
+  created_at: Schema.String,
+}) {}
+
+export const Jobs = Schema.Array(Job)
+
+export class JobRun extends Schema.Class<JobRun>('JobRun')({
+  id: Schema.String,
+  job_id: Schema.String,
+  status: JobRunStatus,
+  attempt: Schema.Number,
+  exit_code: Schema.NullOr(Schema.Number),
+  started_at: Schema.NullOr(Schema.String),
+  finished_at: Schema.NullOr(Schema.String),
+  created_at: Schema.String,
+}) {}
+
+export const JobRuns = Schema.Array(JobRun)
