@@ -76,6 +76,13 @@ export class ProjectInput extends Schema.Class<ProjectInput>('ProjectInput')({
   ),
 }) {}
 
+export const SecurityPosture = Schema.Struct({
+  userns: Schema.Boolean,
+  mapped_uid: Schema.NullOr(Schema.Number),
+  no_new_privs: Schema.Boolean,
+  caps_dropped: Schema.Boolean,
+})
+
 export class Service extends Schema.Class<Service>('Service')({
   id: Schema.Number,
   project_id: Schema.Number,
@@ -84,6 +91,7 @@ export class Service extends Schema.Class<Service>('Service')({
   internal_port: Schema.Number,
   status: Schema.optional(Schema.String),
   tls_enabled: Schema.optional(Schema.Boolean),
+  security: Schema.optional(SecurityPosture),
 }) {}
 
 export const Services = Schema.Array(Service)

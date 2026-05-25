@@ -5,7 +5,7 @@ import { ApiClient, ApiClientLive } from './api-client'
 import { AppConfig } from './config'
 import { ApiError } from './errors'
 import { clearToken, getToken, setToken, subscribe } from './auth-store'
-import { ArtifactRef, Deployment, Job, JobRun, JobRunStatus, LoginResult, Me, RouteView, RouteViews } from './schema'
+import { ArtifactRef, Deployment, Job, JobRun, JobRunStatus, LoginResult, Me, RouteView, RouteViews, SecurityPosture, Service } from './schema'
 
 const TestLayer = ApiClientLive.pipe(
   Layer.provide(
@@ -547,6 +547,69 @@ describe('ArtifactRef schema', () => {
       Effect.flip,
       Effect.map((error) => {
         expect(error).toBeDefined()
+      }),
+    ),
+  )
+})
+
+describe('SecurityPosture schema', () => {
+  const FIXTURE_SVC_WITH_SECURITY = {
+    id: 1,
+    project_id: 42,
+    name: 'web',
+    domains: ['example.com'],
+    internal_port: 3000,
+    security: {
+      userns: true,
+      mapped_uid: 100000,
+      no_new_privs: true,
+      caps_dropped: true,
+    },
+  }
+
+  const FIXTURE_SVC_WITHOUT_SECURITY = {
+    id: 2,
+    project_id: 42,
+    name: 'api',
+    domains: ['api.example.com'],
+    internal_port: 8080,
+  }
+
+  it.effect('decodes Service with security posture', () =>
+    Schema.decodeUnknownEffect(Service)(FIXTURE_SVC_WITH_SECURITY).pipe(
+      Effect.map((svc) => {
+        expect(svc.id).toBe(1)
+        expect(svc.security).toBeDefined()
+        expect(svc.security!.userns).toBe(true)
+        expect(svc.security!.mapped_uid).toBe(100000)
+        expect(svc.security!.no_new_privs).toBe(true)
+        expect(svc.security!.caps_dropped).toBe(true)
+      }),
+    ),
+  )
+
+  it.effect('tolerates missing security posture', () =>
+    Schema.decodeUnknownEffect(Service)(FIXTURE_SVC_WITHOUT_SECURITY).pipe(
+      Effect.map((svc) => {
+        expect(svc.id).toBe(2)
+        expect(svc.name).toBe('api')
+        expect(svc.security).toBeUndefined()
+      }),
+    ),
+  )
+
+  it.effect('SecurityPosture decodes with null mapped_uid', () =>
+    Schema.decodeUnknownEffect(SecurityPosture)({
+      userns: true,
+      mapped_uid: null,
+      no_new_privs: false,
+      caps_dropped: true,
+    }).pipe(
+      Effect.map((p) => {
+        expect(p.userns).toBe(true)
+        expect(p.mapped_uid).toBeNull()
+        expect(p.no_new_privs).toBe(false)
+        expect(p.caps_dropped).toBe(true)
       }),
     ),
   )
