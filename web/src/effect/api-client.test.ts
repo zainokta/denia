@@ -5,7 +5,7 @@ import { ApiClient, ApiClientLive } from './api-client'
 import { AppConfig } from './config'
 import { ApiError } from './errors'
 import { clearToken, getToken, setToken, subscribe } from './auth-store'
-import { LoginResult, Me, RouteView, RouteViews } from './schema'
+import { ArtifactRef, Deployment, Job, JobRun, JobRunStatus, LoginResult, Me, RouteView, RouteViews, Service } from './schema'
 
 const TestLayer = ApiClientLive.pipe(
   Layer.provide(
@@ -299,6 +299,9 @@ const mockApi = (success = true) =>
               status: 409,
             }),
           )) as never,
+    putService: ((_svc: never) => emptyApi()) as never,
+    listRoutes: emptyApi() as never,
+    getIngressConfig: emptyApi() as never,
   })
 
 const FIXTURE_JOB = {
@@ -391,6 +394,56 @@ describe('Job schemas', () => {
   )
 })
 
+describe('ArtifactRef schema', () => {
+  const FIXTURE_DEPLOY_WITH_ARTIFACT = {
+    id: 1,
+    service_id: 1,
+    status: 'Healthy',
+    created_at: '2026-05-25T00:00:00Z',
+    artifact: { digest: 'sha256:abc123', kind: 'OciImage' as const },
+  }
+
+  const FIXTURE_DEPLOY_WITHOUT_ARTIFACT = {
+    id: 2,
+    service_id: 1,
+    status: 'Building',
+    created_at: '2026-05-25T01:00:00Z',
+  }
+
+  it.effect('decodes Deployment with artifact ref', () =>
+    Schema.decodeUnknownEffect(Deployment)(FIXTURE_DEPLOY_WITH_ARTIFACT).pipe(
+      Effect.map((d) => {
+        expect(d.id).toBe(1)
+        expect(d.artifact).toBeDefined()
+        expect(d.artifact!.digest).toBe('sha256:abc123')
+        expect(d.artifact!.kind).toBe('OciImage')
+      }),
+    ),
+  )
+
+  it.effect('decodes Deployment without artifact ref', () =>
+    Schema.decodeUnknownEffect(Deployment)(FIXTURE_DEPLOY_WITHOUT_ARTIFACT).pipe(
+      Effect.map((d) => {
+        expect(d.id).toBe(2)
+        expect(d.status).toBe('Building')
+        expect(d.artifact).toBeUndefined()
+      }),
+    ),
+  )
+
+  it.effect('ArtifactRef rejects unknown kind', () =>
+    Schema.decodeUnknownEffect(ArtifactRef)({
+      digest: 'sha256:xyz',
+      kind: 'UnknownKind',
+    }).pipe(
+      Effect.flip,
+      Effect.map((error) => {
+        expect(error).toBeDefined()
+      }),
+    ),
+  )
+})
+
 describe('ApiClient projects', () => {
   it.effect('project methods exist on ApiClient', () =>
     Effect.gen(function* () {
@@ -450,6 +503,132 @@ describe('ApiClient projects', () => {
         expect(error).toBeInstanceOf(ApiError)
         expect((error as ApiError).message).toContain('409')
       }),
+    ),
+  )
+})
+
+const FIXTURE_ROUTES = [
+  {
+    service_name: 'web',
+    domains: ['example.com'],
+    bridge_port: 9090,
+    tls: true,
+  },
+  {
+    service_name: 'api',
+    domains: ['api.example.com'],
+    bridge_port: 9091,
+    tls: false,
+  },
+]
+
+const mockIngressApi = () =>
+  Layer.succeed(ApiClient)({
+    listNodes: emptyApi() as never,
+    login: ((_u: string, _p: string) => emptyApi()) as never,
+    logout: emptyApi() as never,
+    me: emptyApi() as never,
+    listUsers: emptyApi() as never,
+    createUser: ((_u: string, _p: string) => emptyApi()) as never,
+    deleteUser: ((_id: number) => emptyApi()) as never,
+    listApiTokens: emptyApi() as never,
+    createApiToken: ((_n: string) => emptyApi()) as never,
+    deleteApiToken: ((_id: number) => emptyApi()) as never,
+    listMembers: ((_pid: number) => emptyApi()) as never,
+    addMember: ((_pid: number, _uid: number, _r: string) => emptyApi()) as never,
+    removeMember: ((_pid: number, _uid: number) => emptyApi()) as never,
+    listServices: emptyApi() as never,
+    getServiceDeployments: ((_id: number) => emptyApi()) as never,
+    getServiceLogs: ((_id: number) => emptyApi()) as never,
+    getServiceMetrics: ((_id: number) => emptyApi()) as never,
+    createDeployment: ((_input: { service_id: number }) => emptyApi()) as never,
+    stopService: ((_id: number) => emptyApi()) as never,
+    listProjects: emptyApi() as never,
+    getProject: ((_id: string) => emptyApi()) as never,
+    createProject: ((_input: never) => emptyApi()) as never,
+    deleteProject: ((_id: string) => emptyApi()) as never,
+    putService: ((_svc: never) => emptyApi()) as never,
+    listRoutes: Effect.succeed(FIXTURE_ROUTES as ReadonlyArray<RouteView>) as never,
+    getIngressConfig: Effect.succeed('http:\n  routers:\n    web:\n      service: web\n') as never,
+  })
+
+describe('Ingress ApiClient methods', () => {
+  it.effect('listRoutes decodes an array of RouteView', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      const routes = yield* api.listRoutes
+      expect(routes.length).toBe(2)
+      expect(routes[0].service_name).toBe('web')
+      expect(routes[0].tls).toBe(true)
+      expect(routes[1].service_name).toBe('api')
+      expect(routes[1].tls).toBe(false)
+    }).pipe(Effect.provide(mockIngressApi())),
+  )
+
+  it.effect('getIngressConfig returns raw text', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      const yaml = yield* api.getIngressConfig
+      expect(yaml).toContain('routers:')
+      expect(yaml).toContain('web')
+    }).pipe(Effect.provide(mockIngressApi())),
+  )
+})
+
+describe('putService', () => {
+  const FIXTURE_SVC = {
+    id: 1,
+    project_id: 42,
+    name: 'web',
+    domains: ['example.com'],
+    internal_port: 3000,
+    tls_enabled: true,
+  }
+
+  const mockPutApi = () =>
+    Layer.succeed(ApiClient)({
+      ...Layer.succeed(ApiClient)(mockIngressApi()).build().unsafeGet(ApiClient),
+      putService: ((_svc: unknown) =>
+        Effect.succeed(FIXTURE_SVC)) as never,
+    } as never)
+
+  it.effect('putService updates a service', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      const svc = yield* api.putService(FIXTURE_SVC as never)
+      expect(svc.name).toBe('web')
+      expect(svc.tls_enabled).toBe(true)
+    }).pipe(
+      Effect.provide(
+        Layer.succeed(ApiClient)({
+          listNodes: emptyApi() as never,
+          login: ((_u: string, _p: string) => emptyApi()) as never,
+          logout: emptyApi() as never,
+          me: emptyApi() as never,
+          listUsers: emptyApi() as never,
+          createUser: ((_u: string, _p: string) => emptyApi()) as never,
+          deleteUser: ((_id: number) => emptyApi()) as never,
+          listApiTokens: emptyApi() as never,
+          createApiToken: ((_n: string) => emptyApi()) as never,
+          deleteApiToken: ((_id: number) => emptyApi()) as never,
+          listMembers: ((_pid: number) => emptyApi()) as never,
+          addMember: ((_pid: number, _uid: number, _r: string) => emptyApi()) as never,
+          removeMember: ((_pid: number, _uid: number) => emptyApi()) as never,
+          listServices: emptyApi() as never,
+          getServiceDeployments: ((_id: number) => emptyApi()) as never,
+          getServiceLogs: ((_id: number) => emptyApi()) as never,
+          getServiceMetrics: ((_id: number) => emptyApi()) as never,
+          createDeployment: ((_input: { service_id: number }) => emptyApi()) as never,
+          stopService: ((_id: number) => emptyApi()) as never,
+          listProjects: emptyApi() as never,
+          getProject: ((_id: string) => emptyApi()) as never,
+          createProject: ((_input: never) => emptyApi()) as never,
+          deleteProject: ((_id: string) => emptyApi()) as never,
+          putService: ((_svc: unknown) => Effect.succeed(FIXTURE_SVC)) as never,
+          listRoutes: emptyApi() as never,
+          getIngressConfig: emptyApi() as never,
+        }),
+      ),
     ),
   )
 })

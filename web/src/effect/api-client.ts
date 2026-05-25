@@ -17,6 +17,8 @@ import {
   ProjectInput,
   Projects,
   type Role,
+  RouteView,
+  RouteViews,
   Service,
   Services,
   User,
@@ -101,7 +103,15 @@ export class ApiClient extends Context.Service<
     ) => Effect.Effect<Project, ApiError | DecodeError>
     readonly deleteProject: (
       id: string,
-    ) => Effect.Effect<void, ApiError | DecodeError>
+    ) => Effect.Effect<void, ApiError>
+    readonly putService: (
+      service: Service,
+    ) => Effect.Effect<Service, ApiError | DecodeError>
+    readonly listRoutes: Effect.Effect<
+      ReadonlyArray<RouteView>,
+      ApiError | DecodeError
+    >
+    readonly getIngressConfig: Effect.Effect<string, ApiError>
   }
 >()('ApiClient') {}
 
@@ -231,6 +241,25 @@ function parseDeleteResponse(
       )
     }
   }) as Effect.Effect<void, ApiError>
+}
+
+function parseTextResponse(
+  response: { readonly status: number; readonly text: Effect.Effect<string, unknown> },
+): Effect.Effect<string, ApiError> {
+  return Effect.gen(function* () {
+    if (response.status === 401)
+      return yield* Effect.fail(unauthorized())
+    if (response.status === 403)
+      return yield* Effect.fail(forbidden())
+    const body = yield* (response.text as Effect.Effect<string, ApiError>).pipe(
+      Effect.mapError(httpError),
+    )
+    if (response.status < 200 || response.status >= 300)
+      return yield* Effect.fail(
+        new ApiError({ message: body, status: response.status }),
+      )
+    return body
+  }) as Effect.Effect<string, ApiError>
 }
 
 export const ApiClientLive = Layer.effect(ApiClient)(
@@ -497,6 +526,34 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseDeleteResponse(response)
       })
 
+    const putService = (service: Service) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url('/v1/services'), {
+            headers: {
+              ...authHeaders(),
+              'content-type': 'application/json',
+            },
+            body: jsonBody(service),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Service)
+      })
+
+    const listRoutes = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/ingress/routes'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, RouteViews)
+    })
+
+    const getIngressConfig = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/ingress/config'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseTextResponse(response)
+    })
+
     return {
       listNodes,
       login,
@@ -521,6 +578,9 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       getProject,
       createProject,
       deleteProject,
+      putService,
+      listRoutes,
+      getIngressConfig,
     }
   }),
 )
