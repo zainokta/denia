@@ -97,6 +97,7 @@ async fn linux_runtime_start_uses_unshare_and_cgroup_gate() {
             socket_path: runtime_dir.path().join("true-service/current.sock"),
             cpu_millis: 100,
             memory_bytes: 67108864,
+            env: Vec::new(),
         })
         .await
         .expect("runtime start");
@@ -204,6 +205,7 @@ async fn hardened_workload_has_no_new_privs_and_cleared_cap_bnd() {
             socket_path: runtime_dir.path().join("hardened-svc/current.sock"),
             cpu_millis: 100,
             memory_bytes: 67108864,
+            env: Vec::new(),
         })
         .await
         .expect("runtime start");

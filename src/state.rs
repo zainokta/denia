@@ -1059,6 +1059,62 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn active_run(&self, job_id: Uuid) -> Result<Option<JobRun>, StateError> {
+        let runs = self.list_job_runs(job_id)?;
+        let pending = serde_json::to_string(&JobRunStatus::Pending)?;
+        let running = serde_json::to_string(&JobRunStatus::Running)?;
+        Ok(runs.into_iter().find(|r| {
+            let s = serde_json::to_string(&r.status).unwrap_or_default();
+            s == pending || s == running
+        }))
+    }
+
+    pub fn fail_orphan_runs(&self) -> Result<usize, StateError> {
+        let connection = self.connection()?;
+        let pending = serde_json::to_string(&JobRunStatus::Pending)?;
+        let running = serde_json::to_string(&JobRunStatus::Running)?;
+        let failed = serde_json::to_string(&JobRunStatus::Failed)?;
+        let updated = connection.execute(
+            "UPDATE job_runs SET status = ?1, finished_at = ?2 WHERE status = ?3 OR status = ?4",
+            params![&failed, Utc::now().to_rfc3339(), &pending, &running],
+        )?;
+        Ok(updated)
+    }
+
+    pub fn claim_due_jobs(&self, now: chrono::DateTime<Utc>) -> Result<Vec<Job>, StateError> {
+        let connection = self.connection()?;
+        let mut stmt = connection.prepare("SELECT config_json FROM jobs")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut due = Vec::new();
+        for row in rows {
+            let json = row?;
+            let job: Job = serde_json::from_str(&json)?;
+            if job.next_run_at.map(|next| next <= now).unwrap_or(false) {
+                due.push(job);
+            }
+        }
+        Ok(due)
+    }
+
+    pub fn set_job_next_run(
+        &self,
+        job_id: Uuid,
+        next_run_at: Option<chrono::DateTime<Utc>>,
+        last_enqueued_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<(), StateError> {
+        let mut job = self
+            .get_job(job_id)?
+            .ok_or(StateError::InvalidCredentials)?;
+        job.next_run_at = next_run_at;
+        job.last_enqueued_at = last_enqueued_at;
+        let connection = self.connection()?;
+        connection.execute(
+            "UPDATE jobs SET config_json = ?1 WHERE id = ?2",
+            params![serde_json::to_string(&job)?, job_id.to_string()],
+        )?;
+        Ok(())
+    }
+
     fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StateError> {
         self.connection.lock().map_err(|_| StateError::LockPoisoned)
     }

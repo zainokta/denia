@@ -1,5 +1,3 @@
-use uuid::Uuid;
-
 use denia::{
     artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource},
     bridge::{BridgeAllocator, BridgeTarget, FakeBridgeManager},
@@ -12,8 +10,6 @@ use denia::{
     runtime::{FakeRuntime, Runtime},
     state::SqliteStore,
 };
-
-const DEFAULT_PROJECT_ID: Uuid = Uuid::from_u64_pair(1, 0);
 
 #[test]
 fn bridge_allocator_assigns_stable_loopback_ports() {
@@ -56,6 +52,7 @@ async fn fake_runtime_starts_and_stops_service() {
             socket_path: "/var/lib/denia/runtime/web/current.sock".into(),
             cpu_millis: 500,
             memory_bytes: 536870912,
+            env: Vec::new(),
         })
         .await
         .expect("started");
@@ -75,10 +72,11 @@ async fn coordinator_promotes_only_after_health_check_passes() {
     let health = FakeHealthChecker::healthy();
     let coordinator = DeploymentCoordinator::new(store.clone(), runtime, health);
 
+    let project_id = store.default_project_id().expect("default project");
     let service = store
         .put_service(
             ServiceConfig::new(
-                DEFAULT_PROJECT_ID,
+                project_id,
                 "web",
                 vec!["web.example.test".to_string()],
                 ServiceSource::ExternalImage(ExternalImageSource {
@@ -141,10 +139,11 @@ async fn coordinator_writes_traefik_config_on_promotion() {
         config_path.clone(),
     );
 
+    let project_id = store.default_project_id().expect("default project");
     let service = store
         .put_service(
             ServiceConfig::new(
-                DEFAULT_PROJECT_ID,
+                project_id,
                 "web",
                 vec!["web.example.test".to_string()],
                 ServiceSource::ExternalImage(ExternalImageSource {

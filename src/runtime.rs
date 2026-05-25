@@ -15,7 +15,7 @@ use tokio::process::Command;
 
 use crate::artifacts::ArtifactKind;
 use crate::cgroup_launcher;
-use crate::domain::{RuntimeStartRequest, RuntimeStatus};
+use crate::domain::{JobOutcome, JobRunRequest, RuntimeStartRequest, RuntimeStatus};
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -51,6 +51,11 @@ pub enum RuntimeError {
 pub trait Runtime: Send + Sync {
     async fn start(&self, request: RuntimeStartRequest) -> Result<RuntimeStatus, RuntimeError>;
     async fn stop(&self, service_name: &str) -> Result<(), RuntimeError>;
+    async fn run_to_completion(&self, _request: JobRunRequest) -> Result<JobOutcome, RuntimeError> {
+        Err(RuntimeError::InvalidServiceName {
+            name: "run_to_completion not implemented".to_string(),
+        })
+    }
 }
 
 #[async_trait]
@@ -64,6 +69,10 @@ where
 
     async fn stop(&self, service_name: &str) -> Result<(), RuntimeError> {
         (**self).stop(service_name).await
+    }
+
+    async fn run_to_completion(&self, request: JobRunRequest) -> Result<JobOutcome, RuntimeError> {
+        (**self).run_to_completion(request).await
     }
 }
 
@@ -106,6 +115,15 @@ impl Runtime for FakeRuntime {
             .map_err(|_| RuntimeError::LockPoisoned)?
             .push(service_name.to_string());
         Ok(())
+    }
+
+    async fn run_to_completion(&self, _request: JobRunRequest) -> Result<JobOutcome, RuntimeError> {
+        let now = chrono::Utc::now();
+        Ok(JobOutcome {
+            exit_code: 0,
+            started_at: now,
+            finished_at: now,
+        })
     }
 }
 
@@ -243,19 +261,23 @@ impl LinuxRuntime {
         let manifest = std::fs::read_to_string(&manifest_path)?;
         let process: LinuxRuntimeProcessSpec = serde_json::from_str(&manifest)?;
         validate_process_spec(&process, &manifest_path)?;
-        let mut env = process.env;
-        env.retain(|(key, _)| key != GUEST_SERVICE_SOCKET_ENV);
-        env.push((
+        let mut env_map: std::collections::BTreeMap<String, String> =
+            process.env.into_iter().collect();
+        for (key, value) in &request.env {
+            env_map.insert(key.clone(), value.clone());
+        }
+        env_map.insert(
             GUEST_SERVICE_SOCKET_ENV.to_string(),
             GUEST_SERVICE_SOCKET.to_string(),
-        ));
+        );
+        let env: Vec<(String, String)> = env_map.into_iter().collect();
 
-        let service_dir = self.runtime_dir.join(&request.service_name);
+        let service_dir = self.runtime_dir.join(request.service_id.to_string());
         let deployment_dir = service_dir.join(request.deployment_id.to_string());
         let socket_path = rootfs_path.join(GUEST_SERVICE_SOCKET.trim_start_matches('/'));
         let cgroup_path = self
             .cgroup_root
-            .join(&request.service_name)
+            .join(request.service_id.to_string())
             .join(request.deployment_id.to_string());
         let cgroup_ready_path = deployment_dir.join("cgroup.ready");
         let mut args = vec![
@@ -478,6 +500,158 @@ impl Runtime for LinuxRuntime {
             pid,
             cgroup_path: status_cgroup_path,
             socket_path: status_socket_path,
+        })
+    }
+
+    async fn run_to_completion(&self, request: JobRunRequest) -> Result<JobOutcome, RuntimeError> {
+        if request.artifact.kind != ArtifactKind::RootfsBundle {
+            return Err(RuntimeError::UnsupportedArtifactKind {
+                kind: request.artifact.kind.clone(),
+            });
+        }
+        if request.cpu_millis == 0 {
+            return Err(RuntimeError::InvalidResourceLimit {
+                reason: "cpu_millis must be greater than zero".to_string(),
+            });
+        }
+        if request.memory_bytes == 0 {
+            return Err(RuntimeError::InvalidResourceLimit {
+                reason: "memory_bytes must be greater than zero".to_string(),
+            });
+        }
+
+        let bundle_dir = self
+            .artifact_dir
+            .join(safe_artifact_name(&request.artifact.digest));
+        let rootfs_path = bundle_dir.join("rootfs");
+        if !rootfs_path.exists() {
+            return Err(RuntimeError::MissingRootfs { path: rootfs_path });
+        }
+        validate_runtime_directory(&rootfs_path)?;
+        let manifest_path = bundle_dir.join("process.json");
+        let manifest = std::fs::read_to_string(&manifest_path)?;
+        let process: LinuxRuntimeProcessSpec = serde_json::from_str(&manifest)?;
+        validate_process_spec(&process, &manifest_path)?;
+
+        let argv = match request.command.clone() {
+            Some(cmd) if !cmd.is_empty() => cmd,
+            _ => process.argv.clone(),
+        };
+        if argv.is_empty() {
+            return Err(RuntimeError::EmptyArgv {
+                path: manifest_path,
+            });
+        }
+        if !argv[0].starts_with('/') {
+            return Err(RuntimeError::InvalidArgv {
+                argv0: argv[0].clone(),
+            });
+        }
+
+        let mut env_map: std::collections::BTreeMap<String, String> =
+            process.env.into_iter().collect();
+        for (key, value) in &request.env {
+            env_map.insert(key.clone(), value.clone());
+        }
+
+        let run_dir = self
+            .runtime_dir
+            .join("jobs")
+            .join(request.job_id.to_string())
+            .join(request.run_id.to_string());
+        let cgroup_path = self
+            .cgroup_root
+            .join("jobs")
+            .join(request.job_id.to_string())
+            .join(request.run_id.to_string());
+        let cgroup_ready_path = run_dir.join("cgroup.ready");
+
+        let mut args = vec![
+            cgroup_launcher::MODE_ARG.to_string(),
+            "--cgroup-procs".to_string(),
+            cgroup_path.join("cgroup.procs").display().to_string(),
+            "--ready-file".to_string(),
+            cgroup_ready_path.display().to_string(),
+            "--".to_string(),
+            self.unshare_binary.display().to_string(),
+            "--user".to_string(),
+            format!("--map-users=0,{},{}", self.userns_base, self.userns_size),
+            format!("--map-groups=0,{},{}", self.userns_base, self.userns_size),
+            "--fork".to_string(),
+            "--pid".to_string(),
+            "--net".to_string(),
+            "--mount".to_string(),
+            "--propagation".to_string(),
+            "private".to_string(),
+            "--uts".to_string(),
+            "--ipc".to_string(),
+            "--mount-proc".to_string(),
+            "--root".to_string(),
+            rootfs_path.display().to_string(),
+            "--wd".to_string(),
+            process.workdir.clone(),
+            "--".to_string(),
+            SETPRIV_TARGET.to_string(),
+            "--no-new-privs".to_string(),
+            "--bounding-set".to_string(),
+            "-all".to_string(),
+            "--".to_string(),
+        ];
+        args.extend(argv);
+
+        validate_namespace_launcher(&args)?;
+        self.inject_setpriv(&rootfs_path)?;
+        std::fs::create_dir_all(&run_dir)?;
+        remove_file_if_exists(&cgroup_ready_path)?;
+        std::fs::create_dir_all(&cgroup_path)?;
+        std::fs::write(cgroup_path.join("cpu.max"), cpu_max(request.cpu_millis))?;
+        std::fs::write(
+            cgroup_path.join("memory.max"),
+            format!("{}\n", request.memory_bytes),
+        )?;
+
+        let cleanup = || {
+            let _ = std::fs::write(cgroup_path.join("cgroup.kill"), "1\n");
+            let _ = remove_dir_if_exists(&cgroup_path);
+            let _ = remove_dir_if_exists(&run_dir);
+        };
+
+        let mut command = Command::new(&self.cgroup_launcher_binary);
+        command
+            .args(&args)
+            .env_clear()
+            .envs(env_map.iter())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let started_at = chrono::Utc::now();
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                cleanup();
+                return Err(RuntimeError::Io(error));
+            }
+        };
+        if let Err(error) = wait_for_cgroup_ready(&mut child, &cgroup_ready_path).await {
+            let _ = child.kill().await;
+            cleanup();
+            return Err(error);
+        }
+        let output = match child.wait_with_output().await {
+            Ok(output) => output,
+            Err(error) => {
+                cleanup();
+                return Err(RuntimeError::Io(error));
+            }
+        };
+        let finished_at = chrono::Utc::now();
+        cleanup();
+
+        Ok(JobOutcome {
+            exit_code: output.status.code().unwrap_or(-1),
+            started_at,
+            finished_at,
         })
     }
 
@@ -745,6 +919,7 @@ mod tests {
             socket_path: runtime_dir.join(service_name).join("current.sock"),
             cpu_millis: 100,
             memory_bytes: 67108864,
+            env: Vec::new(),
         }
     }
 

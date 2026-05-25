@@ -226,6 +226,8 @@ pub struct RuntimeStartRequest {
     pub socket_path: std::path::PathBuf,
     pub cpu_millis: u32,
     pub memory_bytes: u64,
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,6 +419,24 @@ pub struct JobRun {
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobRunRequest {
+    pub job_id: Uuid,
+    pub run_id: Uuid,
+    pub artifact: crate::artifacts::ArtifactRecord,
+    pub command: Option<Vec<String>>,
+    pub env: Vec<(String, String)>,
+    pub cpu_millis: u32,
+    pub memory_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobOutcome {
+    pub exit_code: i32,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
 }
 
 #[cfg(test)]
