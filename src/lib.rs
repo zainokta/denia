@@ -1,3 +1,4 @@
+pub mod access_log;
 pub mod app;
 pub mod artifacts;
 pub mod auth;
@@ -10,8 +11,10 @@ pub mod domain;
 pub mod health;
 pub mod logs;
 pub mod metrics;
+pub mod node_metrics;
 pub mod oci;
 pub mod runtime;
+pub mod scheduler;
 pub mod secrets;
 pub mod socket_proxy;
 pub mod state;
