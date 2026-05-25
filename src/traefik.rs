@@ -1,6 +1,7 @@
+use serde::Serialize;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RouteSpec {
     pub route_key: String,
     pub service_name: String,
@@ -9,7 +10,7 @@ pub struct RouteSpec {
     pub tls: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct IngressRenderOptions {
     pub acme_resolver: String,
     pub control_domain: Option<String>,

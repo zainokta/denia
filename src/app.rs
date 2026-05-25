@@ -8,25 +8,29 @@ use axum::{
 };
 use serde::Deserialize;
 use serde::Serialize;
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use crate::{
+    access_log::{AccessEntry, AccessLogStore},
     artifacts::acquirer::ArtifactAcquirer,
-    auth::{Principal, resolve_auth},
+    auth::{Principal, require_project_role, resolve_auth},
     bridge::{BridgeAllocator, BridgeManager, LoopbackBridgeSupervisor},
     command::{CommandRunner, TokioCommandRunner},
     config::AppConfig,
-    deploy::{DeployError, DeploymentCoordinator},
+    deploy::{DeployError, DeploymentCoordinator, SharedRoutes},
     domain::{
         ApiToken, Credential, CredentialKind, DeploymentRequest, Job, JobRun, LoginResult, Me,
-        PrincipalView, Project, ServiceConfig,
+        PrincipalView, Project, ProjectMembership, Role, ServiceConfig,
     },
     health::{FakeHealthChecker, HealthChecker},
     logs::LogStore,
     metrics::{CgroupMetricsReader, MetricsError},
+    node_metrics::{NodeMetricsError, NodeMetricsReader, NodeSnapshot},
     runtime::{LinuxRuntime, Runtime},
     secrets::SecretRef,
     state::SqliteStore,
+    traefik::{IngressRenderOptions, RouteSpec},
 };
 
 #[derive(Clone)]
@@ -36,8 +40,11 @@ pub struct AppState {
     runtime: Arc<dyn Runtime>,
     health: Arc<dyn HealthChecker>,
     command_runner: Arc<dyn CommandRunner>,
-    bridge_allocator: Arc<std::sync::Mutex<BridgeAllocator>>,
+    bridge_allocator: Arc<Mutex<BridgeAllocator>>,
     bridge_manager: Arc<dyn BridgeManager>,
+    routes: SharedRoutes,
+    ingress_options: IngressRenderOptions,
+    pub access_log: AccessLogStore,
 }
 
 impl AppState {
@@ -52,14 +59,17 @@ impl AppState {
             .with_userns(config.userns_base, config.userns_size)
             .with_log_dir(config.log_dir.clone()),
         );
-        Self::new_with_deploy_dependencies(
+        let access_log = AccessLogStore::new();
+        let supervisor = LoopbackBridgeSupervisor::with_access_log(access_log.clone());
+        Self::new_with_deploy_dependencies_and_log(
             config,
             store,
             runtime,
             FakeHealthChecker::healthy(),
             TokioCommandRunner,
             BridgeAllocator::new(bridge_start_port),
-            LoopbackBridgeSupervisor::default(),
+            supervisor,
+            access_log,
         )
     }
 
@@ -79,14 +89,53 @@ impl AppState {
         B: Into<BridgeAllocator>,
         M: BridgeManager + 'static,
     {
+        Self::new_with_deploy_dependencies_and_log(
+            config,
+            store,
+            runtime,
+            health,
+            command_runner,
+            bridge_allocator,
+            bridge_manager,
+            AccessLogStore::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_deploy_dependencies_and_log<R, H, C, B, M>(
+        config: AppConfig,
+        store: SqliteStore,
+        runtime: R,
+        health: H,
+        command_runner: C,
+        bridge_allocator: B,
+        bridge_manager: M,
+        access_log: AccessLogStore,
+    ) -> Self
+    where
+        R: Runtime + 'static,
+        H: HealthChecker + 'static,
+        C: CommandRunner + 'static,
+        B: Into<BridgeAllocator>,
+        M: BridgeManager + 'static,
+    {
+        let ingress_options = IngressRenderOptions {
+            acme_resolver: config.acme_resolver.clone(),
+            control_domain: config.control_domain.clone(),
+            control_tls: config.control_tls,
+            control_backend_addr: format!("http://{}", config.bind_addr),
+        };
         Self {
             config,
             store,
             runtime: Arc::new(runtime),
             health: Arc::new(health),
             command_runner: Arc::new(command_runner),
-            bridge_allocator: Arc::new(std::sync::Mutex::new(bridge_allocator.into())),
+            bridge_allocator: Arc::new(Mutex::new(bridge_allocator.into())),
             bridge_manager: Arc::new(bridge_manager),
+            routes: Arc::new(Mutex::new(BTreeMap::new())),
+            ingress_options,
+            access_log,
         }
     }
 }
@@ -127,10 +176,23 @@ pub fn build_router(state: AppState) -> Router {
             "/projects/{project_id}",
             get(get_project).delete(delete_project),
         )
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_admin_token,
-        ));
+        .route(
+            "/projects/{project_id}/members",
+            get(list_project_members).post(add_project_member),
+        )
+        .route(
+            "/projects/{project_id}/members/{user_id}",
+            delete(remove_project_member),
+        )
+        .route("/ingress/routes", get(list_ingress_routes))
+        .route("/ingress/config", get(get_ingress_config))
+        .route("/metrics/node", get(get_node_metrics))
+        .route("/workloads", get(list_workloads))
+        .route(
+            "/services/{service_id}/requests",
+            get(list_service_requests),
+        )
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -143,26 +205,69 @@ async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { ok: true })
 }
 
+fn ensure_role(
+    state: &AppState,
+    principal: &Principal,
+    project_id: uuid::Uuid,
+    min: Role,
+) -> Result<(), ApiError> {
+    if principal.is_super_admin {
+        return Ok(());
+    }
+    let user_id = principal
+        .user_id
+        .ok_or_else(|| ApiError::Forbidden("authenticated user required".to_string()))?;
+    let role = state.store.role_for(user_id, project_id)?;
+    require_project_role(principal, role, min).map_err(Into::into)
+}
+
+fn ensure_super_admin(principal: &Principal) -> Result<(), ApiError> {
+    if principal.is_super_admin {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden("super admin required".to_string()))
+    }
+}
+
 async fn list_services(
     State(state): State<AppState>,
+    principal: Principal,
 ) -> Result<Json<Vec<ServiceConfig>>, ApiError> {
-    Ok(Json(state.store.list_services()?))
+    let all = state.store.list_services()?;
+    if principal.is_super_admin {
+        return Ok(Json(all));
+    }
+    let user_id = principal
+        .user_id
+        .ok_or_else(|| ApiError::Forbidden("authenticated user required".to_string()))?;
+    let memberships = state.store.list_memberships_for_user(user_id)?;
+    let allowed: std::collections::HashSet<uuid::Uuid> =
+        memberships.into_iter().map(|m| m.project_id).collect();
+    Ok(Json(
+        all.into_iter()
+            .filter(|s| allowed.contains(&s.project_id))
+            .collect(),
+    ))
 }
 
 async fn put_service(
     State(state): State<AppState>,
+    principal: Principal,
     Json(service): Json<ServiceConfig>,
 ) -> Result<Json<ServiceConfig>, ApiError> {
+    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
     Ok(Json(state.store.put_service(service)?))
 }
 
 async fn create_deployment(
     State(state): State<AppState>,
+    principal: Principal,
     Json(request): Json<DeploymentRequest>,
 ) -> Result<Json<crate::domain::Deployment>, ApiError> {
     let Some(service) = state.store.get_service(request.service_id())? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
+    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
     match request {
         DeploymentRequest::ExternalImage { .. } => {
             let coordinator = DeploymentCoordinator::new_with_shared_routing(
@@ -172,6 +277,8 @@ async fn create_deployment(
                 state.bridge_allocator.clone(),
                 state.bridge_manager.clone(),
                 state.config.traefik_dynamic_config_path.clone(),
+                state.routes.clone(),
+                state.ingress_options.clone(),
             );
             let acquirer = ArtifactAcquirer::new(state.config.clone());
             Ok(Json(
@@ -192,6 +299,8 @@ async fn create_deployment(
                 state.bridge_allocator.clone(),
                 state.bridge_manager.clone(),
                 state.config.traefik_dynamic_config_path.clone(),
+                state.routes.clone(),
+                state.ingress_options.clone(),
             );
             let acquirer = ArtifactAcquirer::new(state.config.clone());
             Ok(Json(
@@ -203,14 +312,151 @@ async fn create_deployment(
     }
 }
 
-async fn list_projects(State(state): State<AppState>) -> Result<Json<Vec<Project>>, ApiError> {
-    Ok(Json(state.store.list_projects()?))
+#[derive(Debug, Serialize)]
+struct WorkloadView {
+    service_id: uuid::Uuid,
+    service_name: String,
+    project_id: uuid::Uuid,
+    deployment_id: Option<uuid::Uuid>,
+    status: Option<crate::domain::DeploymentStatus>,
+    cpu_usage_usec: Option<u64>,
+    memory_current_bytes: Option<u64>,
+}
+
+async fn get_node_metrics(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Json<NodeSnapshot>, ApiError> {
+    ensure_super_admin(&principal)?;
+    let reader = NodeMetricsReader::new(state.config.node_disk_path.clone());
+    Ok(Json(reader.read()?))
+}
+
+async fn list_workloads(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Json<Vec<WorkloadView>>, ApiError> {
+    let services = state.store.list_services()?;
+    let allowed = if principal.is_super_admin {
+        None
+    } else {
+        let user_id = principal
+            .user_id
+            .ok_or_else(|| ApiError::Forbidden("authenticated user required".to_string()))?;
+        let memberships = state.store.list_memberships_for_user(user_id)?;
+        Some(
+            memberships
+                .into_iter()
+                .map(|m| m.project_id)
+                .collect::<std::collections::HashSet<_>>(),
+        )
+    };
+    let reader = CgroupMetricsReader::new(state.config.cgroup_root.clone());
+    let mut workloads = Vec::new();
+    for service in services {
+        if let Some(ref a) = allowed
+            && !a.contains(&service.project_id)
+        {
+            continue;
+        }
+        let deployment_id = state.store.promoted_deployment(service.id)?;
+        let (cpu, mem) = match deployment_id {
+            Some(d) => match reader.read_by_id(&service.name, service.id, d) {
+                Ok(snap) => (Some(snap.cpu_usage_usec), Some(snap.memory_current_bytes)),
+                Err(_) => (None, None),
+            },
+            None => (None, None),
+        };
+        let status = match deployment_id {
+            Some(d) => state
+                .store
+                .list_deployments(service.id)?
+                .into_iter()
+                .find(|dep| dep.id == d)
+                .map(|dep| dep.status),
+            None => None,
+        };
+        workloads.push(WorkloadView {
+            service_id: service.id,
+            service_name: service.name.clone(),
+            project_id: service.project_id,
+            deployment_id,
+            status,
+            cpu_usage_usec: cpu,
+            memory_current_bytes: mem,
+        });
+    }
+    Ok(Json(workloads))
+}
+
+async fn list_service_requests(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<Vec<AccessEntry>>, ApiError> {
+    let Some(service) = state.store.get_service(service_id)? else {
+        return Err(ApiError::NotFound("service not found".to_string()));
+    };
+    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
+    Ok(Json(state.access_log.recent(&service.name)))
+}
+
+async fn list_ingress_routes(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Json<Vec<RouteSpec>>, ApiError> {
+    ensure_super_admin(&principal)?;
+    let routes = state
+        .routes
+        .lock()
+        .map_err(|_| ApiError::Conflict("routes lock poisoned".to_string()))?;
+    Ok(Json(routes.values().cloned().collect()))
+}
+
+async fn get_ingress_config(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Response, ApiError> {
+    ensure_super_admin(&principal)?;
+    let snapshot: Vec<RouteSpec> = {
+        let routes = state
+            .routes
+            .lock()
+            .map_err(|_| ApiError::Conflict("routes lock poisoned".to_string()))?;
+        routes.values().cloned().collect()
+    };
+    let body = crate::traefik::render_file_provider_config(&snapshot, &state.ingress_options)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(([(header::CONTENT_TYPE, "text/yaml")], body).into_response())
+}
+
+async fn list_projects(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Json<Vec<Project>>, ApiError> {
+    let all = state.store.list_projects()?;
+    if principal.is_super_admin {
+        return Ok(Json(all));
+    }
+    let user_id = principal
+        .user_id
+        .ok_or_else(|| ApiError::Forbidden("authenticated user required".to_string()))?;
+    let memberships = state.store.list_memberships_for_user(user_id)?;
+    let allowed: std::collections::HashSet<uuid::Uuid> =
+        memberships.into_iter().map(|m| m.project_id).collect();
+    Ok(Json(
+        all.into_iter()
+            .filter(|p| allowed.contains(&p.id))
+            .collect(),
+    ))
 }
 
 async fn get_project(
     State(state): State<AppState>,
+    principal: Principal,
     axum::extract::Path(project_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Project>, ApiError> {
+    ensure_role(&state, &principal, project_id, Role::Viewer)?;
     let project = state
         .store
         .get_project(project_id)?
@@ -220,23 +466,74 @@ async fn get_project(
 
 async fn create_project(
     State(state): State<AppState>,
+    principal: Principal,
     Json(project): Json<Project>,
 ) -> Result<Json<Project>, ApiError> {
+    ensure_super_admin(&principal)?;
     Ok(Json(state.store.put_project(project)?))
 }
 
 async fn delete_project(
     State(state): State<AppState>,
+    principal: Principal,
     axum::extract::Path(project_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    ensure_role(&state, &principal, project_id, Role::Admin)?;
     state.store.delete_project(project_id)?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
+#[derive(Debug, Deserialize)]
+struct AddMemberRequest {
+    user_id: uuid::Uuid,
+    role: Role,
+}
+
+async fn list_project_members(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(project_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<Vec<ProjectMembership>>, ApiError> {
+    ensure_role(&state, &principal, project_id, Role::Viewer)?;
+    Ok(Json(state.store.list_members(project_id)?))
+}
+
+async fn add_project_member(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(project_id): axum::extract::Path<uuid::Uuid>,
+    Json(input): Json<AddMemberRequest>,
+) -> Result<(StatusCode, Json<ProjectMembership>), ApiError> {
+    ensure_role(&state, &principal, project_id, Role::Admin)?;
+    state
+        .store
+        .set_membership(input.user_id, project_id, input.role)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ProjectMembership {
+            user_id: input.user_id,
+            project_id,
+            role: input.role,
+        }),
+    ))
+}
+
+async fn remove_project_member(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path((project_id, user_id)): axum::extract::Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    ensure_role(&state, &principal, project_id, Role::Admin)?;
+    state.store.remove_membership(user_id, project_id)?;
+    Ok(Json(serde_json::json!({"removed": true})))
+}
+
 async fn put_credential(
     State(state): State<AppState>,
+    principal: Principal,
     Json(input): Json<CredentialInput>,
 ) -> Result<Json<Credential>, ApiError> {
+    ensure_super_admin(&principal)?;
     let secret_ref = SecretRef::parse(input.secret_ref).map_err(ApiError::InvalidSecretRef)?;
     Ok(Json(
         state
@@ -247,18 +544,25 @@ async fn put_credential(
 
 async fn list_service_deployments(
     State(state): State<AppState>,
+    principal: Principal,
     axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Vec<crate::domain::Deployment>>, ApiError> {
+    let Some(service) = state.store.get_service(service_id)? else {
+        return Err(ApiError::NotFound("service not found".to_string()));
+    };
+    ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
     Ok(Json(state.store.list_deployments(service_id)?))
 }
 
 async fn lifecycle_command(
     State(state): State<AppState>,
+    principal: Principal,
     axum::extract::Path((service_id, action)): axum::extract::Path<(uuid::Uuid, String)>,
 ) -> Result<(StatusCode, Json<LifecycleResponse>), ApiError> {
     let Some(service) = state.store.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
+    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
     match action.as_str() {
         "stop" => {
             let coordinator = DeploymentCoordinator::new_with_shared_routing(
@@ -268,6 +572,8 @@ async fn lifecycle_command(
                 state.bridge_allocator.clone(),
                 state.bridge_manager.clone(),
                 state.config.traefik_dynamic_config_path.clone(),
+                state.routes.clone(),
+                state.ingress_options.clone(),
             );
             coordinator.stop_service(&service).await?;
             Ok((
@@ -283,11 +589,13 @@ async fn lifecycle_command(
 
 async fn service_logs(
     State(state): State<AppState>,
+    principal: Principal,
     axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     let Some(service) = state.store.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
+    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
     let logs = LogStore::new(&state.config.log_dir);
     match logs.read_recent(&service.name, 200) {
         Ok(lines) => Ok(Json(lines)),
@@ -298,36 +606,22 @@ async fn service_logs(
 
 async fn service_metrics(
     State(state): State<AppState>,
+    principal: Principal,
     axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Vec<crate::metrics::MetricSnapshot>>, ApiError> {
     let Some(service) = state.store.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
+    ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
     let Some(deployment_id) = state.store.promoted_deployment(service_id)? else {
         return Ok(Json(Vec::new()));
     };
     let reader = CgroupMetricsReader::new(state.config.cgroup_root.clone());
-    Ok(Json(vec![
-        reader.read_service(&service.name, deployment_id)?,
-    ]))
-}
-
-async fn require_admin_token(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let expected = format!("Bearer {}", state.config.admin_token);
-    let authorized = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == expected);
-
-    if !authorized {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    Ok(next.run(request).await)
+    Ok(Json(vec![reader.read_by_id(
+        &service.name,
+        service.id,
+        deployment_id,
+    )?]))
 }
 
 async fn require_auth(
@@ -521,58 +815,83 @@ async fn revoke_api_token_handler(
 
 async fn list_jobs(
     State(state): State<AppState>,
+    principal: Principal,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<Job>>, ApiError> {
     let project_id = params
         .get("project_id")
         .and_then(|id| uuid::Uuid::parse_str(id).ok())
         .unwrap_or(uuid::Uuid::nil());
+    ensure_role(&state, &principal, project_id, Role::Viewer)?;
     Ok(Json(state.store.list_jobs(project_id)?))
 }
 
 async fn create_job(
     State(state): State<AppState>,
+    principal: Principal,
     Json(job): Json<Job>,
 ) -> Result<(StatusCode, Json<Job>), ApiError> {
+    ensure_role(&state, &principal, job.project_id, Role::Operator)?;
     let stored = state.store.put_job(job)?;
     Ok((StatusCode::CREATED, Json(stored)))
 }
 
 async fn get_job(
     State(state): State<AppState>,
+    principal: Principal,
     axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Job>, ApiError> {
     let job = state
         .store
         .get_job(job_id)?
         .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
+    ensure_role(&state, &principal, job.project_id, Role::Viewer)?;
     Ok(Json(job))
 }
 
 async fn delete_job(
     State(state): State<AppState>,
+    principal: Principal,
     axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let job = state
+        .store
+        .get_job(job_id)?
+        .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
+    ensure_role(&state, &principal, job.project_id, Role::Operator)?;
     state.store.delete_job(job_id)?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
 async fn run_job(
     State(state): State<AppState>,
+    principal: Principal,
     axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<(StatusCode, Json<JobRun>), ApiError> {
-    let _job = state
+    let job = state
         .store
         .get_job(job_id)?
         .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
+    ensure_role(&state, &principal, job.project_id, Role::Operator)?;
+    if state.store.active_run(job_id)?.is_some() {
+        return Err(ApiError::Conflict(
+            "job already has an active run".to_string(),
+        ));
+    }
     let run = state.store.create_job_run(job_id)?;
     Ok((StatusCode::ACCEPTED, Json(run)))
 }
 
 async fn list_job_runs(
     State(state): State<AppState>,
+    principal: Principal,
     axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Vec<JobRun>>, ApiError> {
+    let job = state
+        .store
+        .get_job(job_id)?
+        .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
+    ensure_role(&state, &principal, job.project_id, Role::Viewer)?;
     Ok(Json(state.store.list_job_runs(job_id)?))
 }
 
@@ -607,6 +926,7 @@ pub enum ApiError {
     Deploy(DeployError),
     Log(std::io::Error),
     Metrics(MetricsError),
+    NodeMetrics(NodeMetricsError),
 }
 
 impl From<crate::auth::AuthError> for ApiError {
@@ -639,6 +959,12 @@ impl From<DeployError> for ApiError {
 impl From<MetricsError> for ApiError {
     fn from(value: MetricsError) -> Self {
         Self::Metrics(value)
+    }
+}
+
+impl From<NodeMetricsError> for ApiError {
+    fn from(value: NodeMetricsError) -> Self {
+        Self::NodeMetrics(value)
     }
 }
 
@@ -681,6 +1007,7 @@ impl IntoResponse for ApiError {
             Self::Deploy(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
             Self::Log(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
             Self::Metrics(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+            Self::NodeMetrics(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
         };
         (status, message).into_response()
     }
