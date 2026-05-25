@@ -20,7 +20,6 @@ pub struct AppConfig {
     pub traefik_dynamic_config_path: PathBuf,
     pub userns_base: u32,
     pub userns_size: u32,
-    pub setpriv_binary: PathBuf,
     pub acme_resolver: String,
     pub control_domain: Option<String>,
     pub control_tls: bool,
@@ -79,9 +78,6 @@ impl AppConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(65536);
-        let setpriv_binary = PathBuf::from(
-            env::var("DENIA_SETPRIV_BINARY").unwrap_or_else(|_| "setpriv".to_string()),
-        );
         let acme_resolver = env::var("DENIA_ACME_RESOLVER").unwrap_or_else(|_| "le".to_string());
         let control_domain = env::var("DENIA_CONTROL_DOMAIN").ok();
         let control_tls = env::var("DENIA_CONTROL_TLS")
@@ -105,7 +101,6 @@ impl AppConfig {
             traefik_dynamic_config_path,
             userns_base,
             userns_size,
-            setpriv_binary,
             acme_resolver,
             control_domain,
             control_tls,
@@ -131,7 +126,6 @@ impl AppConfig {
             traefik_dynamic_config_path: PathBuf::from("/tmp/denia-traefik.yml"),
             userns_base: 100000,
             userns_size: 65536,
-            setpriv_binary: PathBuf::from("setpriv"),
             acme_resolver: "le".to_string(),
             control_domain: None,
             control_tls: false,

@@ -50,7 +50,6 @@ impl AppState {
                 config.cgroup_root.clone(),
             )
             .with_userns(config.userns_base, config.userns_size)
-            .with_setpriv(config.setpriv_binary.clone())
             .with_log_dir(config.log_dir.clone()),
         );
         Self::new_with_deploy_dependencies(

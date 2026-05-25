@@ -5,6 +5,7 @@ use crate::{
     artifacts::{ArtifactError, ArtifactKind, ArtifactRecord, ArtifactSource},
     command::{CommandError, CommandRunner},
     config::AppConfig,
+    syscall,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -221,13 +222,10 @@ impl ArtifactAcquirer {
             .await?;
         std::fs::create_dir_all(bundle_dir.join("rootfs"))?;
 
-        let base = self.config.userns_base.to_string();
-        let owner = format!("{base}:{base}");
+        let base = self.config.userns_base;
         let rootfs = bundle_dir.join("rootfs");
-        let rootfs_str = rootfs.to_string_lossy().into_owned();
-        runner
-            .run("chown", &["-R", "--no-dereference", &owner, &rootfs_str])
-            .await?;
+        syscall::chown::recursive_lchown(&rootfs, base, base)
+            .map_err(|e| ArtifactAcquireError::Io(std::io::Error::other(e.to_string())))?;
 
         Ok(bundle_dir)
     }

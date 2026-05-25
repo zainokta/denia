@@ -54,17 +54,14 @@ function sourceDisplay(source: unknown): string {
 }
 
 export const Route = createFileRoute('/jobs/')({
-  validateSearch: (search: Record<string, unknown>) => ({
-    project: typeof search.project === 'string' ? search.project : undefined,
-  }),
   component: JobsIndex,
 })
 
 export function JobsIndex() {
   const queryClient = useQueryClient()
   const auth = useAuth()
-  const { project } = Route.useSearch() as { project?: string }
-  const projectId = project ?? ''
+  const search = Route.useSearch() as { project?: string }
+  const projectId = search.project ?? ''
 
   const [name, setName] = useState('')
   const [image, setImage] = useState('')
