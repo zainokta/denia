@@ -5,7 +5,7 @@ import { ApiClient, ApiClientLive } from './api-client'
 import { AppConfig } from './config'
 import { ApiError } from './errors'
 import { clearToken, getToken, setToken, subscribe } from './auth-store'
-import { ArtifactRef, Deployment, Job, JobRun, JobRunStatus, LoginResult, Me, RouteView, RouteViews, Service } from './schema'
+import { ArtifactRef, Deployment, Job, JobRun, JobRunStatus, LoginResult, Me, RouteView, RouteViews } from './schema'
 
 const TestLayer = ApiClientLive.pipe(
   Layer.provide(
@@ -302,6 +302,14 @@ const mockApi = (success = true) =>
     putService: ((_svc: never) => emptyApi()) as never,
     listRoutes: emptyApi() as never,
     getIngressConfig: emptyApi() as never,
+    listJobs: ((_pid: string) =>
+      Effect.succeed([FIXTURE_JOB] as ReadonlyArray<typeof FIXTURE_JOB>)) as never,
+    getJob: ((_id: string) => Effect.succeed(FIXTURE_JOB)) as never,
+    createJob: ((_input: never) => Effect.succeed(FIXTURE_JOB)) as never,
+    deleteJob: ((_id: string) => Effect.void) as never,
+    runJob: ((_id: string) => Effect.succeed(FIXTURE_JOB_RUN)) as never,
+    listJobRuns: ((_id: string) =>
+      Effect.succeed([FIXTURE_JOB_RUN] as ReadonlyArray<typeof FIXTURE_JOB_RUN>)) as never,
   })
 
 const FIXTURE_JOB = {
@@ -650,6 +658,14 @@ const mockIngressApi = () =>
     putService: ((_svc: never) => emptyApi()) as never,
     listRoutes: Effect.succeed(FIXTURE_ROUTES as ReadonlyArray<RouteView>) as never,
     getIngressConfig: Effect.succeed('http:\n  routers:\n    web:\n      service: web\n') as never,
+    listJobs: ((_pid: string) =>
+      Effect.succeed([FIXTURE_JOB] as ReadonlyArray<typeof FIXTURE_JOB>)) as never,
+    getJob: ((_id: string) => Effect.succeed(FIXTURE_JOB)) as never,
+    createJob: ((_input: never) => Effect.succeed(FIXTURE_JOB)) as never,
+    deleteJob: ((_id: string) => Effect.void) as never,
+    runJob: ((_id: string) => Effect.succeed(FIXTURE_JOB_RUN)) as never,
+    listJobRuns: ((_id: string) =>
+      Effect.succeed([FIXTURE_JOB_RUN] as ReadonlyArray<typeof FIXTURE_JOB_RUN>)) as never,
   })
 
 describe('Ingress ApiClient methods', () => {
@@ -684,13 +700,6 @@ describe('putService', () => {
     internal_port: 3000,
     tls_enabled: true,
   }
-
-  const mockPutApi = () =>
-    Layer.succeed(ApiClient)({
-      ...Layer.succeed(ApiClient)(mockIngressApi()).build().unsafeGet(ApiClient),
-      putService: ((_svc: unknown) =>
-        Effect.succeed(FIXTURE_SVC)) as never,
-    } as never)
 
   it.effect('putService updates a service', () =>
     Effect.gen(function* () {
@@ -727,6 +736,14 @@ describe('putService', () => {
           putService: ((_svc: unknown) => Effect.succeed(FIXTURE_SVC)) as never,
           listRoutes: emptyApi() as never,
           getIngressConfig: emptyApi() as never,
+          listJobs: ((_pid: string) =>
+            Effect.succeed([FIXTURE_JOB] as ReadonlyArray<typeof FIXTURE_JOB>)) as never,
+          getJob: ((_id: string) => Effect.succeed(FIXTURE_JOB)) as never,
+          createJob: ((_input: never) => Effect.succeed(FIXTURE_JOB)) as never,
+          deleteJob: ((_id: string) => Effect.void) as never,
+          runJob: ((_id: string) => Effect.succeed(FIXTURE_JOB_RUN)) as never,
+          listJobRuns: ((_id: string) =>
+            Effect.succeed([FIXTURE_JOB_RUN] as ReadonlyArray<typeof FIXTURE_JOB_RUN>)) as never,
         }),
       ),
     ),
