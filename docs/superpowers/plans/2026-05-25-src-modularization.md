@@ -25,6 +25,32 @@ The implementation in this plan uses **sync trait methods** matching current rus
 
 If a future migration to async rusqlite or `sqlx` happens, that is a separate ADR. This refactor preserves current behavior.
 
+### Domain Verification Feature (added after spec was written)
+
+A domain-verification feature landed after the spec/ADR were committed. This plan folds it in:
+
+- **New types** (`src/domain.rs`): `ServiceDomain`, `DomainStatus`. → go in new `domain/service_domain.rs`.
+- **New aggregate** — `service_domains` persistence (`src/state.rs`, 7 methods: `put_service_domain`, `get_service_domain`, `get_service_domain_by_token`, `list_service_domains_by_service`, `update_service_domain_status`, `delete_service_domain`, `list_all_service_domains`). → new `DomainRepo` trait + `SqliteDomainRepo`.
+- **Verifier service** (`src/domains.rs`, 293 lines): `validate_hostname`, `generate_token`, `HostnameError`, `DomainVerifyError`, `DomainVerifier` trait, `HttpDomainVerifier`. → split into new `verification/` folder-module. **Renamed to `verification/` to avoid the `domain.rs`/`domains.rs` collision.**
+- **API** (`src/app.rs`): authed handlers `create_service_domain`, `list_service_domains`, `verify_service_domain`, `delete_service_domain_handler` → `api/domains.rs`. Plus an **unauthenticated** `/.well-known/denia-challenge/{token}` route (`challenge_handler`) mounted at router root, outside `/v1` — must stay outside the auth layer.
+- **Consumers**: `deploy.rs` reads verified `service_domains` to drive Traefik routes; `traefik.rs` emits the global `denia-challenge` path router. These move with their parent modules (Task 4, Task 5) — no structural change, just verify they compile against the new `DomainRepo`.
+- **Existing tests**: `tests/domain_verification.rs` already covers the verifier + API. Keep it; it must stay green through every step.
+
+### Router Tiers (correction to Task 11)
+
+Current `app.rs::build_router` has **three** nested groups under `/v1`, not one flat merge:
+
+```rust
+Router::new()
+    .route("/healthz", get(healthz))
+    .route("/.well-known/denia-challenge/{token}", get(challenge_handler))   // unauthenticated
+    .nest("/v1", auth_public.merge(auth_routes).merge(protected))            // protected has require_auth route_layer
+    .fallback(crate::web::static_handler)
+    .with_state(state)
+```
+
+Task 11 must preserve all three tiers and the root-level unauthenticated routes. Do not collapse them into a single merged router.
+
 ---
 
 ## File Structure Overview
@@ -32,18 +58,21 @@ If a future migration to async rusqlite or `sqlx` happens, that is a separate AD
 Created folder-modules (each contains a `mod.rs` re-exporting public symbols of its children):
 
 ```
-src/api/        {mod, error, auth, services, deployments, workloads, projects, members, jobs, secrets, tokens, observability, ingress, health}.rs
-src/domain/     {mod, error, service, deployment, project, user, credential, job}.rs
-src/repo/       {mod, error, service_repo, project_repo, user_repo, deployment_repo, job_repo, token_repo, credential_repo, mock}.rs
-src/repo/sqlite/{mod, pool, services, projects, users, deployments, jobs, tokens, credentials}.rs
+src/api/        {mod, error, auth, services, deployments, workloads, projects, members, jobs, secrets, tokens, observability, ingress, domains, health}.rs
+src/domain/     {mod, error, service, service_domain, deployment, project, user, credential, job}.rs
+src/repo/       {mod, error, service_repo, domain_repo, project_repo, user_repo, deployment_repo, job_repo, token_repo, credential_repo, mock}.rs
+src/repo/sqlite/{mod, pool, services, domains, projects, users, deployments, jobs, tokens, credentials}.rs
 src/runtime/    {mod, error, runtime_trait, plan, validation, fs_helpers, linux, fake}.rs
 src/ingress/    {mod, traefik, bridge, socket_proxy}.rs
 src/observability/{mod, metrics, node_metrics, access_log, logs}.rs
 src/deploy/     {mod, error, coordinator, routes}.rs
 src/auth/       {mod, principal, guards, middleware}.rs
+src/verification/{mod, error, validation, verifier, http}.rs   # was src/domains.rs (renamed to avoid domain.rs/domains.rs clash)
 ```
 
 Unchanged (flat) files: `main.rs`, `lib.rs` (updated mod list), `app.rs` (shrunk), `config.rs`, `command.rs`, `health.rs`, `cgroup_launcher.rs`, `scheduler.rs`, `secrets.rs`, `web.rs`. Unchanged folder-modules: `artifacts/`, `oci/`, `syscall/`.
+
+Removed files: `src/state.rs` (after Task 10), `src/domains.rs` (after Task 6b).
 
 Removed files: `src/state.rs` (after step 10).
 
@@ -73,6 +102,7 @@ DENIA_RUN_PRIVILEGED_TESTS=1 cargo test --test linux_runtime_privileged -- --ign
 - Create: `src/domain/mod.rs`
 - Create: `src/domain/error.rs`
 - Create: `src/domain/service.rs`
+- Create: `src/domain/service_domain.rs`
 - Create: `src/domain/deployment.rs`
 - Create: `src/domain/project.rs`
 - Create: `src/domain/user.rs`
@@ -86,6 +116,7 @@ DENIA_RUN_PRIVILEGED_TESTS=1 cargo test --test linux_runtime_privileged -- --ign
 |--|--|--|
 | `DomainError` enum (line ~11) | `domain/error.rs` | `pub enum DomainError` |
 | `ResourceLimits`, `HealthCheck`, `ServiceSource`, `GitSource`, `ExternalImageSource`, `ServiceConfig`, `impl ServiceConfig` | `domain/service.rs` | all `pub` |
+| `ServiceDomain`, `DomainStatus` (lines ~214, ~221) | `domain/service_domain.rs` | all `pub` |
 | `Deployment`, `DeploymentRequest`, `DeploymentStatus`, `RuntimeStartRequest`, `RuntimeStatus`, `impl DeploymentRequest` | `domain/deployment.rs` | all `pub` |
 | `Project`, `ProjectMembership`, `impl Project` | `domain/project.rs` | all `pub` |
 | `User`, `Role`, `Session`, `ApiToken`, `Me`, `PrincipalView`, `LoginResult`, `impl User` | `domain/user.rs` | all `pub` |
@@ -130,6 +161,10 @@ Move `Credential`, `CredentialKind`. Imports: serde, uuid, `crate::secrets::Secr
 
 Move `Job`, `JobRun`, `JobRunRequest`, `JobRunStatus`, `JobOutcome`, `impl Job`. Imports: serde, chrono, uuid.
 
+- [ ] **Step 1.7b: Create `domain/service_domain.rs`**
+
+Move `ServiceDomain` and `DomainStatus`. Imports: serde, chrono, uuid. If `ServiceDomain` references `ServiceConfig` or a service id, use `crate::domain::service::*` or plain `Uuid`.
+
 - [ ] **Step 1.8: Create `domain/mod.rs` with `pub use`**
 
 ```rust
@@ -139,6 +174,7 @@ pub mod error;
 pub mod job;
 pub mod project;
 pub mod service;
+pub mod service_domain;
 pub mod user;
 
 pub use credential::*;
@@ -147,10 +183,11 @@ pub use error::*;
 pub use job::*;
 pub use project::*;
 pub use service::*;
+pub use service_domain::*;
 pub use user::*;
 ```
 
-This preserves every previously-public path: `crate::domain::ServiceConfig`, `crate::domain::User`, etc.
+This preserves every previously-public path: `crate::domain::ServiceConfig`, `crate::domain::User`, `crate::domain::ServiceDomain`, etc.
 
 - [ ] **Step 1.9: Delete `src/domain.rs`**
 
@@ -489,12 +526,76 @@ git commit -m "refactor(auth): split auth.rs into auth/ folder-module"
 
 ---
 
+## Task 6b: Split `domains.rs` into `verification/` folder-module
+
+**Files:**
+- Delete: `src/domains.rs`
+- Create: `src/verification/mod.rs`, `error.rs`, `validation.rs`, `verifier.rs`, `http.rs`
+- Modify: `src/lib.rs` (replace `pub mod domains;` with `pub mod verification;` + re-export shim)
+
+Renamed `domains` → `verification` to kill the `domain.rs` / `domains.rs` confusion. The verifier is a domain-*verification* service, not domain types.
+
+**Mapping:**
+
+| Symbol in `domains.rs` | Destination |
+|--|--|
+| `HostnameError`, `DomainVerifyError` | `verification/error.rs` |
+| `validate_hostname`, `generate_token` | `verification/validation.rs` |
+| `DomainVerifier` trait | `verification/verifier.rs` |
+| `HttpDomainVerifier` + `impl` + `Default` | `verification/http.rs` |
+
+- [ ] **Step 6b.1: Create `verification/error.rs`** — move `HostnameError`, `DomainVerifyError` with `use thiserror::Error;`.
+
+- [ ] **Step 6b.2: Create `verification/validation.rs`** — move `validate_hostname`, `generate_token`. Imports: `crate::verification::error::HostnameError`.
+
+- [ ] **Step 6b.3: Create `verification/verifier.rs`** — move `DomainVerifier` trait. Imports: `crate::verification::error::DomainVerifyError`, `async_trait` if the trait is async.
+
+- [ ] **Step 6b.4: Create `verification/http.rs`** — move `HttpDomainVerifier`, its `impl DomainVerifier`, and `impl Default`. Imports: `reqwest`, `crate::verification::{error::DomainVerifyError, verifier::DomainVerifier}`.
+
+- [ ] **Step 6b.5: Create `verification/mod.rs`**
+
+```rust
+pub mod error;
+pub mod http;
+pub mod validation;
+pub mod verifier;
+
+pub use error::*;
+pub use http::*;
+pub use validation::*;
+pub use verifier::*;
+```
+
+- [ ] **Step 6b.6: Update `src/lib.rs`**
+
+Replace `pub mod domains;` with `pub mod verification;`. Callers use `crate::domains::DomainVerifier` etc. — grep:
+
+```bash
+grep -rn "crate::domains::" src/ tests/
+```
+
+Rewrite each to `crate::verification::`. (Few sites: `app.rs` AppState field + ctor, `deploy.rs`, `tests/domain_verification.rs`.) Preferred over a re-export shim since the rename is the point.
+
+- [ ] **Step 6b.7: Delete and verify**
+
+```bash
+git rm src/domains.rs
+cargo build && cargo test && cargo fmt --all && cargo clippy --all-targets -- -D warnings
+git add src/verification src/lib.rs src/app.rs src/deploy.rs tests
+git commit -m "refactor(verification): rename domains.rs to verification/ folder-module"
+```
+
+`tests/domain_verification.rs` must stay green — it imports the verifier.
+
+---
+
 ## Task 7: Create `repo/` skeleton (traits + `RepoError` + pool ctor only)
 
 **Files:**
 - Create: `src/repo/mod.rs`
 - Create: `src/repo/error.rs`
 - Create: `src/repo/service_repo.rs`
+- Create: `src/repo/domain_repo.rs`
 - Create: `src/repo/project_repo.rs`
 - Create: `src/repo/user_repo.rs`
 - Create: `src/repo/deployment_repo.rs`
@@ -677,6 +778,27 @@ pub trait CredentialRepo: Send + Sync + 'static {
 
 Open `state.rs:348` for the exact signature.
 
+- [ ] **Step 7.8b: Create `src/repo/domain_repo.rs`** (service-domain aggregate)
+
+```rust
+use uuid::Uuid;
+use crate::domain::{DomainStatus, ServiceDomain};
+use crate::repo::error::RepoError;
+
+#[allow(dead_code)]
+pub trait DomainRepo: Send + Sync + 'static {
+    fn put_service_domain(&self, d: &ServiceDomain) -> Result<(), RepoError>;
+    fn get_service_domain(&self, id: Uuid) -> Result<Option<ServiceDomain>, RepoError>;
+    fn get_service_domain_by_token(&self, token: &str) -> Result<Option<ServiceDomain>, RepoError>;
+    fn list_service_domains_by_service(&self, service_id: Uuid) -> Result<Vec<ServiceDomain>, RepoError>;
+    fn update_service_domain_status(&self, id: Uuid, status: DomainStatus /* match state.rs:1232 exact args */) -> Result<(), RepoError>;
+    fn delete_service_domain(&self, id: Uuid) -> Result<(), RepoError>;
+    fn list_all_service_domains(&self) -> Result<Vec<ServiceDomain>, RepoError>;
+}
+```
+
+Open `state.rs:1232` for the exact `update_service_domain_status` argument list — do not guess (it may take extra fields like `verified_at` or an error string).
+
 - [ ] **Step 7.9: Create `src/repo/sqlite/pool.rs`**
 
 ```rust
@@ -730,6 +852,7 @@ pub use pool::{SqlitePool, run_migrations};
 ```rust
 pub mod credential_repo;
 pub mod deployment_repo;
+pub mod domain_repo;
 pub mod error;
 pub mod job_repo;
 pub mod project_repo;
@@ -740,6 +863,7 @@ pub mod user_repo;
 
 pub use credential_repo::CredentialRepo;
 pub use deployment_repo::DeploymentRepo;
+pub use domain_repo::DomainRepo;
 pub use error::RepoError;
 pub use job_repo::JobRepo;
 pub use project_repo::ProjectRepo;
@@ -841,11 +965,16 @@ Move `create_api_token`, `user_for_api_token`, `list_api_tokens`, `revoke_api_to
 
 Move `put_credential`.
 
+- [ ] **Step 8.9b: Create `repo/sqlite/domains.rs`**
+
+Move the 7 service-domain methods: `put_service_domain`, `get_service_domain`, `get_service_domain_by_token`, `list_service_domains_by_service`, `update_service_domain_status`, `delete_service_domain`, `list_all_service_domains` (state.rs:1175–1290). Plus any private row-parse helper used only by these.
+
 - [ ] **Step 8.10: Update `repo/sqlite/mod.rs`**
 
 ```rust
 pub mod credentials;
 pub mod deployments;
+pub mod domains;
 pub mod jobs;
 pub mod pool;
 pub mod projects;
@@ -935,11 +1064,14 @@ If duplication makes you uneasy, the alternative is to extract a `pub(crate) fn 
 
 - [ ] **Step 9.7: Add `SqliteCredentialRepo`** in `repo/sqlite/credentials.rs`.
 
+- [ ] **Step 9.7b: Add `SqliteDomainRepo`** in `repo/sqlite/domains.rs` implementing `DomainRepo`.
+
 - [ ] **Step 9.8: Re-export from `repo/sqlite/mod.rs`**
 
 ```rust
 pub use credentials::SqliteCredentialRepo;
 pub use deployments::SqliteDeploymentRepo;
+pub use domains::SqliteDomainRepo;
 pub use jobs::SqliteJobRepo;
 pub use pool::{SqlitePool, run_migrations};
 pub use projects::SqliteProjectRepo;
@@ -1000,13 +1132,15 @@ If at any sub-step `cargo build` fails, do NOT commit. Fix or revert.
 use std::sync::Arc;
 
 use crate::repo::{
-    CredentialRepo, DeploymentRepo, JobRepo, ProjectRepo, ServiceRepo, TokenRepo, UserRepo,
+    CredentialRepo, DeploymentRepo, DomainRepo, JobRepo, ProjectRepo, ServiceRepo, TokenRepo, UserRepo,
 };
+use crate::verification::DomainVerifier;
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: AppConfig,
     pub services:        Arc<dyn ServiceRepo>,
+    pub domains:         Arc<dyn DomainRepo>,
     pub projects:        Arc<dyn ProjectRepo>,
     pub users:           Arc<dyn UserRepo>,
     pub deployments:     Arc<dyn DeploymentRepo>,
@@ -1014,10 +1148,13 @@ pub struct AppState {
     pub tokens:          Arc<dyn TokenRepo>,
     pub credentials:     Arc<dyn CredentialRepo>,
     pub runtime:         Arc<dyn Runtime>,
+    pub domain_verifier: Arc<dyn DomainVerifier>,
     pub access_log:      AccessLogStore,
     // ... keep other current fields exactly as they were
 }
 ```
+
+`domain_verifier` already exists on the current `AppState` (as `Arc<dyn crate::domains::DomainVerifier>`) — only the path changes to `crate::verification::DomainVerifier` (renamed in Task 6b). `domains` is the new service-domain repo.
 
 - [ ] **Step 10.2: Add `AppStateBuilder`** (in `src/app.rs`)
 
@@ -1060,8 +1197,10 @@ impl AppState {
             .deployments(Arc::new(SqliteDeploymentRepo::new(pool.clone())))
             .jobs(Arc::new(SqliteJobRepo::new(pool.clone())))
             .tokens(Arc::new(SqliteTokenRepo::new(pool.clone())))
-            .credentials(Arc::new(SqliteCredentialRepo::new(pool)))
+            .credentials(Arc::new(SqliteCredentialRepo::new(pool.clone())))
+            .domains(Arc::new(SqliteDomainRepo::new(pool)))
             .runtime(/* default production runtime */)
+            .domain_verifier(Arc::new(crate::verification::HttpDomainVerifier::new()))
             .access_log(/* ... */)
             .build()
     }
@@ -1083,6 +1222,9 @@ For each handler in `app.rs`, replace `state.store.<method>` with `state.<aggreg
 | `*_job*`, `*_run*`, `claim_due_jobs`, `fail_orphan_runs`, `set_job_next_run`, `active_run` | `state.jobs` |
 | `*_api_token*` | `state.tokens` |
 | `put_credential` | `state.credentials` |
+| `*_service_domain*`, `list_all_service_domains`, `get_service_domain_by_token` | `state.domains` |
+
+`challenge_handler` (the unauthenticated route) calls `state.store.get_service_domain_by_token` today → becomes `state.domains.get_service_domain_by_token`. Update it too.
 
 Mechanical sweep with grep + edit:
 
@@ -1130,8 +1272,8 @@ If any test fails, fix in this commit. Do not split into a fix-up commit on mast
 
 **Files:**
 - Create: `src/api/mod.rs`
-- Create: `src/api/auth.rs`, `services.rs`, `deployments.rs`, `workloads.rs`, `projects.rs`, `members.rs`, `jobs.rs`, `secrets.rs`, `tokens.rs`, `observability.rs`, `ingress.rs`, `health.rs`
-- Modify: `src/app.rs` — leave only `AppState`, `AppStateBuilder`, `build_router`
+- Create: `src/api/auth.rs`, `services.rs`, `deployments.rs`, `workloads.rs`, `projects.rs`, `members.rs`, `jobs.rs`, `secrets.rs`, `tokens.rs`, `observability.rs`, `ingress.rs`, `domains.rs`, `health.rs`
+- Modify: `src/app.rs` — leave only `AppState`, `AppStateBuilder`, `build_router`, and the unauthenticated `challenge_handler` (or move `challenge_handler` into `api/domains.rs` and re-export)
 - Modify: `src/lib.rs` — add `pub mod api;`
 
 For each resource, the handler functions and their routes move together. The pattern per file:
@@ -1175,6 +1317,7 @@ async fn list(
 ```rust
 pub mod auth;
 pub mod deployments;
+pub mod domains;
 pub mod error;
 pub mod health;
 pub mod ingress;
@@ -1214,15 +1357,20 @@ pub mod workloads;
 
 - [ ] **Step 11.13: Extract `api/ingress.rs`** — `/v1/projects/:project/routes/*` route inspection.
 
+- [ ] **Step 11.13b: Extract `api/domains.rs`** — authed service-domain handlers `create_service_domain`, `list_service_domains`, `verify_service_domain`, `delete_service_domain_handler` (their `/v1/...` routes). Also move `challenge_handler` here and expose it as `pub async fn challenge_handler(...)` so `build_router` can mount it at root, unauthenticated. The verify handler calls `state.domain_verifier` + `state.domains`; the others call `state.domains`. Note `verify_service_domain` is async and may await the verifier.
+
 - [ ] **Step 11.14: Extract `api/health.rs`** — `pub async fn healthz() -> Json<HealthResponse>`. Plus `HealthResponse` struct.
 
-- [ ] **Step 11.15: Rewrite `src/app.rs::build_router`**
+- [ ] **Step 11.15: Rewrite `src/app.rs::build_router`** — preserve the **three nested tiers** under `/v1` and the **two unauthenticated root routes**. Current shape (do not collapse):
 
 ```rust
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
-        .route("/healthz", get(crate::api::health::healthz))
-        .merge(api::auth::router())
+    // unauthenticated v1 routes (login etc.)
+    let auth_public = api::auth::public_router();
+    // authenticated session/token issuance routes
+    let auth_routes = api::auth::router();
+    // routes behind require_auth route_layer
+    let protected = Router::new()
         .merge(api::services::router())
         .merge(api::deployments::router())
         .merge(api::workloads::router())
@@ -1233,13 +1381,24 @@ pub fn build_router(state: AppState) -> Router {
         .merge(api::tokens::router())
         .merge(api::observability::router())
         .merge(api::ingress::router())
-        .layer(middleware::from_fn_with_state(state.clone(), crate::auth::resolve_auth))
-        .fallback_service(crate::web::spa_service())
+        .merge(api::domains::router())                 // authed service-domain CRUD
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
+
+    Router::new()
+        .route("/healthz", get(crate::api::health::healthz))
+        .route(
+            "/.well-known/denia-challenge/{token}",     // UNAUTHENTICATED — must stay at root
+            get(crate::api::domains::challenge_handler),
+        )
+        .nest("/v1", auth_public.merge(auth_routes).merge(protected))
+        .fallback(crate::web::static_handler)
         .with_state(state)
 }
 ```
 
-**Verify**: `app.rs` is now ~150 lines: `AppState` + `AppStateBuilder` + `build_router` + nothing else.
+The exact split of `auth_public` / `auth_routes` / `protected` mirrors the **current** `app.rs:160–230`. Read it before rewriting; replicate the tier boundaries and which routes carry `require_auth`. Do not move a route across a tier.
+
+**Verify**: `app.rs` is now small: `AppState` + `AppStateBuilder` + `build_router` + nothing else (`challenge_handler` moved to `api/domains.rs`).
 
 - [ ] **Step 11.16: Verify route equivalence**
 
@@ -1247,15 +1406,18 @@ pub fn build_router(state: AppState) -> Router {
 cargo build && cargo test
 ```
 
-If integration tests check specific endpoints, all pass. Manual smoke:
+Integration tests (incl. `tests/domain_verification.rs`) must pass. Manual smoke:
 
 ```bash
 cargo run &
 PID=$!
 sleep 2
-curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:7180/healthz   # expect 200
+curl -s -o /dev/null -w "healthz %{http_code}\n" http://127.0.0.1:7180/healthz                              # 200
+curl -s -o /dev/null -w "challenge %{http_code}\n" http://127.0.0.1:7180/.well-known/denia-challenge/nope   # 404, NOT 401 (unauthenticated route reachable)
 kill $PID
 ```
+
+The challenge route returning 404 (not 401) confirms it stayed outside the auth layer.
 
 - [ ] **Step 11.17: Final verify + commit**
 
@@ -1488,6 +1650,8 @@ Each gets:
 - `InMemory*Repo` with `Mutex<HashMap<Uuid, T>>` (or appropriate keyed map)
 - 2–3 contract tests (happy path, missing → None/NotFound, conflict if applicable)
 
+Includes `InMemoryDomainRepo` for `DomainRepo`. Its `get_service_domain_by_token` needs a secondary token→id lookup; back it with a second `HashMap<String, Uuid>` or scan the values map. Add a contract test asserting `put_service_domain` then `get_service_domain_by_token` round-trips — this path is exercised by the unauthenticated challenge route, so it matters.
+
 Keep mocks minimal — they exist for handler tests, not as a second prod backend.
 
 - [ ] **Step 13.7: Write the first handler oneshot test**
@@ -1503,14 +1667,16 @@ use tower::ServiceExt;
 use denia::app::{AppState, build_router};
 use denia::repo::mock::{
     InMemoryServiceRepo, InMemoryProjectRepo, InMemoryUserRepo, InMemoryDeploymentRepo,
-    InMemoryJobRepo, InMemoryTokenRepo, InMemoryCredentialRepo,
+    InMemoryJobRepo, InMemoryTokenRepo, InMemoryCredentialRepo, InMemoryDomainRepo,
 };
 use denia::runtime::FakeRuntime;
+use denia::verification::HttpDomainVerifier;
 
 fn test_state() -> AppState {
     AppState::builder()
         .config(/* test AppConfig */)
         .services(Arc::new(InMemoryServiceRepo::default()))
+        .domains(Arc::new(InMemoryDomainRepo::default()))
         .projects(Arc::new(InMemoryProjectRepo::default()))
         .users(Arc::new(InMemoryUserRepo::default()))
         .deployments(Arc::new(InMemoryDeploymentRepo::default()))
@@ -1518,6 +1684,9 @@ fn test_state() -> AppState {
         .tokens(Arc::new(InMemoryTokenRepo::default()))
         .credentials(Arc::new(InMemoryCredentialRepo::default()))
         .runtime(Arc::new(FakeRuntime::default()))
+        // domain_verifier: HttpDomainVerifier is fine for handler tests that don't hit verify;
+        // for verify-path tests, inject a stub DomainVerifier returning Ok.
+        .domain_verifier(Arc::new(HttpDomainVerifier::new()))
         // ... other required fields
         .build()
 }
@@ -1552,6 +1721,8 @@ Pattern per resource:
 - not-found path (unknown id → 404)
 
 Prioritize: `services`, `projects`, `auth`, `deployments`. Others as time allows. **YAGNI**: do not test every handler exhaustively. The contract tests + integration tests already cover most behavior.
+
+For `domains`: `tests/domain_verification.rs` already covers the verifier + API end-to-end, so do NOT duplicate it here. Only add a oneshot test for the unauthenticated challenge route returning 404 on an unknown token (cheap, guards the auth-tier boundary). If you test `verify_service_domain`, inject a stub `DomainVerifier` (a `#[cfg(test)]` struct returning `Ok`) via the builder instead of `HttpDomainVerifier`, to avoid a real outbound HTTP call.
 
 - [ ] **Step 13.10: Verify and commit**
 
