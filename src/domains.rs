@@ -1,4 +1,6 @@
 use rand::Rng;
+use std::time::Duration;
+use subtle::ConstantTimeEq;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum HostnameError {
@@ -57,6 +59,179 @@ pub fn generate_token() -> String {
     hex::encode(buf)
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum DomainVerifyError {
+    #[error("dns lookup failed")]
+    DnsLookupFailed,
+    #[error("connection refused")]
+    ConnectionRefused,
+    #[error("connection timeout")]
+    ConnectionTimeout,
+    #[error("http {0}")]
+    HttpStatus(u16),
+    #[error("body mismatch")]
+    BodyMismatch,
+    #[error("body too large")]
+    BodyTooLarge,
+}
+
+#[async_trait::async_trait]
+pub trait DomainVerifier: Send + Sync {
+    async fn verify(&self, hostname: &str, token: &str) -> Result<(), DomainVerifyError>;
+}
+
+const MAX_BODY: usize = 1024;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub struct HttpDomainVerifier {
+    client: reqwest::Client,
+    base_url_override: Option<String>,
+}
+
+impl HttpDomainVerifier {
+    pub fn new() -> Self {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(READ_TIMEOUT)
+            .user_agent("denia-verifier/1")
+            .build()
+            .expect("reqwest client");
+        Self {
+            client,
+            base_url_override: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_base_url(base: String) -> Self {
+        let mut v = Self::new();
+        v.base_url_override = Some(base);
+        v
+    }
+}
+
+impl Default for HttpDomainVerifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl DomainVerifier for HttpDomainVerifier {
+    async fn verify(&self, hostname: &str, token: &str) -> Result<(), DomainVerifyError> {
+        let base = match &self.base_url_override {
+            Some(b) => b.clone(),
+            None => format!("http://{hostname}"),
+        };
+        let url = format!("{base}/.well-known/denia-challenge/{token}");
+
+        let response = self.client.get(&url).send().await.map_err(|e| {
+            if e.is_timeout() {
+                DomainVerifyError::ConnectionTimeout
+            } else if e.is_connect() {
+                let msg = e.to_string().to_lowercase();
+                if msg.contains("dns") || msg.contains("name") {
+                    DomainVerifyError::DnsLookupFailed
+                } else {
+                    DomainVerifyError::ConnectionRefused
+                }
+            } else {
+                DomainVerifyError::ConnectionRefused
+            }
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(DomainVerifyError::HttpStatus(status.as_u16()));
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| DomainVerifyError::BodyTooLarge)?;
+        if bytes.len() > MAX_BODY {
+            return Err(DomainVerifyError::BodyTooLarge);
+        }
+        let trimmed = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+        let expected = token.as_bytes();
+        if trimmed.len() != expected.len() {
+            return Err(DomainVerifyError::BodyMismatch);
+        }
+        if trimmed.ct_eq(expected).unwrap_u8() != 1 {
+            return Err(DomainVerifyError::BodyMismatch);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod verifier_tests {
+    use super::*;
+    use httpmock::prelude::*;
+
+    fn client_with_base(base: &str) -> HttpDomainVerifier {
+        HttpDomainVerifier::with_base_url(base.to_string())
+    }
+
+    #[tokio::test]
+    async fn verifier_success() {
+        let server = MockServer::start_async().await;
+        let _m = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/.well-known/denia-challenge/tok123");
+                then.status(200).body("tok123");
+            })
+            .await;
+        let v = client_with_base(&server.base_url());
+        v.verify("ignored.example.com", "tok123").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn verifier_404_returns_http_status() {
+        let server = MockServer::start_async().await;
+        let _m = server
+            .mock_async(|when, then| {
+                when.method(GET).path_contains("/.well-known/denia-challenge/");
+                then.status(404);
+            })
+            .await;
+        let v = client_with_base(&server.base_url());
+        let err = v.verify("ignored.example.com", "tok").await.unwrap_err();
+        assert_eq!(err, DomainVerifyError::HttpStatus(404));
+    }
+
+    #[tokio::test]
+    async fn verifier_body_mismatch() {
+        let server = MockServer::start_async().await;
+        let _m = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/.well-known/denia-challenge/tok123");
+                then.status(200).body("wrong");
+            })
+            .await;
+        let v = client_with_base(&server.base_url());
+        let err = v.verify("ignored.example.com", "tok123").await.unwrap_err();
+        assert_eq!(err, DomainVerifyError::BodyMismatch);
+    }
+
+    #[tokio::test]
+    async fn verifier_body_too_large() {
+        let server = MockServer::start_async().await;
+        let big = "x".repeat(2048);
+        let _m = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/.well-known/denia-challenge/tok");
+                then.status(200).body(big);
+            })
+            .await;
+        let v = client_with_base(&server.base_url());
+        let err = v.verify("ignored.example.com", "tok").await.unwrap_err();
+        assert_eq!(err, DomainVerifyError::BodyTooLarge);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,7 +283,10 @@ mod tests {
     fn generate_token_is_64_hex() {
         let t = generate_token();
         assert_eq!(t.len(), 64);
-        assert!(t.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            t.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
         let u = generate_token();
         assert_ne!(t, u, "tokens should be random");
     }
