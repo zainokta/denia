@@ -6,6 +6,7 @@ import { runQuery } from '#/effect/runtime'
 import { StatusSignal } from '#/components/StatusSignal'
 import { DeployPhase } from '#/components/DeployPhase'
 import { TlsToggle } from '#/components/TlsToggle'
+import { SecurityBadge } from '#/components/SecurityBadge'
 import type { Deployment } from '#/effect/schema'
 
 const getDeployments = (id: number) =>
@@ -146,6 +147,7 @@ export function ServiceDetail() {
         >
           stop
         </button>
+        <SecurityBadge security={service?.security} />
         {service ? <TlsToggle service={service} /> : null}
       </div>
 
@@ -209,6 +211,54 @@ export function ServiceDetail() {
           </div>
         )}
       </section>
+
+      {service?.security ? (
+        <section className="mb-8">
+          <p className="kicker mb-2">posture</p>
+          <div className="panel overflow-hidden">
+            <ul className="m-0 list-none">
+              <li className="flex items-center gap-3 px-4 py-2 text-xs border-b border-[var(--border)]">
+                <span className="text-[var(--fg-muted)]">userns</span>
+                <span
+                  className={`signal ${service.security.userns ? 'signal-steady' : 'signal-fault'}`}
+                  aria-hidden="true"
+                />
+                <span className="text-[var(--fg)]">
+                  {service.security.userns ? 'enabled' : 'disabled'}
+                </span>
+              </li>
+              <li className="flex items-center gap-3 px-4 py-2 text-xs border-b border-[var(--border)]">
+                <span className="text-[var(--fg-muted)]">mapped uid</span>
+                <span className="tnum text-[var(--fg)]">
+                  {service.security.mapped_uid !== null
+                    ? String(service.security.mapped_uid)
+                    : '—'}
+                </span>
+              </li>
+              <li className="flex items-center gap-3 px-4 py-2 text-xs border-b border-[var(--border)]">
+                <span className="text-[var(--fg-muted)]">no_new_privs</span>
+                <span
+                  className={`signal ${service.security.no_new_privs ? 'signal-steady' : 'signal-fault'}`}
+                  aria-hidden="true"
+                />
+                <span className="text-[var(--fg)]">
+                  {service.security.no_new_privs ? 'enabled' : 'disabled'}
+                </span>
+              </li>
+              <li className="flex items-center gap-3 px-4 py-2 text-xs">
+                <span className="text-[var(--fg-muted)]">caps</span>
+                <span
+                  className={`signal ${service.security.caps_dropped ? 'signal-steady' : 'signal-fault'}`}
+                  aria-hidden="true"
+                />
+                <span className="text-[var(--fg)]">
+                  {service.security.caps_dropped ? 'dropped' : 'retained'}
+                </span>
+              </li>
+            </ul>
+          </div>
+        </section>
+      ) : null}
 
       <section className="mb-8">
         <p className="kicker mb-2">logs</p>

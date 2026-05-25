@@ -4,6 +4,7 @@ import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
 import { StatusSignal } from '#/components/StatusSignal'
+import { SecurityBadge } from '#/components/SecurityBadge'
 
 const listServices = Effect.gen(function* () {
   const api = yield* ApiClient
@@ -76,6 +77,7 @@ export function ServicesIndex() {
                 }`}
               >
                 {svc.status ? <StatusSignal status={svc.status} /> : null}
+                <SecurityBadge security={svc.security} />
                 <a
                   href={`/services/${svc.id}`}
                   className="min-w-0 flex-1 text-[var(--fg)] no-underline hover:underline"
