@@ -1,10 +1,42 @@
-import { Link } from '@tanstack/react-router'
+import { Link, useNavigate } from '@tanstack/react-router'
 import { Suspense, lazy } from 'react'
 import ThemeToggle from './ThemeToggle'
+import { useAuth } from '../hooks/useAuth'
 
 const ProjectSwitcher = lazy(() =>
   import('./ProjectSwitcher').then((m) => ({ default: m.ProjectSwitcher })),
 )
+
+function Identity() {
+  const { me, isBootstrap, isSuperAdmin, logout, token } = useAuth()
+  const navigate = useNavigate()
+  if (!token) return null
+  const label = isBootstrap
+    ? 'bootstrap'
+    : me?.principal.kind === 'user'
+      ? me.principal.user.username
+      : '…'
+  const handleLogout = async () => {
+    await logout()
+    navigate({ to: '/login' })
+  }
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span className="kicker" title={isSuperAdmin ? 'super admin' : 'user'}>
+        {label}
+        {isSuperAdmin ? ' · admin' : ''}
+      </span>
+      <button
+        type="button"
+        onClick={handleLogout}
+        className="nav-link"
+        aria-label="Log out"
+      >
+        Logout
+      </button>
+    </div>
+  )
+}
 
 export default function Header() {
   return (
@@ -41,6 +73,13 @@ export default function Header() {
             activeProps={{ className: 'nav-link is-active' }}
           >
             Ingress
+          </Link>
+          <Link
+            to="/observability"
+            className="nav-link"
+            activeProps={{ className: 'nav-link is-active' }}
+          >
+            Observability
           </Link>
           <Link
             to="/jobs"
@@ -83,6 +122,7 @@ export default function Header() {
           <Suspense fallback={null}>
             <ProjectSwitcher />
           </Suspense>
+          <Identity />
           <ThemeToggle />
         </div>
       </nav>

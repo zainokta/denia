@@ -8,6 +8,16 @@ vi.mock('#/effect/runtime', () => ({
   runQuery: vi.fn(() => Promise.resolve([])),
 }))
 
+vi.mock('#/hooks/useAuth', () => ({
+  useAuth: () => ({
+    isSuperAdmin: true,
+    roleForActiveProject: () => 'admin',
+    token: 'test',
+    me: undefined,
+  }),
+  can: (_required: string, _userRole: string) => true,
+}))
+
 import { runQuery } from '#/effect/runtime'
 
 const mockRunQuery = runQuery as ReturnType<typeof vi.fn>

@@ -51,6 +51,6 @@ describe('useAuth', () => {
     const { result } = renderHook(() => useAuth(), {
       wrapper: queryWrapper(),
     })
-    expect(result.current.roleForActiveProject(1)).toBeUndefined()
+    expect(result.current.roleForActiveProject('p1')).toBeUndefined()
   })
 })

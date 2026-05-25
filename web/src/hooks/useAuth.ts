@@ -36,7 +36,7 @@ export function useAuth() {
   })
 
   const roleForActiveProject = (
-    projectId: number,
+    projectId: string,
   ): Role | undefined => {
     if (!meQuery.data) return undefined
     if (meQuery.data.is_super_admin) return 'admin'

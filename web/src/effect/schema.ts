@@ -32,9 +32,16 @@ export const PrincipalView = Schema.Union([
 export type PrincipalView = typeof PrincipalView.Type
 
 export class Membership extends Schema.Class<Membership>('Membership')({
-  project_id: Schema.Number,
+  project_id: Schema.String,
   role: Role,
 }) {}
+
+export class ProjectMember extends Schema.Class<ProjectMember>('ProjectMember')({
+  user_id: Schema.String,
+  project_id: Schema.String,
+  role: Role,
+}) {}
+export const ProjectMembers = Schema.Array(ProjectMember)
 
 export class Me extends Schema.Class<Me>('Me')({
   principal: PrincipalView,
@@ -136,6 +143,49 @@ export class RouteView extends Schema.Class<RouteView>('RouteView')({
   tls: Schema.Boolean,
 }) {}
 export const RouteViews = Schema.Array(RouteView)
+
+export const CpuCounters = Schema.Struct({
+  user_jiffies: Schema.Number,
+  nice_jiffies: Schema.Number,
+  system_jiffies: Schema.Number,
+  idle_jiffies: Schema.Number,
+  iowait_jiffies: Schema.Number,
+})
+export type CpuCounters = typeof CpuCounters.Type
+
+export class NodeSnapshot extends Schema.Class<NodeSnapshot>('NodeSnapshot')({
+  cpu: CpuCounters,
+  memory_total_bytes: Schema.Number,
+  memory_available_bytes: Schema.Number,
+  load_1m: Schema.Number,
+  load_5m: Schema.Number,
+  load_15m: Schema.Number,
+  disk_total_bytes: Schema.Number,
+  disk_available_bytes: Schema.Number,
+  recorded_at: Schema.String,
+}) {}
+
+export class WorkloadView extends Schema.Class<WorkloadView>('WorkloadView')({
+  service_id: Schema.String,
+  service_name: Schema.String,
+  project_id: Schema.String,
+  deployment_id: Schema.NullOr(Schema.String),
+  status: Schema.NullOr(DeploymentStatus),
+  cpu_usage_usec: Schema.NullOr(Schema.Number),
+  memory_current_bytes: Schema.NullOr(Schema.Number),
+}) {}
+export const WorkloadViews = Schema.Array(WorkloadView)
+
+export class AccessEntry extends Schema.Class<AccessEntry>('AccessEntry')({
+  service_name: Schema.String,
+  method: Schema.String,
+  path: Schema.String,
+  status: Schema.Number,
+  bytes: Schema.NullOr(Schema.Number),
+  duration_ms: Schema.NullOr(Schema.Number),
+  recorded_at: Schema.String,
+}) {}
+export const AccessEntries = Schema.Array(AccessEntry)
 
 export const JobRunStatus = Schema.Literals([
   'Pending',

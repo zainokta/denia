@@ -74,7 +74,7 @@ export function JobDetail() {
   })
 
   const userRole = job
-    ? auth.roleForActiveProject(Number(job.project_id))
+    ? auth.roleForActiveProject(job.project_id)
     : undefined
   const canOperate = userRole ? can('operator', userRole) : false
 
