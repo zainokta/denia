@@ -1,13 +1,15 @@
-use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::{
-    io,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, UnixStream},
     sync::{Mutex, oneshot},
     task::JoinHandle,
 };
+
+use crate::access_log::{AccessEntry, AccessLogStore, parse_request_line, parse_status_line};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeTarget {
@@ -109,9 +111,30 @@ impl BridgeManager for FakeBridgeManager {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct LoopbackBridgeSupervisor {
+    inner: Arc<LoopbackBridgeInner>,
+}
+
+#[derive(Default)]
+struct LoopbackBridgeInner {
     tasks: Mutex<BTreeMap<String, BridgeTask>>,
+    access_log: AccessLogStore,
+}
+
+impl LoopbackBridgeSupervisor {
+    pub fn with_access_log(access_log: AccessLogStore) -> Self {
+        Self {
+            inner: Arc::new(LoopbackBridgeInner {
+                tasks: Mutex::new(BTreeMap::new()),
+                access_log,
+            }),
+        }
+    }
+
+    pub fn access_log(&self) -> AccessLogStore {
+        self.inner.access_log.clone()
+    }
 }
 
 struct BridgeTask {
@@ -122,14 +145,27 @@ struct BridgeTask {
 pub struct LoopbackBridge {
     listener: TcpListener,
     socket_path: PathBuf,
+    service_name: String,
+    access_log: AccessLogStore,
 }
 
 impl LoopbackBridge {
     pub async fn bind(port: u16, socket_path: impl Into<PathBuf>) -> Result<Self, BridgeError> {
+        Self::bind_with_log(port, socket_path, String::new(), AccessLogStore::new()).await
+    }
+
+    pub async fn bind_with_log(
+        port: u16,
+        socket_path: impl Into<PathBuf>,
+        service_name: String,
+        access_log: AccessLogStore,
+    ) -> Result<Self, BridgeError> {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
         Ok(Self {
             listener,
             socket_path: socket_path.into(),
+            service_name,
+            access_log,
         })
     }
 
@@ -141,9 +177,13 @@ impl LoopbackBridge {
     }
 
     pub async fn serve_one(&self) -> Result<(), BridgeError> {
-        let (mut tcp, _) = self.listener.accept().await?;
-        let mut unix = UnixStream::connect(&self.socket_path).await?;
-        io::copy_bidirectional(&mut tcp, &mut unix).await?;
+        let (tcp, _) = self.listener.accept().await?;
+        let unix = UnixStream::connect(&self.socket_path).await?;
+        let log = self.access_log.clone();
+        let service = self.service_name.clone();
+        tokio::spawn(async move {
+            let _ = tee_proxy(tcp, unix, service, log).await;
+        });
         Ok(())
     }
 
@@ -161,13 +201,124 @@ impl LoopbackBridge {
     }
 }
 
+async fn tee_proxy(
+    tcp: tokio::net::TcpStream,
+    unix: UnixStream,
+    service_name: String,
+    access_log: AccessLogStore,
+) -> std::io::Result<()> {
+    let (mut tcp_read, mut tcp_write) = tokio::io::split(tcp);
+    let (mut unix_read, mut unix_write) = tokio::io::split(unix);
+    let started = Instant::now();
+
+    let mut request_line: Option<(String, String)> = None;
+    let mut req_bytes: u64 = 0;
+    let mut head_buf = Vec::with_capacity(1024);
+
+    let req_done = async {
+        loop {
+            let mut byte = [0u8; 1];
+            let n = tcp_read.read(&mut byte).await?;
+            if n == 0 {
+                break;
+            }
+            req_bytes += 1;
+            if request_line.is_none() && head_buf.len() < 8192 {
+                head_buf.extend_from_slice(&byte);
+                if let Some(pos) = head_buf.iter().position(|&b| b == b'\n') {
+                    let line = String::from_utf8_lossy(&head_buf[..pos]);
+                    request_line = parse_request_line(line.trim_end_matches('\r'));
+                }
+            }
+            unix_write.write_all(&byte).await?;
+            if byte[0] == b'\n' && head_buf.ends_with(b"\r\n\r\n") || head_buf.ends_with(b"\n\n") {
+                break;
+            }
+        }
+        let mut rest = [0u8; 8192];
+        loop {
+            let n = tcp_read.read(&mut rest).await?;
+            if n == 0 {
+                break;
+            }
+            req_bytes += n as u64;
+            unix_write.write_all(&rest[..n]).await?;
+        }
+        unix_write.shutdown().await.ok();
+        Ok::<_, std::io::Error>(())
+    };
+
+    let mut status_code: Option<u16> = None;
+    let mut resp_bytes: u64 = 0;
+    let mut resp_head = Vec::with_capacity(256);
+    let resp_done = async {
+        loop {
+            let mut byte = [0u8; 1];
+            let n = unix_read.read(&mut byte).await?;
+            if n == 0 {
+                break;
+            }
+            resp_bytes += 1;
+            if status_code.is_none() && resp_head.len() < 1024 {
+                resp_head.extend_from_slice(&byte);
+                if let Some(pos) = resp_head.iter().position(|&b| b == b'\n') {
+                    let line = String::from_utf8_lossy(&resp_head[..pos]);
+                    status_code = parse_status_line(line.trim_end_matches('\r'));
+                }
+            }
+            tcp_write.write_all(&byte).await?;
+            if status_code.is_some() {
+                break;
+            }
+        }
+        let mut rest = [0u8; 8192];
+        loop {
+            let n = unix_read.read(&mut rest).await?;
+            if n == 0 {
+                break;
+            }
+            resp_bytes += n as u64;
+            tcp_write.write_all(&rest[..n]).await?;
+        }
+        tcp_write.shutdown().await.ok();
+        Ok::<_, std::io::Error>(())
+    };
+
+    let (a, b) = tokio::join!(req_done, resp_done);
+    let _ = req_bytes;
+    a?;
+    b?;
+
+    if !service_name.is_empty()
+        && let Some((method, path)) = request_line
+    {
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        access_log.append(AccessEntry {
+            service_name,
+            method,
+            path,
+            status: status_code.unwrap_or(0),
+            bytes: Some(resp_bytes),
+            duration_ms: Some(duration_ms),
+            recorded_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl BridgeManager for LoopbackBridgeSupervisor {
     async fn activate(&self, target: BridgeTarget) -> Result<(), BridgeError> {
-        let bridge = LoopbackBridge::bind(target.port, target.socket_path.clone()).await?;
+        let bridge = LoopbackBridge::bind_with_log(
+            target.port,
+            target.socket_path.clone(),
+            target.service_name.clone(),
+            self.inner.access_log.clone(),
+        )
+        .await?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let join = tokio::spawn(bridge.serve_until_shutdown(shutdown_rx));
-        let replaced = self.tasks.lock().await.insert(
+        let replaced = self.inner.tasks.lock().await.insert(
             target.service_name.clone(),
             BridgeTask {
                 shutdown: shutdown_tx,
@@ -182,7 +333,7 @@ impl BridgeManager for LoopbackBridgeSupervisor {
     }
 
     async fn deactivate(&self, service_name: &str) -> Result<(), BridgeError> {
-        if let Some(task) = self.tasks.lock().await.remove(service_name) {
+        if let Some(task) = self.inner.tasks.lock().await.remove(service_name) {
             let _ = task.shutdown.send(());
             task.join.abort();
         }
