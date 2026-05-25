@@ -31,8 +31,9 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       )
 
     const fromHttp = Effect.gen(function* () {
-      const headers = config.token
-        ? { authorization: `Bearer ${config.token}` }
+      const token = config.getAuthToken()
+      const headers = token
+        ? { authorization: `Bearer ${token}` }
         : {}
       const response = yield* http
         .get(`${config.baseUrl}/v1/nodes`, { headers })
