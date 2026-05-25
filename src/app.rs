@@ -239,11 +239,7 @@ async fn challenge_handler(
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
     match state.store.get_service_domain_by_token(&token)? {
-        Some(_) => Ok((
-            [(header::CONTENT_TYPE, "text/plain")],
-            token,
-        )
-            .into_response()),
+        Some(_) => Ok(([(header::CONTENT_TYPE, "text/plain")], token).into_response()),
         None => Err(ApiError::NotFound("challenge token not found".into())),
     }
 }
@@ -651,7 +647,9 @@ async fn list_service_domains(
         .get_service(service_id)?
         .ok_or_else(|| ApiError::NotFound("service not found".into()))?;
     ensure_role(&state, &principal, svc.project_id, Role::Viewer)?;
-    Ok(Json(state.store.list_service_domains_by_service(service_id)?))
+    Ok(Json(
+        state.store.list_service_domains_by_service(service_id)?,
+    ))
 }
 
 async fn verify_service_domain(
