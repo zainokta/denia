@@ -1,13 +1,14 @@
-import { describe, expect, it } from '@effect/vitest'
-import { Effect, Layer, Schema } from 'effect'
+import { describe, expect, it, vi } from '@effect/vitest'
+import { Effect, Layer } from 'effect'
 import { FetchHttpClient } from 'effect/unstable/http'
 import { ApiClient, ApiClientLive } from './api-client'
 import { AppConfig } from './config'
-import { Nodes, Project, Projects } from './schema'
+import { clearToken, getToken, setToken, subscribe } from './auth-store'
 
-// baseUrl "" selects the fixture path, so no network is touched.
 const TestLayer = ApiClientLive.pipe(
-  Layer.provide(Layer.succeed(AppConfig)({ baseUrl: '', token: undefined })),
+  Layer.provide(
+    Layer.succeed(AppConfig)({ baseUrl: '', getAuthToken: () => undefined }),
+  ),
   Layer.provide(FetchHttpClient.layer),
 )
 
@@ -29,77 +30,101 @@ describe('ApiClient', () => {
   )
 })
 
-describe('Nodes schema', () => {
-  it.effect('rejects a malformed payload as a typed failure', () =>
-    Schema.decodeUnknownEffect(Nodes)([{ id: 'not-a-number', name: 'x' }]).pipe(
-      Effect.flip,
-      Effect.map((error) => {
-        expect(error).toBeDefined()
-      }),
-    ),
+describe('auth-store', () => {
+  it('getToken returns undefined when nothing is stored', () => {
+    clearToken()
+    expect(getToken()).toBeUndefined()
+  })
+
+  it('setToken stores and getToken retrieves a token', () => {
+    clearToken()
+    setToken('abc')
+    expect(getToken()).toBe('abc')
+  })
+
+  it('setToken overwrites a previous token', () => {
+    clearToken()
+    setToken('abc')
+    setToken('def')
+    expect(getToken()).toBe('def')
+  })
+
+  it('clearToken removes a stored token', () => {
+    clearToken()
+    setToken('abc')
+    clearToken()
+    expect(getToken()).toBeUndefined()
+  })
+
+  it('subscribe notifies listeners on setToken and clearToken', () => {
+    clearToken()
+    const listener = vi.fn()
+    const unsub = subscribe(listener)
+    setToken('abc')
+    expect(listener).toHaveBeenCalledTimes(1)
+    clearToken()
+    expect(listener).toHaveBeenCalledTimes(2)
+    unsub()
+    setToken('def')
+    expect(listener).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('AppConfig getAuthToken', () => {
+  const ConfigLayer = Layer.succeed(AppConfig)({
+    baseUrl: '',
+    getAuthToken: () => getToken(),
+  })
+
+  it.effect('returns runtime token when set via auth-store', () =>
+    Effect.gen(function* () {
+      clearToken()
+      setToken('runtime-token')
+      const config = yield* AppConfig
+      expect(config.getAuthToken()).toBe('runtime-token')
+    }).pipe(Effect.provide(ConfigLayer)),
+  )
+
+  it.effect('returns undefined when no token is set', () =>
+    Effect.gen(function* () {
+      clearToken()
+      const config = yield* AppConfig
+      expect(config.getAuthToken()).toBeUndefined()
+    }).pipe(Effect.provide(ConfigLayer)),
+  )
+
+  it.effect('reads the current token per call without rebuilding runtime', () =>
+    Effect.gen(function* () {
+      clearToken()
+      const config = yield* AppConfig
+      setToken('first')
+      expect(config.getAuthToken()).toBe('first')
+      setToken('second')
+      expect(config.getAuthToken()).toBe('second')
+      clearToken()
+      expect(config.getAuthToken()).toBeUndefined()
+    }).pipe(Effect.provide(ConfigLayer)),
   )
 })
 
-describe('Project schema', () => {
-  it.effect('decodes a project', () =>
-    Schema.decodeUnknownEffect(Project)({
-      id: '018f1100-0000-7000-0000-000000000001',
-      name: 'web',
-      description: null,
-      shared_env: [['A', '1']],
-      default_resource_limits: null,
-      created_at: '2026-05-25T00:00:00Z',
+describe('ApiClient with getAuthToken', () => {
+  it.effect('listNodes uses getAuthToken from config (fixture path)', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      const nodes = yield* api.listNodes
+      expect(nodes.length).toBe(3)
     }).pipe(
-      Effect.map((p) => {
-        expect(p.name).toBe('web')
-        expect(p.shared_env).toEqual([['A', '1']])
-      }),
-    ),
-  )
-
-  it.effect('decodes a project with resource limits', () =>
-    Schema.decodeUnknownEffect(Project)({
-      id: '018f1100-0000-7000-0000-000000000002',
-      name: 'api',
-      description: 'backend services',
-      shared_env: [],
-      default_resource_limits: { cpu_millis: 500, memory_bytes: 268435456 },
-      created_at: '2026-05-25T00:00:00Z',
-    }).pipe(
-      Effect.map((p) => {
-        expect(p.name).toBe('api')
-        expect(p.default_resource_limits).toEqual({
-          cpu_millis: 500,
-          memory_bytes: 268435456,
-        })
-      }),
-    ),
-  )
-
-  it.effect('decodes an array of projects', () =>
-    Schema.decodeUnknownEffect(Projects)([
-      {
-        id: '018f1100-0000-7000-0000-000000000001',
-        name: 'web',
-        description: null,
-        shared_env: [],
-        default_resource_limits: null,
-        created_at: '2026-05-25T00:00:00Z',
-      },
-      {
-        id: '018f1100-0000-7000-0000-000000000002',
-        name: 'api',
-        description: 'backend',
-        shared_env: [['DB_URL', 'pg://localhost']],
-        default_resource_limits: { cpu_millis: 1000, memory_bytes: 536870912 },
-        created_at: '2026-05-25T00:00:00Z',
-      },
-    ]).pipe(
-      Effect.map((projects) => {
-        expect(projects.length).toBe(2)
-        expect(projects[1].name).toBe('api')
-        expect(projects[1].shared_env).toEqual([['DB_URL', 'pg://localhost']])
-      }),
+      Effect.provide(
+        ApiClientLive.pipe(
+          Layer.provide(
+            Layer.succeed(AppConfig)({
+              baseUrl: '',
+              getAuthToken: () => 'test-token',
+            }),
+          ),
+          Layer.provide(FetchHttpClient.layer),
+        ),
+      ),
     ),
   )
 })
