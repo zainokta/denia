@@ -256,6 +256,60 @@ impl SqliteStore {
             connection.execute("INSERT INTO schema_version (version) VALUES (4)", [])?;
         }
 
+        if current < 5 {
+            connection.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS service_domains (
+                    id TEXT PRIMARY KEY,
+                    service_id TEXT NOT NULL,
+                    hostname TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL,
+                    challenge_token TEXT NOT NULL UNIQUE,
+                    verified_at TEXT,
+                    last_check_at TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_service_domains_service
+                    ON service_domains(service_id);
+                CREATE INDEX IF NOT EXISTS idx_service_domains_status
+                    ON service_domains(status);
+                "#,
+            )?;
+
+            // Backfill: for each service, parse domains from config and insert service_domains rows
+            let now = Utc::now().to_rfc3339();
+            let mut stmt = connection.prepare("SELECT id, config_json FROM services")?;
+            let rows: Vec<(String, String)> = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<_, _>>()?;
+            drop(stmt);
+
+            for (service_id, config_json) in rows {
+                if let Ok(svc) = serde_json::from_str::<ServiceConfig>(&config_json) {
+                    for hostname in &svc.domains {
+                        let token = crate::domains::generate_token();
+                        let id = Uuid::now_v7().to_string();
+                        connection.execute(
+                            r#"
+                            INSERT OR IGNORE INTO service_domains
+                              (id, service_id, hostname, status, challenge_token,
+                               verified_at, last_check_at, last_error, created_at)
+                            VALUES (?1, ?2, ?3, 'verified', ?4, ?5, NULL, NULL, ?5)
+                            "#,
+                            params![id, service_id, hostname, token, now],
+                        )?;
+                    }
+                }
+            }
+
+            connection.execute("DELETE FROM schema_version", [])?;
+            connection.execute("INSERT INTO schema_version (version) VALUES (5)", [])?;
+        }
+
         Ok(())
     }
 
@@ -1126,4 +1180,16 @@ struct DeploymentRow {
     request_json: String,
     status_json: String,
     created_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrate_advances_to_version_5() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        assert_eq!(store.schema_version().unwrap(), 5);
+    }
 }
