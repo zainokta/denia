@@ -1,4 +1,4 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, Link } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Effect } from 'effect'
@@ -249,15 +249,16 @@ export function JobsIndex() {
                     }`}
                   >
                     <span className="signal" aria-hidden="true" />
-                    <a
-                      href={`/jobs/${j.id}`}
+                    <Link
+                      to="/jobs/$jobId"
+                      params={{ jobId: j.id }}
                       className="min-w-0 flex-1 text-[var(--fg)] no-underline hover:underline"
                     >
                       <span className="font-semibold">{j.name}</span>
                       <span className="ml-3 text-xs text-[var(--fg-muted)]">
                         {sourceDisplay(j.source)}
                       </span>
-                    </a>
+                    </Link>
                     {j.schedule && (
                       <span className="text-xs text-[var(--fg-muted)]">
                         {j.schedule}
