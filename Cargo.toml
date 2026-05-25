@@ -28,6 +28,11 @@ tower = "0.5"
 uuid = { version = "1", features = ["serde", "v7"] }
 zstd = "0.13.3"
 
+[features]
+default = []
+ecr = []
+gar = []
+
 [dev-dependencies]
 http = "1"
 tempfile = "3"

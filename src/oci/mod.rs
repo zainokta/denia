@@ -1,5 +1,9 @@
 pub mod config;
 pub mod credentials;
+#[cfg(feature = "ecr")]
+pub mod ecr;
+#[cfg(feature = "gar")]
+pub mod gar;
 pub mod layout;
 pub mod registry;
 pub mod unpack;
