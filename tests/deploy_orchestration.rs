@@ -50,6 +50,7 @@ async fn fake_runtime_starts_and_stops_service() {
     let status = runtime
         .start(RuntimeStartRequest {
             service_name: "web".to_string(),
+            service_id: uuid::Uuid::now_v7(),
             deployment_id: uuid::Uuid::now_v7(),
             artifact,
             internal_port: 3000,

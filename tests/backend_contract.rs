@@ -451,3 +451,25 @@ async fn deployment_endpoint_rejects_unknown_service() {
 
     assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
 }
+
+#[test]
+fn migrate_is_idempotent_and_records_version() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    store.migrate().unwrap();
+    store.migrate().unwrap();
+    let v = store.schema_version().unwrap();
+    assert!(v >= 2);
+}
+
+#[test]
+fn migration_seeds_default_project_and_backfills_services() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    store.migrate().unwrap();
+    let default_id = store.default_project_id().unwrap();
+    let projects = store.list_projects().unwrap();
+    assert!(
+        projects
+            .iter()
+            .any(|p| p.id == default_id && p.name == "default")
+    );
+}

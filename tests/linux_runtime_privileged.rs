@@ -90,6 +90,7 @@ async fn linux_runtime_start_uses_unshare_and_cgroup_gate() {
     let status = runtime
         .start(RuntimeStartRequest {
             service_name: "true-service".to_string(),
+            service_id: uuid::Uuid::now_v7(),
             deployment_id,
             artifact,
             internal_port: 3000,
@@ -196,6 +197,7 @@ async fn hardened_workload_has_no_new_privs_and_cleared_cap_bnd() {
     let status = runtime
         .start(RuntimeStartRequest {
             service_name: "hardened-svc".to_string(),
+            service_id: uuid::Uuid::now_v7(),
             deployment_id,
             artifact,
             internal_port: 3001,
