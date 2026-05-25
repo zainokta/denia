@@ -45,6 +45,8 @@ pub struct AppState {
     routes: SharedRoutes,
     ingress_options: IngressRenderOptions,
     pub access_log: AccessLogStore,
+    pub domain_verifier: Arc<dyn crate::domains::DomainVerifier>,
+    pub verifying_domains: Arc<Mutex<std::collections::HashSet<uuid::Uuid>>>,
 }
 
 impl AppState {
@@ -136,7 +138,17 @@ impl AppState {
             routes: Arc::new(Mutex::new(BTreeMap::new())),
             ingress_options,
             access_log,
+            domain_verifier: Arc::new(crate::domains::HttpDomainVerifier::new()),
+            verifying_domains: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
+    }
+
+    pub fn with_domain_verifier(
+        mut self,
+        verifier: Arc<dyn crate::domains::DomainVerifier>,
+    ) -> Self {
+        self.domain_verifier = verifier;
+        self
     }
 }
 
