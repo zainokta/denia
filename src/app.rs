@@ -208,6 +208,10 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/healthz", get(healthz))
+        .route(
+            "/.well-known/denia-challenge/{token}",
+            get(challenge_handler),
+        )
         .nest("/v1", auth_public.merge(auth_routes).merge(protected))
         .fallback(crate::web::static_handler)
         .with_state(state)
@@ -215,6 +219,20 @@ pub fn build_router(state: AppState) -> Router {
 
 async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { ok: true })
+}
+
+async fn challenge_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> Result<axum::response::Response, ApiError> {
+    match state.store.get_service_domain_by_token(&token)? {
+        Some(_) => Ok((
+            [(header::CONTENT_TYPE, "text/plain")],
+            token,
+        )
+            .into_response()),
+        None => Err(ApiError::NotFound("challenge token not found".into())),
+    }
 }
 
 fn ensure_role(
