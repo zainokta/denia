@@ -6,7 +6,7 @@
 
 **Architecture:** New SQLite table `service_domains` is the source of truth. Each verification challenge is served by Denia's control plane at `GET /.well-known/denia-challenge/:token` (public, no auth), exposed via a global Traefik path router on the `web` entrypoint at priority `1000`. Verification is operator-triggered (`POST /v1/services/:service_id/domains/:domain_id/verify`); Denia fetches `http://hostname/.well-known/denia-challenge/{token}`, constant-time compares the body, and re-renders Traefik on success. A `DomainVerifier` trait abstracts the HTTP fetch so tests can substitute a fake.
 
-**Tech Stack:** Rust 2024, axum 0.8, rusqlite 0.39, reqwest 0.12 (new dep), subtle 2 (new dep), uuid v7, chrono, async-trait.
+**Tech Stack:** Rust 2024, axum 0.8, rusqlite 0.39, reqwest 0.13 (new dep), subtle 2 (new dep), uuid v7, chrono, async-trait.
 
 **Spec:** `docs/superpowers/specs/2026-05-25-domain-verification.md`.
 
@@ -45,7 +45,7 @@
 Add to `[dependencies]`:
 
 ```toml
-reqwest = { version = "0.12", default-features = false, features = ["http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["http2"] }
 subtle = "2"
 ```
 
@@ -1682,7 +1682,7 @@ Per CLAUDE.md: print the exact commands run and their outputs before finishing.
 - **Order of route registration matters.** `/services/{service_id}/{action}` is a catch-all that will swallow `/services/{id}/domains` if registered first. Register domain routes BEFORE the lifecycle catch-all.
 - **`StateError` -> `DeployError` and `ApiError` conversions** may need additional `#[from]` impls. Add as compiler complaints surface.
 - **`rusqlite::Error::SqliteFailure` matching** for unique constraint must use `rusqlite::ErrorCode::ConstraintViolation`. If the actual error variant differs, use `rusqlite::ffi::ErrorCode::ConstraintViolation`.
-- **`reqwest` with `default-features = false`** must still link. If build fails, try `features = ["http2", "default-tls"]`, since `default-tls` is required for TLS but harmless for plain HTTP. Plain HTTP only is fine without TLS features in reqwest 0.12.
+- **`reqwest` with `default-features = false`** must still link. If build fails, try `features = ["http2", "default-tls"]`, since `default-tls` is required for TLS but harmless for plain HTTP. Plain HTTP only is fine without TLS features in reqwest 0.13.
 - **`httpmock` async API**: the `mock_async` form is used to compose with `tokio::test`. Confirm against the installed crate version.
 - **No background scheduler** is added in this plan. Verification is strictly operator-triggered.
 - **Frontend changes are out of scope** — a sibling plan will cover the console UI.
