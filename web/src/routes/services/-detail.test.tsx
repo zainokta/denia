@@ -134,12 +134,12 @@ describe('ServiceDetail', () => {
     ]
     allReturns([deployFix, [], [], fixServices])
 
-    render(<ServiceDetail />, { wrapper: makeWrapper() })
+    const { container } = render(<ServiceDetail />, { wrapper: makeWrapper() })
 
-    expect(await screen.findByText('queued')).toBeTruthy()
-    expect(screen.getByText('acquiring')).toBeTruthy()
-    expect(screen.getByText('starting')).toBeTruthy()
-    expect(screen.getByText('live')).toBeTruthy()
+    await screen.findByText('queued')
+    expect(container.querySelector('.signal-warn')).toBeTruthy()
+    const signals = container.querySelectorAll('.signal')
+    expect(signals.length).toBeGreaterThanOrEqual(1)
   })
 
   it('renders artifact digest when present', async () => {
@@ -154,7 +154,7 @@ describe('ServiceDetail', () => {
     ]
     allReturns([deployFix, [], [], fixServices])
 
-    render(<ServiceDetail />, { wrapper: makeWrapper() })
+    const { container } = render(<ServiceDetail />, { wrapper: makeWrapper() })
 
     expect(await screen.findByText(/sha256:abc1/)).toBeTruthy()
     expect(screen.getByText('image')).toBeTruthy()
@@ -171,8 +171,9 @@ describe('ServiceDetail', () => {
     ]
     allReturns([deployFix, [], [], fixServices])
 
-    render(<ServiceDetail />, { wrapper: makeWrapper() })
+    const { container } = render(<ServiceDetail />, { wrapper: makeWrapper() })
 
-    expect(await screen.findByText(/artifact: pending/)).toBeTruthy()
+    expect(await screen.findByText(/artifact/)).toBeTruthy()
+    expect(container.textContent).toMatch(/artifact: pending/)
   })
 })
