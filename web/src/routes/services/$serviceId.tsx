@@ -4,6 +4,8 @@ import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
 import { StatusSignal } from '#/components/StatusSignal'
+import { DeployPhase } from '#/components/DeployPhase'
+import type { Deployment } from '#/effect/schema'
 
 const getDeployments = (id: number) =>
   Effect.gen(function* () {
@@ -35,6 +37,11 @@ const stopService = (id: number) =>
     return yield* api.stopService(id)
   })
 
+const listServices = Effect.gen(function* () {
+  const api = yield* ApiClient
+  return yield* api.listServices
+})
+
 export const Route = createFileRoute('/services/$serviceId')({
   component: ServiceDetail,
 })
@@ -44,13 +51,31 @@ export function ServiceDetail() {
   const id = Number(params.serviceId)
   const queryClient = useQueryClient()
 
+  const isInProgress = (() => {
+    const data = (queryClient.getQueryData([
+      'services',
+      id,
+      'deployments',
+    ]) as Deployment[] | undefined) ?? []
+    if (data.length === 0) return false
+    const newest = data.reduce((a, b) => (a.id > b.id ? a : b))
+    return ['Pending', 'Building', 'Starting'].includes(newest.status)
+  })()
+
   const {
     data: deployments = [],
     isFetching: deploymentsFetching,
   } = useQuery({
     queryKey: ['services', id, 'deployments'],
     queryFn: () => runQuery(getDeployments(id)),
+    refetchInterval: isInProgress ? 2000 : false,
+    refetchIntervalInBackground: false,
   })
+
+  const newestDeployment =
+    deployments.length > 0
+      ? deployments.reduce((a, b) => (a.id > b.id ? a : b))
+      : undefined
 
   const { data: logs = [] } = useQuery({
     queryKey: ['services', id, 'logs'],
@@ -65,6 +90,12 @@ export function ServiceDetail() {
     refetchInterval: 3000,
     refetchIntervalInBackground: false,
   })
+
+  const { data: services = [] } = useQuery({
+    queryKey: ['services'],
+    queryFn: () => runQuery(listServices),
+  })
+  const service = services.find((s) => s.id === id)
 
   const deploy = useMutation({
     mutationFn: () => runQuery(createDeployment(id)),
@@ -114,6 +145,7 @@ export function ServiceDetail() {
         >
           stop
         </button>
+        {service ? <TlsToggle service={service} /> : null}
       </div>
 
       <section className="mb-8">
@@ -127,6 +159,31 @@ export function ServiceDetail() {
             </span>
           )}
         </p>
+
+        {newestDeployment ? (
+          <div className="mb-4">
+            <DeployPhase status={newestDeployment.status} />
+          </div>
+        ) : null}
+
+        {newestDeployment && newestDeployment.artifact ? (
+          <p className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+            <span className="text-[var(--fg-muted)]">artifact:</span>
+            <code className="tnum text-[var(--fg)]">
+              {newestDeployment.artifact.digest.slice(0, 12)}
+            </code>
+            <span className="text-[var(--fg-muted)]">
+              {newestDeployment.artifact.kind === 'OciImage'
+                ? 'image'
+                : 'bundle'}
+            </span>
+          </p>
+        ) : newestDeployment ? (
+          <p className="mb-3 text-xs text-[var(--fg-muted)]">
+            artifact: pending
+          </p>
+        ) : null}
+
         {newestFirst.length === 0 ? (
           <p className="text-sm text-[var(--fg-muted)]">
             No deployments yet.

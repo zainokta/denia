@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, afterEach } from 'vitest'
 import { vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 vi.mock('#/effect/runtime', () => ({
@@ -51,6 +51,11 @@ function allReturns(results: unknown[]) {
     return Promise.resolve(val)
   })
 }
+
+afterEach(() => {
+  cleanup()
+  mockRunQuery.mockReset()
+})
 
 describe('Ingress route', () => {
   it('renders route rows with TLS badge and http label', async () => {
