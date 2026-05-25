@@ -13,6 +13,9 @@ import {
   Metrics,
   Node,
   Nodes,
+  Project,
+  ProjectInput,
+  Projects,
   type Role,
   Service,
   Services,
@@ -86,6 +89,19 @@ export class ApiClient extends Context.Service<
     readonly stopService: (
       id: number,
     ) => Effect.Effect<void, ApiError>
+    readonly listProjects: Effect.Effect<
+      ReadonlyArray<Project>,
+      ApiError | DecodeError
+    >
+    readonly getProject: (
+      id: string,
+    ) => Effect.Effect<Project, ApiError | DecodeError>
+    readonly createProject: (
+      input: ProjectInput,
+    ) => Effect.Effect<Project, ApiError | DecodeError>
+    readonly deleteProject: (
+      id: string,
+    ) => Effect.Effect<void, ApiError | DecodeError>
   }
 >()('ApiClient') {}
 
@@ -444,6 +460,43 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseDeleteResponse(response)
       })
 
+    const listProjects = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/projects'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, Projects)
+    })
+
+    const getProject = (id: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/projects/${id}`), { headers: authHeaders() })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Project)
+      })
+
+    const createProject = (input: ProjectInput) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url('/v1/projects'), {
+            headers: {
+              ...authHeaders(),
+              'content-type': 'application/json',
+            },
+            body: jsonBody(input),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Project)
+      })
+
+    const deleteProject = (id: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .del(url(`/v1/projects/${id}`), { headers: authHeaders() })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseDeleteResponse(response)
+      })
+
     return {
       listNodes,
       login,
@@ -464,6 +517,10 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       getServiceMetrics,
       createDeployment,
       stopService,
+      listProjects,
+      getProject,
+      createProject,
+      deleteProject,
     }
   }),
 )

@@ -3,6 +3,7 @@ import { Effect, Layer, Schema } from 'effect'
 import { FetchHttpClient } from 'effect/unstable/http'
 import { ApiClient, ApiClientLive } from './api-client'
 import { AppConfig } from './config'
+import { ApiError } from './errors'
 import { clearToken, getToken, setToken, subscribe } from './auth-store'
 import { LoginResult, Me } from './schema'
 
@@ -204,6 +205,118 @@ describe('ApiClient with getAuthToken', () => {
           Layer.provide(FetchHttpClient.layer),
         ),
       ),
+    ),
+  )
+})
+
+const FIXTURE_PROJECT = {
+  id: '018f1100-0000-7000-0000-000000000001',
+  name: 'web',
+  description: null,
+  shared_env: [{ key: 'A', value: '1' }],
+  default_resource_limits: null,
+  created_at: '2026-05-25T00:00:00Z',
+}
+
+const emptyApi = () =>
+  Effect.succeed(undefined) as Effect.Effect<never, never, never>
+
+const mockApi = (success = true) =>
+  Layer.succeed(ApiClient)({
+    listNodes: emptyApi() as never,
+    login: ((_u: string, _p: string) => emptyApi()) as never,
+    logout: emptyApi() as never,
+    me: emptyApi() as never,
+    listUsers: emptyApi() as never,
+    createUser: ((_u: string, _p: string) => emptyApi()) as never,
+    deleteUser: ((_id: number) => emptyApi()) as never,
+    listApiTokens: emptyApi() as never,
+    createApiToken: ((_n: string) => emptyApi()) as never,
+    deleteApiToken: ((_id: number) => emptyApi()) as never,
+    listMembers: ((_pid: number) => emptyApi()) as never,
+    addMember: ((_pid: number, _uid: number, _r: string) => emptyApi()) as never,
+    removeMember: ((_pid: number, _uid: number) => emptyApi()) as never,
+    listServices: emptyApi() as never,
+    getServiceDeployments: ((_id: number) => emptyApi()) as never,
+    getServiceLogs: ((_id: number) => emptyApi()) as never,
+    getServiceMetrics: ((_id: number) => emptyApi()) as never,
+    createDeployment: ((_input: { service_id: number }) => emptyApi()) as never,
+    stopService: ((_id: number) => emptyApi()) as never,
+    listProjects: Effect.succeed(
+      [FIXTURE_PROJECT] as ReadonlyArray<typeof FIXTURE_PROJECT>,
+    ) as never,
+    getProject: ((_id: string) => Effect.succeed(FIXTURE_PROJECT)) as never,
+    createProject: ((_input: never) => Effect.succeed(FIXTURE_PROJECT)) as never,
+    deleteProject: ((_id: string) =>
+      success
+        ? Effect.void
+        : Effect.fail(
+            new ApiError({
+              message: 'HTTP 409: {"message":"project has services"}',
+              status: 409,
+            }),
+          )) as never,
+  })
+
+describe('ApiClient projects', () => {
+  it.effect('project methods exist on ApiClient', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      expect(typeof api.listProjects).toBe('object')
+      expect(typeof api.getProject).toBe('function')
+      expect(typeof api.createProject).toBe('function')
+      expect(typeof api.deleteProject).toBe('function')
+    }).pipe(Effect.provide(mockApi())),
+  )
+
+  it.effect('listProjects decodes an array of projects', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      const projects = yield* api.listProjects
+      expect(projects.length).toBe(1)
+      expect(projects[0].name).toBe('web')
+    }).pipe(Effect.provide(mockApi())),
+  )
+
+  it.effect('getProject returns a single project', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      const p = yield* api.getProject('x')
+      expect(p.name).toBe('web')
+    }).pipe(Effect.provide(mockApi())),
+  )
+
+  it.effect('createProject returns created project', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      const p = yield* api.createProject({
+        name: 'x',
+        description: null,
+        shared_env: [],
+        default_resource_limits: null,
+      } as never)
+      expect(p.name).toBe('web')
+    }).pipe(Effect.provide(mockApi())),
+  )
+
+  it.effect('deleteProject succeeds for empty project', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      yield* api.deleteProject('x')
+    }).pipe(Effect.provide(mockApi())),
+  )
+
+  it.effect('deleteProject maps 409 to ApiError', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      return yield* api.deleteProject('x')
+    }).pipe(
+      Effect.provide(mockApi(false)),
+      Effect.flip,
+      Effect.map((error) => {
+        expect(error).toBeInstanceOf(ApiError)
+        expect((error as ApiError).message).toContain('409')
+      }),
     ),
   )
 })
