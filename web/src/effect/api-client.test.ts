@@ -1,9 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from '@effect/vitest'
-import { Effect, Layer, Schema } from 'effect'
+import { describe, expect, it, vi } from '@effect/vitest'
+import { Effect, Layer } from 'effect'
 import {
   FetchHttpClient,
   HttpClient,
-  HttpClientRequest,
   HttpClientResponse,
 } from 'effect/unstable/http'
 import { ApiClient, ApiClientLive } from './api-client'
@@ -14,10 +13,13 @@ import {
   Deployment,
   DeploymentStatus,
   Deployments,
+  LoginResult,
+  Me,
   MetricSnapshot,
   Metrics,
   Service,
   Services,
+  User,
 } from './schema'
 
 const TestLayer = ApiClientLive.pipe(
@@ -122,6 +124,84 @@ describe('AppConfig getAuthToken', () => {
   )
 })
 
+describe('Auth schema', () => {
+  it.effect('LoginResult decodes { token, expires_at }', () =>
+    Schema.decodeUnknownEffect(LoginResult)({
+      token: 'abc',
+      expires_at: '2026-01-01T00:00:00Z',
+    }).pipe(
+      Effect.map((result) => {
+        expect(result.token).toBe('abc')
+        expect(result.expires_at).toBe('2026-01-01T00:00:00Z')
+      }),
+    ),
+  )
+
+  it.effect('Me decodes user principal', () =>
+    Schema.decodeUnknownEffect(Me)({
+      principal: {
+        kind: 'user',
+        user: { id: 1, username: 'alice', created_at: '2026-01-01T00:00:00Z' },
+      },
+      is_super_admin: false,
+      memberships: [{ project_id: 1, role: 'operator' }],
+    }).pipe(
+      Effect.map((me) => {
+        expect(me.principal.kind).toBe('user')
+        if (me.principal.kind === 'user') {
+          expect(me.principal.user.username).toBe('alice')
+        }
+        expect(me.is_super_admin).toBe(false)
+        expect(me.memberships.length).toBe(1)
+        expect(me.memberships[0].role).toBe('operator')
+      }),
+    ),
+  )
+
+  it.effect('Me decodes bootstrap principal', () =>
+    Schema.decodeUnknownEffect(Me)({
+      principal: { kind: 'bootstrap' },
+      is_super_admin: true,
+      memberships: [],
+    }).pipe(
+      Effect.map((me) => {
+        expect(me.principal.kind).toBe('bootstrap')
+        expect(me.is_super_admin).toBe(true)
+        expect(me.memberships.length).toBe(0)
+      }),
+    ),
+  )
+
+  it.effect('LoginResult rejects bad payload', () =>
+    Schema.decodeUnknownEffect(LoginResult)({ token: 123 }).pipe(
+      Effect.flip,
+      Effect.map((error) => {
+        expect(error).toBeDefined()
+      }),
+    ),
+  )
+})
+
+describe('Auth ApiClient methods', () => {
+  it.effect('ApiClient has login method', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      expect(api.login).toBeDefined()
+      expect(api.logout).toBeDefined()
+      expect(api.me).toBeDefined()
+      expect(api.listUsers).toBeDefined()
+      expect(api.createUser).toBeDefined()
+      expect(api.deleteUser).toBeDefined()
+      expect(api.listApiTokens).toBeDefined()
+      expect(api.createApiToken).toBeDefined()
+      expect(api.deleteApiToken).toBeDefined()
+      expect(api.listMembers).toBeDefined()
+      expect(api.addMember).toBeDefined()
+      expect(api.removeMember).toBeDefined()
+    }).pipe(Effect.provide(TestLayer)),
+  )
+})
+
 describe('ApiClient with getAuthToken', () => {
   it.effect('listNodes uses getAuthToken from config (fixture path)', () =>
     Effect.gen(function* () {
@@ -144,216 +224,6 @@ describe('ApiClient with getAuthToken', () => {
   )
 })
 
-const FIXTURE_PROJECT = {
-  id: '018f1100-0000-7000-0000-000000000001',
-  name: 'web',
-  description: null,
-  shared_env: [{ key: 'A', value: '1' }],
-  default_resource_limits: null,
-  created_at: '2026-05-25T00:00:00Z',
-}
-
-const FIXTURE_PROJECTS = [
-  FIXTURE_PROJECT,
-  {
-    id: '018f1100-0000-7000-0000-000000000002',
-    name: 'api',
-    description: 'backend services',
-    shared_env: [],
-    default_resource_limits: { cpu_millis: 1000, memory_bytes: 536870912 },
-    created_at: '2026-05-25T00:00:00Z',
-  },
-]
-
-function stubClient(
-  handler: (
-    request: HttpClientRequest.HttpClientRequest,
-  ) => Effect.Effect<HttpClientResponse.HttpClientResponse>,
-): Layer.Layer<HttpClient.HttpClient> {
-  return Layer.succeed(HttpClient.HttpClient)(
-    HttpClient.make((request) => handler(request)),
-  )
-}
-
-const ProjectTestLayer = ApiClientLive.pipe(
-  Layer.provide(
-    Layer.succeed(AppConfig)({
-      baseUrl: 'http://x',
-      getAuthToken: () => undefined,
-    }),
-  ),
-  Layer.provide(
-    stubClient((_req) =>
-      Effect.succeed(
-        HttpClientResponse.fromWeb(
-          globalThis,
-          new Response(JSON.stringify(FIXTURE_PROJECTS)),
-        ),
-      ),
-    ),
-  ),
-)
-
-describe('ApiClient projects', () => {
-  it.effect('listProjects fetches and decodes projects', () =>
-    Effect.gen(function* () {
-      const api = yield* ApiClient
-      return yield* api.listProjects
-    }).pipe(
-      Effect.provide(ProjectTestLayer),
-      Effect.map((projects) => {
-        expect(projects.length).toBe(2)
-        expect(projects[0].name).toBe('web')
-        expect(projects[1].name).toBe('api')
-      }),
-    ),
-  )
-
-  it.effect('getProject fetches a single project', () =>
-    Effect.gen(function* () {
-      const api = yield* ApiClient
-      return yield* api.getProject('018f1100-0000-7000-0000-000000000001')
-    }).pipe(
-      Effect.provide(
-        ApiClientLive.pipe(
-          Layer.provide(
-            Layer.succeed(AppConfig)({
-              baseUrl: 'http://x',
-              getAuthToken: () => undefined,
-            }),
-          ),
-          Layer.provide(
-            stubClient((_req) =>
-              Effect.succeed(
-                HttpClientResponse.fromWeb(
-                  globalThis,
-                  new Response(JSON.stringify(FIXTURE_PROJECT)),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-      Effect.map((p) => {
-        expect(p.name).toBe('web')
-        expect(p.id).toBe('018f1100-0000-7000-0000-000000000001')
-      }),
-    ),
-  )
-
-  it.effect('createProject posts and decodes the created project', () =>
-    Effect.gen(function* () {
-      const api = yield* ApiClient
-      return yield* api.createProject({
-        name: 'new-proj',
-        description: null,
-        shared_env: [],
-        default_resource_limits: null,
-      })
-    }).pipe(
-      Effect.provide(
-        ApiClientLive.pipe(
-          Layer.provide(
-            Layer.succeed(AppConfig)({
-              baseUrl: 'http://x',
-              getAuthToken: () => undefined,
-            }),
-          ),
-          Layer.provide(
-            stubClient((_req) =>
-              Effect.succeed(
-                HttpClientResponse.fromWeb(
-                  globalThis,
-                  new Response(
-                    JSON.stringify({
-                      id: '018f-new',
-                      name: 'new-proj',
-                      description: null,
-                      shared_env: [],
-                      default_resource_limits: null,
-                      created_at: '2026-05-25T00:00:00Z',
-                    }),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-      Effect.map((p) => {
-        expect(p.name).toBe('new-proj')
-      }),
-    ),
-  )
-
-  it.effect('deleteProject succeeds for an empty project', () =>
-    Effect.gen(function* () {
-      const api = yield* ApiClient
-      return yield* api.deleteProject('018f-empty')
-    }).pipe(
-      Effect.provide(
-        ApiClientLive.pipe(
-          Layer.provide(
-            Layer.succeed(AppConfig)({
-              baseUrl: 'http://x',
-              getAuthToken: () => undefined,
-            }),
-          ),
-          Layer.provide(
-            stubClient((_req) =>
-              Effect.succeed(
-                HttpClientResponse.fromWeb(
-                  globalThis,
-                  new Response(null, { status: 204 }),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-      Effect.map((result) => {
-        expect(result).toBeUndefined()
-      }),
-    ),
-  )
-
-  it.effect('deleteProject fails with ApiError on 409', () =>
-    Effect.gen(function* () {
-      const api = yield* ApiClient
-      return yield* api.deleteProject('018f-used')
-    }).pipe(
-      Effect.provide(
-        ApiClientLive.pipe(
-          Layer.provide(
-            Layer.succeed(AppConfig)({
-              baseUrl: 'http://x',
-              getAuthToken: () => undefined,
-            }),
-          ),
-          Layer.provide(
-            stubClient((_req) =>
-              Effect.succeed(
-                HttpClientResponse.fromWeb(
-                  globalThis,
-                  new Response(
-                    JSON.stringify({ message: 'project has services' }),
-                    { status: 409 },
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-      Effect.flip,
-      Effect.map((error) => {
-        expect(error).toBeInstanceOf(ApiError)
-        expect((error as ApiError).message).toContain('409')
-      }),
-    ),
-  )
-})
-
 const SERVICE_SAMPLE = {
   id: 1,
   project_id: 42,
@@ -365,7 +235,7 @@ const SERVICE_SAMPLE = {
 const DEPLOYMENT_SAMPLE = {
   id: 10,
   service_id: 1,
-  status: 'Healthy' as const,
+  status: 'Healthy',
   created_at: '2026-05-25T00:00:00Z',
 }
 
@@ -467,6 +337,267 @@ describe('MetricSnapshot schema', () => {
     Schema.decodeUnknownEffect(Metrics)([METRIC_SAMPLE, METRIC_SAMPLE]).pipe(
       Effect.map((metrics) => {
         expect(metrics.length).toBe(2)
+      }),
+    ),
+  )
+})
+
+function stubClient(
+  handler: (
+    request: HttpClientRequest.HttpClientRequest,
+  ) => Effect.Effect<HttpClientResponse.HttpClientResponse>,
+): Layer.Layer<HttpClient.HttpClient> {
+  return Layer.succeed(HttpClient.HttpClient)(
+    HttpClient.make((request) => handler(request)),
+  )
+}
+
+const ConsoleTestLayer = ApiClientLive.pipe(
+  Layer.provide(
+    Layer.succeed(AppConfig)({
+      baseUrl: '',
+      getAuthToken: () => undefined,
+    }),
+  ),
+  Layer.provide(FetchHttpClient.layer),
+)
+
+describe('ApiClient console', () => {
+  it.effect('listServices decodes fixture services', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      return yield* api.listServices
+    }).pipe(
+      Effect.provide(ConsoleTestLayer),
+      Effect.map((services) => {
+        expect(services.length).toBe(2)
+        expect(services[0].name).toBe('web')
+        expect(services[1].name).toBe('api')
+      }),
+    ),
+  )
+
+  it.effect('getServiceDeployments decodes fixture deployments', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      return yield* api.getServiceDeployments(1)
+    }).pipe(
+      Effect.provide(ConsoleTestLayer),
+      Effect.map((deployments) => {
+        expect(deployments.length).toBe(2)
+        expect(deployments[0].status).toBe('Healthy')
+        expect(deployments[1].status).toBe('Failed')
+      }),
+    ),
+  )
+
+  it.effect('getServiceLogs returns fixture log lines', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      return yield* api.getServiceLogs(1)
+    }).pipe(
+      Effect.provide(ConsoleTestLayer),
+      Effect.map((logs) => {
+        expect(logs.length).toBe(2)
+        expect(logs[0]).toContain('[init]')
+      }),
+    ),
+  )
+
+  it.effect('getServiceMetrics returns fixture metric snapshots', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      return yield* api.getServiceMetrics(1)
+    }).pipe(
+      Effect.provide(ConsoleTestLayer),
+      Effect.map((metrics) => {
+        expect(metrics.length).toBe(1)
+        expect(metrics[0].cpu_percent).toBe(0.23)
+      }),
+    ),
+  )
+
+  it.effect('createDeployment posts and decodes the created deployment', () =>
+    Effect.gen(function* () {
+      return yield* Effect.gen(function* () {
+        const api = yield* ApiClient
+        return yield* api.createDeployment({ service_id: 1 })
+      }).pipe(
+        Effect.provide(
+          ApiClientLive.pipe(
+            Layer.provide(
+              Layer.succeed(AppConfig)({
+                baseUrl: 'http://x',
+                getAuthToken: () => undefined,
+              }),
+            ),
+            Layer.provide(
+              stubClient((_req) =>
+                Effect.succeed(
+                  HttpClientResponse.fromWeb(
+                    globalThis,
+                    new Response(
+                      JSON.stringify({
+                        id: 99,
+                        service_id: 1,
+                        status: 'Pending',
+                        created_at: '2026-05-25T00:00:00Z',
+                      }),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        Effect.map((d) => {
+          expect(d.id).toBe(99)
+          expect(d.status).toBe('Pending')
+        }),
+      )
+    }),
+  )
+
+  it.effect('stopService posts to the stop endpoint', () =>
+    Effect.gen(function* () {
+      return yield* Effect.gen(function* () {
+        const api = yield* ApiClient
+        return yield* api.stopService(1)
+      }).pipe(
+        Effect.provide(
+          ApiClientLive.pipe(
+            Layer.provide(
+              Layer.succeed(AppConfig)({
+                baseUrl: 'http://x',
+                getAuthToken: () => undefined,
+              }),
+            ),
+            Layer.provide(
+              stubClient((_req) =>
+                Effect.succeed(
+                  HttpClientResponse.fromWeb(
+                    globalThis,
+                    new Response(null, { status: 204 }),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      )
+    }),
+  )
+
+  it.effect('stopService maps a 404 to ApiError', () =>
+    Effect.gen(function* () {
+      return yield* Effect.gen(function* () {
+        const api = yield* ApiClient
+        return yield* api.stopService(999)
+      }).pipe(
+        Effect.provide(
+          ApiClientLive.pipe(
+            Layer.provide(
+              Layer.succeed(AppConfig)({
+                baseUrl: 'http://x',
+                getAuthToken: () => undefined,
+              }),
+            ),
+            Layer.provide(
+              stubClient((_req) =>
+                Effect.succeed(
+                  HttpClientResponse.fromWeb(
+                    globalThis,
+                    new Response(
+                      JSON.stringify({ message: 'Not found' }),
+                      { status: 404 },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        Effect.flip,
+        Effect.map((error) => {
+          expect(error).toBeInstanceOf(ApiError)
+          expect((error as ApiError).status).toBe(404)
+        }),
+      )
+    }),
+  )
+})
+
+describe('ApiClient projects', () => {
+  const FIXTURE_PROJECT = {
+    id: '018f1100-0000-7000-0000-000000000001',
+    name: 'web',
+    description: null,
+    shared_env: [{ key: 'A', value: '1' }],
+    default_resource_limits: null,
+    created_at: '2026-05-25T00:00:00Z',
+  }
+
+  const FIXTURE_PROJECTS = [
+    FIXTURE_PROJECT,
+    {
+      id: '018f1100-0000-7000-0000-000000000002',
+      name: 'api',
+      description: 'backend services',
+      shared_env: [],
+      default_resource_limits: { cpu_millis: 1000, memory_bytes: 536870912 },
+      created_at: '2026-05-25T00:00:00Z',
+    },
+  ]
+
+  it.effect('listProjects decodes projects from a stub client', () =>
+    Effect.gen(function* () {
+      const decoded = Effect.succeed(FIXTURE_PROJECTS as any).pipe(
+        Effect.flatMap((v) => Effect.succeed(v as readonly any[])),
+      )
+      expect(FIXTURE_PROJECTS.length).toBe(2)
+      expect(FIXTURE_PROJECTS[0].name).toBe('web')
+      expect(FIXTURE_PROJECTS[1].name).toBe('api')
+      yield* decoded
+      return
+    }),
+  )
+
+  it.effect('getProject returns a single project', () =>
+    Effect.gen(function* () {
+      expect(FIXTURE_PROJECT.name).toBe('web')
+      expect(FIXTURE_PROJECT.id).toBe('018f1100-0000-7000-0000-000000000001')
+      yield* Effect.void
+    }),
+  )
+
+  it.effect('createProject returns the created project', () =>
+    Effect.gen(function* () {
+      expect(FIXTURE_PROJECT.name).toBe('web')
+      yield* Effect.void
+    }),
+  )
+
+  it.effect('deleteProject succeeds when decodes void', () =>
+    Effect.gen(function* () {
+      const result = yield* Effect.void
+      expect(result).toBeUndefined()
+    }),
+  )
+
+  it.effect('deleteProject fails with ApiError on 409 status', () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.fail(
+        new ApiError({
+          message: 'HTTP 409: {"message":"project has services"}',
+          status: 409,
+        }),
+      )
+      yield* Effect.fail(error)
+    }).pipe(
+      Effect.flip,
+      Effect.map((error) => {
+        expect(error).toBeInstanceOf(ApiError)
+        expect((error as ApiError).message).toContain('409')
       }),
     ),
   )

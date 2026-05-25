@@ -53,3 +53,62 @@ export class ApiToken extends Schema.Class<ApiToken>('ApiToken')({
   token: Schema.String,
   created_at: Schema.String,
 }) {}
+
+export class Project extends Schema.Class<Project>('Project')({
+  id: Schema.String,
+  name: Schema.String,
+  description: Schema.NullOr(Schema.String),
+  shared_env: Schema.Array(Schema.Struct({ key: Schema.String, value: Schema.String })),
+  default_resource_limits: Schema.NullOr(
+    Schema.Struct({ cpu_millis: Schema.Number, memory_bytes: Schema.Number }),
+  ),
+  created_at: Schema.String,
+}) {}
+
+export const Projects = Schema.Array(Project)
+
+export class ProjectInput extends Schema.Class<ProjectInput>('ProjectInput')({
+  name: Schema.String,
+  description: Schema.NullOr(Schema.String),
+  shared_env: Schema.Array(Schema.Struct({ key: Schema.String, value: Schema.String })),
+  default_resource_limits: Schema.NullOr(
+    Schema.Struct({ cpu_millis: Schema.Number, memory_bytes: Schema.Number }),
+  ),
+}) {}
+
+export class Service extends Schema.Class<Service>('Service')({
+  id: Schema.Number,
+  project_id: Schema.Number,
+  name: Schema.String,
+  domains: Schema.Array(Schema.String),
+  internal_port: Schema.Number,
+}) {}
+
+export const Services = Schema.Array(Service)
+
+export const DeploymentStatus = Schema.Literals([
+  'Pending',
+  'Building',
+  'Starting',
+  'Healthy',
+  'Failed',
+  'Stopped',
+])
+
+export class Deployment extends Schema.Class<Deployment>('Deployment')({
+  id: Schema.Number,
+  service_id: Schema.Number,
+  status: Schema.String,
+  created_at: Schema.String,
+}) {}
+
+export const Deployments = Schema.Array(Deployment)
+
+export class MetricSnapshot extends Schema.Class<MetricSnapshot>('MetricSnapshot')({
+  service_id: Schema.Number,
+  cpu_percent: Schema.Number,
+  memory_bytes: Schema.Number,
+  recorded_at: Schema.String,
+}) {}
+
+export const Metrics = Schema.Array(MetricSnapshot)
