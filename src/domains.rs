@@ -193,7 +193,8 @@ mod verifier_tests {
         let server = MockServer::start_async().await;
         let _m = server
             .mock_async(|when, then| {
-                when.method(GET).path_contains("/.well-known/denia-challenge/");
+                when.method(GET)
+                    .path_contains("/.well-known/denia-challenge/");
                 then.status(404);
             })
             .await;

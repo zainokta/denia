@@ -3,9 +3,7 @@ use std::sync::Arc;
 use denia::{
     app::{AppState, build_router},
     config::AppConfig,
-    domain::{
-        ExternalImageSource, HealthCheck, ResourceLimits, ServiceConfig, ServiceSource,
-    },
+    domain::{ExternalImageSource, HealthCheck, ResourceLimits, ServiceConfig, ServiceSource},
     domains::{DomainVerifier, DomainVerifyError},
     state::SqliteStore,
     traefik::RouteSpec,
@@ -64,12 +62,9 @@ fn seed_service(store: &SqliteStore, name: &str) -> ServiceConfig {
         .expect("stored service")
 }
 
-fn build_app_with_verifier(
-    store: SqliteStore,
-    verifier: Arc<dyn DomainVerifier>,
-) -> axum::Router {
-    let state = AppState::new(AppConfig::for_test("test-token"), store)
-        .with_domain_verifier(verifier);
+fn build_app_with_verifier(store: SqliteStore, verifier: Arc<dyn DomainVerifier>) -> axum::Router {
+    let state =
+        AppState::new(AppConfig::for_test("test-token"), store).with_domain_verifier(verifier);
     build_router(state)
 }
 
@@ -232,10 +227,7 @@ async fn delete_domain_removes_row() {
         .oneshot(
             http::Request::builder()
                 .method(http::Method::DELETE)
-                .uri(format!(
-                    "/v1/services/{}/domains/{domain_id}",
-                    service.id
-                ))
+                .uri(format!("/v1/services/{}/domains/{domain_id}", service.id))
                 .header(http::header::AUTHORIZATION, admin_bearer())
                 .body(axum::body::Body::empty())
                 .unwrap(),
@@ -273,7 +265,9 @@ async fn challenge_endpoint_returns_token_body() {
     let create_resp = post_domain(app.clone(), service.id, "challenge.example.com").await;
     assert_eq!(create_resp.status(), http::StatusCode::CREATED);
     let created = body_json(create_resp).await;
-    let token = created["challenge_token"].as_str().expect("challenge_token");
+    let token = created["challenge_token"]
+        .as_str()
+        .expect("challenge_token");
 
     let resp = app
         .oneshot(
@@ -342,7 +336,8 @@ async fn verify_re_renders_traefik_when_route_exists() {
     let mut config = AppConfig::for_test("test-token");
     config.traefik_dynamic_config_path = tmp_path.clone();
 
-    let state = AppState::new(config, store.clone()).with_domain_verifier(Arc::new(FakeVerifier { ok: true }));
+    let state = AppState::new(config, store.clone())
+        .with_domain_verifier(Arc::new(FakeVerifier { ok: true }));
 
     // Pre-insert a RouteSpec so rerender_traefik finds a prev entry with a bridge_port.
     {

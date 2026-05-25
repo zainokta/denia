@@ -8,9 +8,9 @@ use uuid::Uuid;
 use crate::{
     artifacts::ArtifactRecord,
     domain::{
-        ApiToken, Credential, CredentialKind, Deployment, DeploymentRequest, DeploymentStatus, Job,
-        JobRun, JobRunStatus, Project, ProjectMembership, Role, ServiceConfig, Session, User,
-        ServiceDomain, DomainStatus,
+        ApiToken, Credential, CredentialKind, Deployment, DeploymentRequest, DeploymentStatus,
+        DomainStatus, Job, JobRun, JobRunStatus, Project, ProjectMembership, Role, ServiceConfig,
+        ServiceDomain, Session, User,
     },
     secrets::SecretRef,
 };
@@ -1208,7 +1208,10 @@ impl SqliteStore {
             .map_err(Into::into)
     }
 
-    pub fn get_service_domain_by_token(&self, token: &str) -> Result<Option<ServiceDomain>, StateError> {
+    pub fn get_service_domain_by_token(
+        &self,
+        token: &str,
+    ) -> Result<Option<ServiceDomain>, StateError> {
         let connection = self.connection()?;
         connection
             .query_row(
@@ -1220,7 +1223,10 @@ impl SqliteStore {
             .map_err(Into::into)
     }
 
-    pub fn list_service_domains_by_service(&self, service_id: Uuid) -> Result<Vec<ServiceDomain>, StateError> {
+    pub fn list_service_domains_by_service(
+        &self,
+        service_id: Uuid,
+    ) -> Result<Vec<ServiceDomain>, StateError> {
         let connection = self.connection()?;
         let mut stmt = connection.prepare(
             "SELECT id, service_id, hostname, status, challenge_token, verified_at, last_check_at, last_error, created_at FROM service_domains WHERE service_id = ?1 ORDER BY created_at",
@@ -1260,7 +1266,10 @@ impl SqliteStore {
 
     pub fn delete_service_domain(&self, id: Uuid) -> Result<(), StateError> {
         let connection = self.connection()?;
-        connection.execute("DELETE FROM service_domains WHERE id = ?1", params![id.to_string()])?;
+        connection.execute(
+            "DELETE FROM service_domains WHERE id = ?1",
+            params![id.to_string()],
+        )?;
         Ok(())
     }
 
@@ -1269,7 +1278,9 @@ impl SqliteStore {
         let mut stmt = connection.prepare(
             "SELECT hostname FROM service_domains WHERE service_id = ?1 AND status = 'verified' ORDER BY hostname",
         )?;
-        let rows = stmt.query_map(params![service_id.to_string()], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![service_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })?;
         rows.collect::<Result<_, _>>().map_err(Into::into)
     }
 
@@ -1306,27 +1317,55 @@ fn row_to_service_domain(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServiceDom
     let last_error: Option<String> = row.get(7)?;
     let created_at: String = row.get(8)?;
     Ok(ServiceDomain {
-        id: Uuid::parse_str(&id).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?,
-        service_id: Uuid::parse_str(&service_id).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?,
+        id: Uuid::parse_str(&id).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        service_id: Uuid::parse_str(&service_id).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?,
         hostname,
         status: match status_s.as_str() {
             "pending" => DomainStatus::Pending,
             "verified" => DomainStatus::Verified,
             "failed" => DomainStatus::Failed,
-            _ => return Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, "invalid status".into())),
+            _ => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    "invalid status".into(),
+                ));
+            }
         },
         challenge_token,
         verified_at: verified_at
             .map(|s| chrono::DateTime::parse_from_rfc3339(&s).map(|d| d.with_timezone(&Utc)))
             .transpose()
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?,
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
         last_check_at: last_check_at
             .map(|s| chrono::DateTime::parse_from_rfc3339(&s).map(|d| d.with_timezone(&Utc)))
             .transpose()
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?,
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
         last_error,
         created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?
             .with_timezone(&Utc),
     })
 }
