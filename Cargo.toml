@@ -5,14 +5,18 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.5.3"
 async-trait = "0.1"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4.3"
 libc = "0.2"
+rand = "0.10.1"
 rusqlite = { version = "0.39", features = ["bundled"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11.0"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time"] }
 tower = "0.5"
