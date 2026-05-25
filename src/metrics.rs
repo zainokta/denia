@@ -71,6 +71,19 @@ impl CgroupMetricsReader {
             .join(deployment_id.to_string());
         read_snapshot(service_name, &cgroup_path)
     }
+
+    pub fn read_by_id(
+        &self,
+        service_name: &str,
+        service_id: uuid::Uuid,
+        deployment_id: uuid::Uuid,
+    ) -> Result<MetricSnapshot, MetricsError> {
+        let cgroup_path = self
+            .cgroup_root
+            .join(service_id.to_string())
+            .join(deployment_id.to_string());
+        read_snapshot(service_name, &cgroup_path)
+    }
 }
 
 fn read_snapshot(service_name: &str, cgroup_path: &Path) -> Result<MetricSnapshot, MetricsError> {

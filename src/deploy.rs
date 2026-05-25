@@ -16,8 +16,10 @@ use crate::{
     health::{HealthChecker, HealthError},
     runtime::{Runtime, RuntimeError},
     state::{SqliteStore, StateError},
-    traefik::{RouteSpec, TraefikError, render_file_provider_config},
+    traefik::{IngressRenderOptions, RouteSpec, TraefikError, render_file_provider_config},
 };
+
+pub type SharedRoutes = Arc<Mutex<BTreeMap<String, RouteSpec>>>;
 
 pub struct DeploymentPlan {
     pub service: ServiceConfig,
@@ -57,9 +59,10 @@ pub struct DeploymentCoordinator<R, H> {
 
 struct RoutingState {
     bridge: Arc<Mutex<BridgeAllocator>>,
-    routes: Arc<Mutex<BTreeMap<String, RouteSpec>>>,
+    routes: SharedRoutes,
     manager: Arc<dyn BridgeManager>,
     traefik_config_path: PathBuf,
+    ingress_options: IngressRenderOptions,
 }
 
 impl<R, H> DeploymentCoordinator<R, H>
@@ -91,9 +94,12 @@ where
             Arc::new(Mutex::new(bridge)),
             manager,
             traefik_config_path,
+            Arc::new(Mutex::new(BTreeMap::new())),
+            default_ingress_options(),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_shared_routing(
         store: SqliteStore,
         runtime: R,
@@ -101,6 +107,8 @@ where
         bridge: Arc<Mutex<BridgeAllocator>>,
         manager: Arc<dyn BridgeManager>,
         traefik_config_path: impl Into<PathBuf>,
+        routes: SharedRoutes,
+        ingress_options: IngressRenderOptions,
     ) -> Self {
         Self {
             store,
@@ -108,9 +116,10 @@ where
             health,
             routing: Some(RoutingState {
                 bridge,
-                routes: Arc::new(Mutex::new(BTreeMap::new())),
+                routes,
                 manager,
                 traefik_config_path: traefik_config_path.into(),
+                ingress_options,
             }),
         }
     }
@@ -120,6 +129,13 @@ where
             .store
             .create_deployment(deployment_request(&plan.service, &plan.artifact))?;
 
+        let project = self
+            .store
+            .get_project(plan.service.project_id)?
+            .ok_or(DeployError::State(StateError::UnknownProject))?;
+        let limits = plan.service.effective_limits(&project);
+        let env: Vec<(String, String)> = plan.service.effective_env(&project).into_iter().collect();
+
         let runtime_status = self
             .runtime
             .start(RuntimeStartRequest {
@@ -128,20 +144,11 @@ where
                 deployment_id: deployment.id,
                 artifact: plan.artifact,
                 internal_port: plan.service.internal_port,
-                socket_path: format!("/var/lib/denia/runtime/{}/current.sock", plan.service.name)
+                socket_path: format!("/var/lib/denia/runtime/{}/current.sock", plan.service.id)
                     .into(),
-                cpu_millis: plan
-                    .service
-                    .resource_limits
-                    .clone()
-                    .unwrap_or_default()
-                    .cpu_millis,
-                memory_bytes: plan
-                    .service
-                    .resource_limits
-                    .clone()
-                    .unwrap_or_default()
-                    .memory_bytes,
+                cpu_millis: limits.cpu_millis,
+                memory_bytes: limits.memory_bytes,
+                env,
             })
             .await?;
 
@@ -227,13 +234,10 @@ where
                     .lock()
                     .map_err(|_| DeployError::BridgeLockPoisoned)?;
                 routes.remove(&service.name);
-                let opts = crate::traefik::IngressRenderOptions {
-                    acme_resolver: String::new(),
-                    control_domain: None,
-                    control_tls: false,
-                    control_backend_addr: String::new(),
-                };
-                render_file_provider_config(&routes.values().cloned().collect::<Vec<_>>(), &opts)?
+                render_file_provider_config(
+                    &routes.values().cloned().collect::<Vec<_>>(),
+                    &routing.ingress_options,
+                )?
             };
             std::fs::write(&routing.traefik_config_path, yaml)?;
         }
@@ -275,16 +279,22 @@ where
                     tls: service.tls_enabled,
                 },
             );
-            let opts = crate::traefik::IngressRenderOptions {
-                acme_resolver: String::new(),
-                control_domain: None,
-                control_tls: false,
-                control_backend_addr: String::new(),
-            };
-            render_file_provider_config(&routes.values().cloned().collect::<Vec<_>>(), &opts)?
+            render_file_provider_config(
+                &routes.values().cloned().collect::<Vec<_>>(),
+                &routing.ingress_options,
+            )?
         };
         std::fs::write(&routing.traefik_config_path, yaml)?;
         Ok(())
+    }
+}
+
+pub fn default_ingress_options() -> IngressRenderOptions {
+    IngressRenderOptions {
+        acme_resolver: String::new(),
+        control_domain: None,
+        control_tls: false,
+        control_backend_addr: String::new(),
     }
 }
 
