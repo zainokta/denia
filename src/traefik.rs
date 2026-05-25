@@ -109,6 +109,10 @@ pub fn render_file_provider_config(
         }
     }
 
+    output.push_str(
+        "    denia-challenge:\n      rule: \"PathPrefix(`/.well-known/denia-challenge`)\"\n      entryPoints:\n        - web\n      priority: 1000\n      service: denia-challenge\n",
+    );
+
     if has_tls
         || options
             .control_domain
@@ -149,6 +153,11 @@ pub fn render_file_provider_config(
                 addr = options.control_backend_addr,
             ));
     }
+
+    output.push_str(&format!(
+        "    denia-challenge:\n      loadBalancer:\n        servers:\n          - url: \"{addr}\"\n",
+        addr = options.control_backend_addr,
+    ));
 
     Ok(output)
 }
@@ -233,5 +242,23 @@ mod tests {
         assert!(yaml.contains("Host(`denia.example.com`)"));
         assert!(yaml.contains("denia-control"));
         assert!(yaml.contains("websecure"));
+    }
+
+    #[test]
+    fn render_emits_denia_challenge_router_when_routes_present() {
+        let spec = make_spec("svc", vec!["a.example.com"], 9000, false);
+        let opts = IngressRenderOptions::test_defaults();
+        let out = render_file_provider_config(&[spec], &opts).unwrap();
+        assert!(out.contains("denia-challenge:"));
+        assert!(out.contains("PathPrefix(`/.well-known/denia-challenge`)"));
+        assert!(out.contains("priority: 1000"));
+        assert!(out.contains("    denia-challenge:\n      loadBalancer:"));
+    }
+
+    #[test]
+    fn render_emits_denia_challenge_router_even_with_zero_routes() {
+        let opts = IngressRenderOptions::test_defaults();
+        let out = render_file_provider_config(&[], &opts).unwrap();
+        assert!(out.contains("denia-challenge:"));
     }
 }
