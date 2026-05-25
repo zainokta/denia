@@ -82,7 +82,7 @@ export class Service extends Schema.Class<Service>('Service')({
   name: Schema.String,
   domains: Schema.Array(Schema.String),
   internal_port: Schema.Number,
-  status: Schema.optional(Schema.String, { default: () => undefined }),
+  status: Schema.optional(Schema.String),
 }) {}
 
 export const Services = Schema.Array(Service)
