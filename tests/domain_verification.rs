@@ -342,7 +342,7 @@ async fn verify_re_renders_traefik_when_route_exists() {
     let mut config = AppConfig::for_test("test-token");
     config.traefik_dynamic_config_path = tmp_path.clone();
 
-    let mut state = AppState::new(config, store.clone()).with_domain_verifier(Arc::new(FakeVerifier { ok: true }));
+    let state = AppState::new(config, store.clone()).with_domain_verifier(Arc::new(FakeVerifier { ok: true }));
 
     // Pre-insert a RouteSpec so rerender_traefik finds a prev entry with a bridge_port.
     {
