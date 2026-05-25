@@ -24,6 +24,11 @@ Each ADR should include:
 | [004](004-embed-web-console.md) | Embed Web Console in Service Binary | Proposed | 2026-05-24 |
 | [005](005-runtime-security-hardening.md) | Runtime Security Hardening | Proposed | 2026-05-25 |
 | [006](006-projects-and-migrations.md) | Projects And Versioned Migrations | Proposed | 2026-05-25 |
+| [007](007-ingress-tls.md) | Ingress + TLS | Proposed | 2026-05-25 |
+| [008](008-rbac.md) | Project-Scoped RBAC | Proposed | 2026-05-25 |
+| [009](009-observability.md) | Observability (Node, Workloads, Access Log) | Proposed | 2026-05-25 |
+| [010](010-jobs-scheduler.md) | Jobs and Scheduler | Proposed | 2026-05-25 |
+| [011](011-inprocess-oci-acquisition.md) | In-Process OCI Image Acquisition | Proposed | 2026-05-25 |
 
 ## Contributing
 
