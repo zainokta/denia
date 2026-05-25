@@ -185,11 +185,21 @@ async fn artifact_acquirer_pulls_external_image() {
 
 #[test]
 fn traefik_config_routes_domains_to_loopback_bridge_ports() {
-    let yaml = render_file_provider_config(&[RouteSpec {
-        service_name: "web".to_string(),
-        domains: vec!["web.example.test".to_string()],
-        bridge_port: 19080,
-    }])
+    let yaml = render_file_provider_config(
+        &[RouteSpec {
+            route_key: "svc-web".to_string(),
+            service_name: "web".to_string(),
+            domains: vec!["web.example.test".to_string()],
+            bridge_port: 19080,
+            tls: false,
+        }],
+        &denia::traefik::IngressRenderOptions {
+            acme_resolver: "le".to_string(),
+            control_domain: None,
+            control_tls: false,
+            control_backend_addr: "http://127.0.0.1:7180".to_string(),
+        },
+    )
     .expect("traefik yaml");
 
     assert!(yaml.contains("Host(`web.example.test`)"));
