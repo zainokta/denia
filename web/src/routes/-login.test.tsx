@@ -2,12 +2,12 @@
 import { describe, expect, it } from '@effect/vitest'
 import { vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { Login } from './login'
 import { clearToken } from '../effect/auth-store'
 
 vi.mock('#/effect/runtime', () => ({
-  runQuery: vi.fn(() => Promise.resolve({ token: 'test', expires_at: '2099-01-01' })),
+  runQuery: vi.fn(),
 }))
 
 vi.mock('@tanstack/react-router', async () => {
@@ -18,7 +18,11 @@ vi.mock('@tanstack/react-router', async () => {
   }
 })
 
+import { runQuery } from '#/effect/runtime'
+const mockRunQuery = runQuery as ReturnType<typeof vi.fn>
+
 function renderLogin() {
+  cleanup()
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -32,6 +36,8 @@ function renderLogin() {
 describe('Login route', () => {
   it('renders the login form', () => {
     clearToken()
+    mockRunQuery.mockReset()
+    mockRunQuery.mockResolvedValue({ token: 'test', expires_at: '2099-01-01' })
     renderLogin()
     expect(screen.getByLabelText('username')).toBeTruthy()
     expect(screen.getByLabelText('password')).toBeTruthy()
@@ -40,9 +46,8 @@ describe('Login route', () => {
 
   it('shows error on failed login', async () => {
     clearToken()
-    const { runQuery } = await import('#/effect/runtime')
-    const mockRQ = runQuery as ReturnType<typeof vi.fn>
-    mockRQ.mockRejectedValueOnce(new Error('invalid credentials'))
+    mockRunQuery.mockReset()
+    mockRunQuery.mockRejectedValue(new Error('invalid credentials'))
 
     renderLogin()
     fireEvent.change(screen.getByLabelText('username'), {

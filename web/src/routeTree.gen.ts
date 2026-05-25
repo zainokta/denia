@@ -14,6 +14,8 @@ import { Route as AboutRouteImport } from './routes/about'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ServicesIndexRouteImport } from './routes/services/index'
 import { Route as ProjectsIndexRouteImport } from './routes/projects/index'
+import { Route as SettingsUsersRouteImport } from './routes/settings/users'
+import { Route as SettingsTokensRouteImport } from './routes/settings/tokens'
 import { Route as ServicesServiceIdRouteImport } from './routes/services/$serviceId'
 import { Route as ProjectsProjectIdRouteImport } from './routes/projects/$projectId'
 import { Route as DemoTanstackQueryRouteImport } from './routes/demo/tanstack-query'
@@ -43,6 +45,16 @@ const ProjectsIndexRoute = ProjectsIndexRouteImport.update({
   path: '/projects/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SettingsUsersRoute = SettingsUsersRouteImport.update({
+  id: '/settings/users',
+  path: '/settings/users',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsTokensRoute = SettingsTokensRouteImport.update({
+  id: '/settings/tokens',
+  path: '/settings/tokens',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ServicesServiceIdRoute = ServicesServiceIdRouteImport.update({
   id: '/services/$serviceId',
   path: '/services/$serviceId',
@@ -66,6 +78,8 @@ export interface FileRoutesByFullPath {
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
+  '/settings/tokens': typeof SettingsTokensRoute
+  '/settings/users': typeof SettingsUsersRoute
   '/projects/': typeof ProjectsIndexRoute
   '/services/': typeof ServicesIndexRoute
 }
@@ -76,6 +90,8 @@ export interface FileRoutesByTo {
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
+  '/settings/tokens': typeof SettingsTokensRoute
+  '/settings/users': typeof SettingsUsersRoute
   '/projects': typeof ProjectsIndexRoute
   '/services': typeof ServicesIndexRoute
 }
@@ -87,6 +103,8 @@ export interface FileRoutesById {
   '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
+  '/settings/tokens': typeof SettingsTokensRoute
+  '/settings/users': typeof SettingsUsersRoute
   '/projects/': typeof ProjectsIndexRoute
   '/services/': typeof ServicesIndexRoute
 }
@@ -99,6 +117,8 @@ export interface FileRouteTypes {
     | '/demo/tanstack-query'
     | '/projects/$projectId'
     | '/services/$serviceId'
+    | '/settings/tokens'
+    | '/settings/users'
     | '/projects/'
     | '/services/'
   fileRoutesByTo: FileRoutesByTo
@@ -109,6 +129,8 @@ export interface FileRouteTypes {
     | '/demo/tanstack-query'
     | '/projects/$projectId'
     | '/services/$serviceId'
+    | '/settings/tokens'
+    | '/settings/users'
     | '/projects'
     | '/services'
   id:
@@ -119,6 +141,8 @@ export interface FileRouteTypes {
     | '/demo/tanstack-query'
     | '/projects/$projectId'
     | '/services/$serviceId'
+    | '/settings/tokens'
+    | '/settings/users'
     | '/projects/'
     | '/services/'
   fileRoutesById: FileRoutesById
@@ -130,6 +154,8 @@ export interface RootRouteChildren {
   DemoTanstackQueryRoute: typeof DemoTanstackQueryRoute
   ProjectsProjectIdRoute: typeof ProjectsProjectIdRoute
   ServicesServiceIdRoute: typeof ServicesServiceIdRoute
+  SettingsTokensRoute: typeof SettingsTokensRoute
+  SettingsUsersRoute: typeof SettingsUsersRoute
   ProjectsIndexRoute: typeof ProjectsIndexRoute
   ServicesIndexRoute: typeof ServicesIndexRoute
 }
@@ -171,6 +197,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProjectsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/settings/users': {
+      id: '/settings/users'
+      path: '/settings/users'
+      fullPath: '/settings/users'
+      preLoaderRoute: typeof SettingsUsersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/settings/tokens': {
+      id: '/settings/tokens'
+      path: '/settings/tokens'
+      fullPath: '/settings/tokens'
+      preLoaderRoute: typeof SettingsTokensRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/services/$serviceId': {
       id: '/services/$serviceId'
       path: '/services/$serviceId'
@@ -202,6 +242,8 @@ const rootRouteChildren: RootRouteChildren = {
   DemoTanstackQueryRoute: DemoTanstackQueryRoute,
   ProjectsProjectIdRoute: ProjectsProjectIdRoute,
   ServicesServiceIdRoute: ServicesServiceIdRoute,
+  SettingsTokensRoute: SettingsTokensRoute,
+  SettingsUsersRoute: SettingsUsersRoute,
   ProjectsIndexRoute: ProjectsIndexRoute,
   ServicesIndexRoute: ServicesIndexRoute,
 }
