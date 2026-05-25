@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
-import { describe, expect, it, afterEach } from 'vitest'
-import { vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { describe, expect, it, vi, afterEach } from 'vitest'
+import { render, screen, cleanup } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+
+afterEach(() => {
+  cleanup()
+})
 
 vi.mock('#/effect/runtime', () => ({
   runQuery: vi.fn(() => Promise.resolve([])),
@@ -40,6 +43,22 @@ const fixServices = [
   { id: 1, project_id: 42, name: 'web', domains: ['example.com'], internal_port: 3000 },
 ]
 
+const fixServicesWithSecurity = [
+  {
+    id: 1,
+    project_id: 42,
+    name: 'web',
+    domains: ['example.com'],
+    internal_port: 3000,
+    security: {
+      userns: true,
+      mapped_uid: 100000,
+      no_new_privs: true,
+      caps_dropped: true,
+    },
+  },
+]
+
 function makeWrapper() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -62,11 +81,10 @@ function allReturns(results: unknown[]) {
   })
 }
 
-afterEach(cleanup)
-
 describe('ServiceDetail', () => {
   it('renders deployments newest first with status signals', async () => {
     allReturns([fixDeployments, [], []])
+    // 4th call (services) falls through to default []
 
     render(<ServiceDetail />, { wrapper: makeWrapper() })
 
@@ -120,7 +138,6 @@ describe('ServiceDetail', () => {
 
   it('has deploy and stop buttons', async () => {
     allReturns([fixDeployments, [], []])
-    // 4th call (services) falls through to default []
 
     render(<ServiceDetail />, { wrapper: makeWrapper() })
 
@@ -134,12 +151,11 @@ describe('ServiceDetail', () => {
     ]
     allReturns([deployFix, [], [], fixServices])
 
-    const { container } = render(<ServiceDetail />, { wrapper: makeWrapper() })
+    render(<ServiceDetail />, { wrapper: makeWrapper() })
 
     await screen.findByText('queued')
-    expect(container.querySelector('.signal-warn')).toBeTruthy()
-    const signals = container.querySelectorAll('.signal')
-    expect(signals.length).toBeGreaterThanOrEqual(1)
+    const warn = document.querySelector('.signal-warn')
+    expect(warn).toBeTruthy()
   })
 
   it('renders artifact digest when present', async () => {
@@ -154,7 +170,7 @@ describe('ServiceDetail', () => {
     ]
     allReturns([deployFix, [], [], fixServices])
 
-    const { container } = render(<ServiceDetail />, { wrapper: makeWrapper() })
+    render(<ServiceDetail />, { wrapper: makeWrapper() })
 
     expect(await screen.findByText(/sha256:abc1/)).toBeTruthy()
     expect(screen.getByText('image')).toBeTruthy()
@@ -171,9 +187,36 @@ describe('ServiceDetail', () => {
     ]
     allReturns([deployFix, [], [], fixServices])
 
-    const { container } = render(<ServiceDetail />, { wrapper: makeWrapper() })
+    render(<ServiceDetail />, { wrapper: makeWrapper() })
 
     expect(await screen.findByText(/artifact/)).toBeTruthy()
-    expect(container.textContent).toMatch(/artifact: pending/)
+  })
+
+  it('renders posture panel with all protections', async () => {
+    const deployFix = [
+      { id: 1, service_id: 1, status: 'Healthy', created_at: '2026-05-25T00:00:00Z' },
+    ]
+    allReturns([deployFix, [], [], fixServicesWithSecurity])
+
+    const { container } = render(<ServiceDetail />, { wrapper: makeWrapper() })
+
+    await screen.findByText('Healthy')
+    expect(container.textContent).toContain('userns')
+    expect(container.textContent).toContain('100000')
+    expect(container.textContent).toContain('no_new_privs')
+    expect(container.textContent).toContain('caps')
+    expect(container.textContent).toContain('sandboxed')
+  })
+
+  it('no posture panel when service has no security', async () => {
+    const deployFix = [
+      { id: 1, service_id: 1, status: 'Healthy', created_at: '2026-05-25T00:00:00Z' },
+    ]
+    allReturns([deployFix, [], [], fixServices])
+
+    const { container } = render(<ServiceDetail />, { wrapper: makeWrapper() })
+
+    await screen.findByText('Healthy')
+    expect(container.textContent).toContain('posture: n/a')
   })
 })

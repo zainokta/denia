@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from '@effect/vitest'
-import { vi } from 'vitest'
+import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ServicesIndex } from './index'
@@ -21,6 +20,12 @@ const FIXTURE_SERVICES = [
     domains: ['example.com'],
     internal_port: 3000,
     status: 'Healthy',
+    security: {
+      userns: true,
+      mapped_uid: 100000,
+      no_new_privs: true,
+      caps_dropped: true,
+    },
   },
   {
     id: 2,
@@ -49,8 +54,17 @@ function makeWrapper() {
 }
 
 describe('ServicesIndex', () => {
+  beforeEach(() => {
+    mockRunQuery.mockReset()
+    mockRunQuery.mockImplementation(() =>
+      new Promise((r) => setTimeout(() => r([]), 0)),
+    )
+  })
+
   it('renders services with status signals', async () => {
-    mockRunQuery.mockResolvedValue(FIXTURE_SERVICES)
+    mockRunQuery.mockImplementation(() =>
+      Promise.resolve(FIXTURE_SERVICES),
+    )
 
     render(<ServicesIndex />, { wrapper: makeWrapper() })
 
@@ -61,15 +75,15 @@ describe('ServicesIndex', () => {
   })
 
   it('renders empty state when no services', async () => {
-    mockRunQuery.mockResolvedValue([])
-
     render(<ServicesIndex />, { wrapper: makeWrapper() })
 
     expect(await screen.findByText(/No services yet/)).toBeTruthy()
   })
 
   it('has deploy and stop buttons', async () => {
-    mockRunQuery.mockResolvedValue(FIXTURE_SERVICES)
+    mockRunQuery.mockImplementation(() =>
+      Promise.resolve(FIXTURE_SERVICES),
+    )
 
     render(<ServicesIndex />, { wrapper: makeWrapper() })
 
@@ -77,5 +91,29 @@ describe('ServicesIndex', () => {
 
     expect(screen.getAllByText('deploy').length).toBe(2)
     expect(screen.getAllByText('stop').length).toBe(2)
+  })
+
+  it('shows sandboxed badge for service with full posture', async () => {
+    mockRunQuery.mockImplementation(() =>
+      Promise.resolve(FIXTURE_SERVICES),
+    )
+
+    render(<ServicesIndex />, { wrapper: makeWrapper() })
+
+    await screen.findByText('web')
+    const badges = screen.queryAllByText('sandboxed')
+    expect(badges.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('shows posture n/a for service without security', async () => {
+    mockRunQuery.mockImplementation(() =>
+      Promise.resolve(FIXTURE_SERVICES),
+    )
+
+    render(<ServicesIndex />, { wrapper: makeWrapper() })
+
+    await screen.findAllByText('web')
+    const naTexts = screen.queryAllByText(/n\/a/)
+    expect(naTexts.length).toBeGreaterThanOrEqual(1)
   })
 })
