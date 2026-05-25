@@ -36,6 +36,13 @@ export default function Header() {
             Services
           </Link>
           <Link
+            to="/ingress"
+            className="nav-link"
+            activeProps={{ className: 'nav-link is-active' }}
+          >
+            Ingress
+          </Link>
+          <Link
             to="/projects"
             className="nav-link"
             activeProps={{ className: 'nav-link is-active' }}
