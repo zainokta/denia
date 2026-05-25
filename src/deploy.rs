@@ -312,3 +312,10 @@ fn deployment_request(service: &ServiceConfig, artifact: &ArtifactRecord) -> Dep
         },
     }
 }
+
+/// Stub. Task 12 replaces the body with the real implementation that filters
+/// verified domains from `service_domains` and re-renders the Traefik dynamic
+/// config file. For now it is a no-op so verify/delete handlers compile.
+pub fn rerender_traefik(_state: &crate::app::AppState) -> Result<(), DeployError> {
+    Ok(())
+}
