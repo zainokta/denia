@@ -59,11 +59,6 @@ function allReturns(results: unknown[]) {
 }
 
 describe('ServiceDetail', () => {
-  beforeEach(() => {
-    cleanup()
-    mockRunQuery.mockReset()
-  })
-
   it('renders deployments newest first with status signals', async () => {
     allReturns([fixDeployments, [], []])
 
