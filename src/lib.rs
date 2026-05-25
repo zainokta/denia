@@ -8,6 +8,7 @@ pub mod command;
 pub mod config;
 pub mod deploy;
 pub mod domain;
+pub mod domains;
 pub mod health;
 pub mod logs;
 pub mod metrics;
