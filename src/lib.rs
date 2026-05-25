@@ -1,5 +1,6 @@
 pub mod app;
 pub mod artifacts;
+pub mod auth;
 pub mod bridge;
 pub mod cgroup_launcher;
 pub mod command;

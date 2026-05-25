@@ -4,7 +4,7 @@ use axum::{
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::Deserialize;
 use serde::Serialize;
@@ -12,11 +12,15 @@ use std::sync::Arc;
 
 use crate::{
     artifacts::acquirer::ArtifactAcquirer,
+    auth::{Principal, resolve_auth},
     bridge::{BridgeAllocator, BridgeManager, LoopbackBridgeSupervisor},
     command::{CommandRunner, TokioCommandRunner},
     config::AppConfig,
     deploy::{DeployError, DeploymentCoordinator},
-    domain::{Credential, CredentialKind, DeploymentRequest, Project, ServiceConfig},
+    domain::{
+        ApiToken, Credential, CredentialKind, DeploymentRequest, LoginResult, Me, PrincipalView,
+        Project, ServiceConfig,
+    },
     health::{FakeHealthChecker, HealthChecker},
     logs::LogStore,
     metrics::{CgroupMetricsReader, MetricsError},
@@ -89,6 +93,20 @@ impl AppState {
 }
 
 pub fn build_router(state: AppState) -> Router {
+    let auth_public = Router::new().route("/auth/login", post(login_handler));
+
+    let auth_routes = Router::new()
+        .route("/auth/logout", post(logout_handler))
+        .route("/me", get(me_handler))
+        .route("/users", get(list_users).post(create_user_handler))
+        .route("/users/{user_id}", delete(delete_user_handler))
+        .route(
+            "/api-tokens",
+            get(list_api_tokens_handler).post(create_api_token_handler),
+        )
+        .route("/api-tokens/{token_id}", delete(revoke_api_token_handler))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
+
     let protected = Router::new()
         .route("/credentials/git", post(put_credential))
         .route("/credentials/registry", post(put_credential))
@@ -113,7 +131,7 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/healthz", get(healthz))
-        .nest("/v1", protected)
+        .nest("/v1", auth_public.merge(auth_routes).merge(protected))
         .fallback(crate::web::static_handler)
         .with_state(state)
 }
@@ -309,6 +327,195 @@ async fn require_admin_token(
     Ok(next.run(request).await)
 }
 
+async fn require_auth(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+
+    if let Some(token) = token
+        && let Some(principal) = resolve_auth(&state.store, &token, &state.config.admin_token)
+    {
+        let mut request = request;
+        request.extensions_mut().insert(principal);
+        return Ok(next.run(request).await);
+    }
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+async fn login_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(input): Json<LoginRequest>,
+) -> Result<Json<LoginResult>, ApiError> {
+    if headers.get(header::AUTHORIZATION).is_some() {
+        return Err(ApiError::BadRequest("already authenticated".to_string()));
+    }
+    let user = state
+        .store
+        .verify_login(&input.username, &input.password)
+        .map_err(|_| ApiError::Conflict("invalid credentials".to_string()))?;
+    let session = state.store.create_session(user.id, 24)?;
+    Ok(Json(LoginResult {
+        token: session.token_hash,
+        expires_at: session.expires_at,
+    }))
+}
+
+async fn logout_handler(
+    State(state): State<AppState>,
+    request: Request,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if let Some(t) = token {
+        let th = crate::auth::hash_token(t);
+        let _ = state.store.delete_session(&th);
+    }
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({"logged_out": true})),
+    ))
+}
+
+async fn me_handler(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Json<Me>, ApiError> {
+    if principal.is_super_admin && !principal.is_authenticated() {
+        return Ok(Json(Me {
+            principal: PrincipalView::Bootstrap,
+            is_super_admin: true,
+            memberships: vec![],
+        }));
+    }
+    let user_id = principal
+        .user_id
+        .ok_or(ApiError::Conflict("no user".to_string()))?;
+    let user = state
+        .store
+        .get_user(user_id)?
+        .ok_or_else(|| ApiError::NotFound("user not found".to_string()))?;
+    let memberships = state.store.list_memberships_for_user(user_id)?;
+    Ok(Json(Me {
+        principal: PrincipalView::User { user },
+        is_super_admin: principal.is_super_admin,
+        memberships,
+    }))
+}
+
+async fn list_users(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Json<Vec<crate::domain::User>>, ApiError> {
+    if !principal.is_super_admin {
+        return Err(ApiError::Forbidden("super admin required".to_string()));
+    }
+    Ok(Json(state.store.list_users()?))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateUserRequest {
+    username: String,
+    password: String,
+    #[serde(default)]
+    is_super_admin: bool,
+}
+
+async fn create_user_handler(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(input): Json<CreateUserRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    if !principal.is_super_admin {
+        return Err(ApiError::Forbidden("super admin required".to_string()));
+    }
+    let hash = crate::auth::hash_password(&input.password)?;
+    state
+        .store
+        .create_user(&input.username, &hash, input.is_super_admin)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"created": true})),
+    ))
+}
+
+async fn delete_user_handler(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(user_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !principal.is_super_admin {
+        return Err(ApiError::Forbidden("super admin required".to_string()));
+    }
+    state.store.delete_user(user_id)?;
+    Ok(Json(serde_json::json!({"deleted": true})))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateApiTokenRequest {
+    name: String,
+}
+
+async fn list_api_tokens_handler(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Json<Vec<ApiToken>>, ApiError> {
+    let user_id = principal
+        .user_id
+        .ok_or(ApiError::Forbidden("real user required".to_string()))?;
+    Ok(Json(state.store.list_api_tokens(user_id)?))
+}
+
+async fn create_api_token_handler(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(input): Json<CreateApiTokenRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let user_id = principal
+        .user_id
+        .ok_or(ApiError::Forbidden("real user required".to_string()))?;
+    let api_token = state.store.create_api_token(user_id, &input.name)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            serde_json::json!({"id": api_token.id.to_string(), "name": api_token.name, "token": api_token.token_hash}),
+        ),
+    ))
+}
+
+async fn revoke_api_token_handler(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(token_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = principal
+        .user_id
+        .ok_or(ApiError::Forbidden("real user required".to_string()))?;
+    let tokens = state.store.list_api_tokens(user_id)?;
+    let belongs = tokens.iter().any(|t| t.id == token_id);
+    if !belongs {
+        return Err(ApiError::NotFound("token not found".to_string()));
+    }
+    state.store.revoke_api_token(token_id)?;
+    Ok(Json(serde_json::json!({"revoked": true})))
+}
+
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     ok: bool,
@@ -330,13 +537,31 @@ struct LifecycleResponse {
 #[derive(Debug)]
 pub enum ApiError {
     State(crate::state::StateError),
+    Auth(crate::auth::AuthError),
     InvalidSecretRef(crate::secrets::SecretRefError),
     BadRequest(String),
     NotFound(String),
+    Unauthorized(String),
+    Forbidden(String),
     Conflict(String),
     Deploy(DeployError),
     Log(std::io::Error),
     Metrics(MetricsError),
+}
+
+impl From<crate::auth::AuthError> for ApiError {
+    fn from(value: crate::auth::AuthError) -> Self {
+        match value {
+            crate::auth::AuthError::InvalidCredentials => {
+                ApiError::Unauthorized("invalid credentials".to_string())
+            }
+            crate::auth::AuthError::Forbidden => ApiError::Forbidden("forbidden".to_string()),
+            crate::auth::AuthError::InvalidToken => {
+                ApiError::Unauthorized("invalid token".to_string())
+            }
+            crate::auth::AuthError::State(e) => ApiError::State(e),
+        }
+    }
 }
 
 impl From<crate::state::StateError> for ApiError {
@@ -367,11 +592,31 @@ impl IntoResponse for ApiError {
                 crate::state::StateError::UnknownProject => {
                     (StatusCode::NOT_FOUND, error.to_string())
                 }
+                crate::state::StateError::InvalidCredentials => {
+                    (StatusCode::UNAUTHORIZED, error.to_string())
+                }
+                crate::state::StateError::LastSuperAdmin => {
+                    (StatusCode::CONFLICT, error.to_string())
+                }
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+            },
+            Self::Auth(error) => match &error {
+                crate::auth::AuthError::InvalidCredentials => {
+                    (StatusCode::UNAUTHORIZED, error.to_string())
+                }
+                crate::auth::AuthError::Forbidden => (StatusCode::FORBIDDEN, error.to_string()),
+                crate::auth::AuthError::InvalidToken => {
+                    (StatusCode::UNAUTHORIZED, error.to_string())
+                }
+                crate::auth::AuthError::State(_) => {
+                    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+                }
             },
             Self::InvalidSecretRef(error) => (StatusCode::BAD_REQUEST, error.to_string()),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             Self::NotFound(message) => (StatusCode::NOT_FOUND, message),
+            Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
+            Self::Forbidden(message) => (StatusCode::FORBIDDEN, message),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::Deploy(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
             Self::Log(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
