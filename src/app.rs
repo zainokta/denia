@@ -18,8 +18,8 @@ use crate::{
     config::AppConfig,
     deploy::{DeployError, DeploymentCoordinator},
     domain::{
-        ApiToken, Credential, CredentialKind, DeploymentRequest, LoginResult, Me, PrincipalView,
-        Project, ServiceConfig,
+        ApiToken, Credential, CredentialKind, DeploymentRequest, Job, JobRun, LoginResult, Me,
+        PrincipalView, Project, ServiceConfig,
     },
     health::{FakeHealthChecker, HealthChecker},
     logs::LogStore,
@@ -105,6 +105,10 @@ pub fn build_router(state: AppState) -> Router {
             get(list_api_tokens_handler).post(create_api_token_handler),
         )
         .route("/api-tokens/{token_id}", delete(revoke_api_token_handler))
+        .route("/jobs", get(list_jobs).post(create_job))
+        .route("/jobs/{job_id}", get(get_job).delete(delete_job))
+        .route("/jobs/{job_id}/run", post(run_job))
+        .route("/jobs/{job_id}/runs", get(list_job_runs))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let protected = Router::new()
@@ -514,6 +518,63 @@ async fn revoke_api_token_handler(
     }
     state.store.revoke_api_token(token_id)?;
     Ok(Json(serde_json::json!({"revoked": true})))
+}
+
+async fn list_jobs(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<Job>>, ApiError> {
+    let project_id = params
+        .get("project_id")
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        .unwrap_or(uuid::Uuid::nil());
+    Ok(Json(state.store.list_jobs(project_id)?))
+}
+
+async fn create_job(
+    State(state): State<AppState>,
+    Json(job): Json<Job>,
+) -> Result<(StatusCode, Json<Job>), ApiError> {
+    let stored = state.store.put_job(job)?;
+    Ok((StatusCode::CREATED, Json(stored)))
+}
+
+async fn get_job(
+    State(state): State<AppState>,
+    axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<Job>, ApiError> {
+    let job = state
+        .store
+        .get_job(job_id)?
+        .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
+    Ok(Json(job))
+}
+
+async fn delete_job(
+    State(state): State<AppState>,
+    axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.store.delete_job(job_id)?;
+    Ok(Json(serde_json::json!({"deleted": true})))
+}
+
+async fn run_job(
+    State(state): State<AppState>,
+    axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<(StatusCode, Json<JobRun>), ApiError> {
+    let _job = state
+        .store
+        .get_job(job_id)?
+        .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
+    let run = state.store.create_job_run(job_id)?;
+    Ok((StatusCode::ACCEPTED, Json(run)))
+}
+
+async fn list_job_runs(
+    State(state): State<AppState>,
+    axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<Vec<JobRun>>, ApiError> {
+    Ok(Json(state.store.list_job_runs(job_id)?))
 }
 
 #[derive(Debug, Serialize)]

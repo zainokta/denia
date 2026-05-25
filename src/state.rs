@@ -8,8 +8,8 @@ use uuid::Uuid;
 use crate::{
     artifacts::ArtifactRecord,
     domain::{
-        ApiToken, Credential, CredentialKind, Deployment, DeploymentRequest, DeploymentStatus,
-        Project, ProjectMembership, Role, ServiceConfig, Session, User,
+        ApiToken, Credential, CredentialKind, Deployment, DeploymentRequest, DeploymentStatus, Job,
+        JobRun, JobRunStatus, Project, ProjectMembership, Role, ServiceConfig, Session, User,
     },
     secrets::SecretRef,
 };
@@ -227,6 +227,33 @@ impl SqliteStore {
 
             connection.execute("DELETE FROM schema_version", [])?;
             connection.execute("INSERT INTO schema_version (version) VALUES (3)", [])?;
+        }
+
+        if current < 4 {
+            connection.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    config_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS job_runs (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    exit_code INTEGER,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    created_at TEXT NOT NULL
+                );
+                "#,
+            )?;
+
+            connection.execute("DELETE FROM schema_version", [])?;
+            connection.execute("INSERT INTO schema_version (version) VALUES (4)", [])?;
         }
 
         Ok(())
@@ -892,6 +919,144 @@ impl SqliteStore {
             });
         }
         Ok(members)
+    }
+
+    pub fn put_job(&self, job: Job) -> Result<Job, StateError> {
+        let connection = self.connection()?;
+        let json = serde_json::to_string(&job)?;
+        connection.execute(
+            "INSERT INTO jobs (id, project_id, name, config_json) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json",
+            params![
+                job.id.to_string(),
+                job.project_id.to_string(),
+                job.name,
+                &json
+            ],
+        )?;
+        Ok(job)
+    }
+
+    pub fn get_job(&self, job_id: Uuid) -> Result<Option<Job>, StateError> {
+        let connection = self.connection()?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT config_json FROM jobs WHERE id = ?1",
+                params![job_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    pub fn list_jobs(&self, project_id: Uuid) -> Result<Vec<Job>, StateError> {
+        let connection = self.connection()?;
+        let mut stmt = connection
+            .prepare("SELECT config_json FROM jobs WHERE project_id = ?1 ORDER BY name")?;
+        let rows = stmt.query_map(params![project_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut jobs = Vec::new();
+        for row in rows {
+            jobs.push(serde_json::from_str(&row?)?);
+        }
+        Ok(jobs)
+    }
+
+    pub fn delete_job(&self, job_id: Uuid) -> Result<(), StateError> {
+        let connection = self.connection()?;
+        connection.execute(
+            "DELETE FROM job_runs WHERE job_id = ?1",
+            params![job_id.to_string()],
+        )?;
+        connection.execute(
+            "DELETE FROM jobs WHERE id = ?1",
+            params![job_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn create_job_run(&self, job_id: Uuid) -> Result<JobRun, StateError> {
+        let run = JobRun {
+            id: Uuid::now_v7(),
+            job_id,
+            status: JobRunStatus::Pending,
+            attempt: 1,
+            exit_code: None,
+            started_at: None,
+            finished_at: None,
+            created_at: Utc::now(),
+        };
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT INTO job_runs (id, job_id, status, attempt, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                run.id.to_string(),
+                job_id.to_string(),
+                serde_json::to_string(&run.status)?,
+                run.attempt,
+                run.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(run)
+    }
+
+    pub fn list_job_runs(&self, job_id: Uuid) -> Result<Vec<JobRun>, StateError> {
+        let connection = self.connection()?;
+        let mut stmt = connection.prepare(
+            "SELECT id, job_id, status, attempt, exit_code, started_at, finished_at, created_at
+             FROM job_runs WHERE job_id = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![job_id.to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u32>(3)?,
+                row.get::<_, Option<i32>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?;
+        let mut runs = Vec::new();
+        for row in rows {
+            let (id, jid, status_str, attempt, exit_code, started_at, finished_at, created_at) =
+                row?;
+            runs.push(JobRun {
+                id: Uuid::parse_str(&id)?,
+                job_id: Uuid::parse_str(&jid)?,
+                status: serde_json::from_str(&status_str)?,
+                attempt,
+                exit_code,
+                started_at: started_at.and_then(|s| s.parse().ok()),
+                finished_at: finished_at.and_then(|s| s.parse().ok()),
+                created_at: created_at.parse()?,
+            });
+        }
+        Ok(runs)
+    }
+
+    pub fn update_job_run(
+        &self,
+        run_id: Uuid,
+        status: JobRunStatus,
+        exit_code: Option<i32>,
+    ) -> Result<(), StateError> {
+        let connection = self.connection()?;
+        connection.execute(
+            "UPDATE job_runs SET status = ?1, exit_code = ?2, finished_at = ?3 WHERE id = ?4",
+            params![
+                serde_json::to_string(&status)?,
+                exit_code,
+                Utc::now().to_rfc3339(),
+                run_id.to_string(),
+            ],
+        )?;
+        Ok(())
     }
 
     fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StateError> {
