@@ -99,7 +99,7 @@ export const DeploymentStatus = Schema.Literals([
 
 export const ArtifactRef = Schema.Struct({
   digest: Schema.String,
-  kind: Schema.Literal('OciImage', 'RootfsBundle'),
+  kind: Schema.Literals(['OciImage', 'RootfsBundle']),
 })
 
 export class Deployment extends Schema.Class<Deployment>('Deployment')({

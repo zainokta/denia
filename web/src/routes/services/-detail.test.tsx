@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, afterEach } from 'vitest'
 import { vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 vi.mock('#/effect/runtime', () => ({
@@ -36,6 +36,10 @@ const fixMetrics = [
   { service_id: 1, cpu_percent: 0.12, memory_bytes: 134217728, recorded_at: '2026-05-25T00:01:00Z' },
 ]
 
+const fixServices = [
+  { id: 1, project_id: 42, name: 'web', domains: ['example.com'], internal_port: 3000 },
+]
+
 function makeWrapper() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -57,6 +61,8 @@ function allReturns(results: unknown[]) {
     return Promise.resolve(val)
   })
 }
+
+afterEach(cleanup)
 
 describe('ServiceDetail', () => {
   it('renders deployments newest first with status signals', async () => {
@@ -114,10 +120,59 @@ describe('ServiceDetail', () => {
 
   it('has deploy and stop buttons', async () => {
     allReturns([fixDeployments, [], []])
+    // 4th call (services) falls through to default []
 
     render(<ServiceDetail />, { wrapper: makeWrapper() })
 
     expect(await screen.findByText('deploy')).toBeTruthy()
     expect(screen.getByText('stop')).toBeTruthy()
+  })
+
+  it('renders DeployPhase stepline for newest deployment', async () => {
+    const deployFix = [
+      { id: 1, service_id: 1, status: 'Building', created_at: '2026-05-25T00:00:00Z' },
+    ]
+    allReturns([deployFix, [], [], fixServices])
+
+    render(<ServiceDetail />, { wrapper: makeWrapper() })
+
+    expect(await screen.findByText('queued')).toBeTruthy()
+    expect(screen.getByText('acquiring')).toBeTruthy()
+    expect(screen.getByText('starting')).toBeTruthy()
+    expect(screen.getByText('live')).toBeTruthy()
+  })
+
+  it('renders artifact digest when present', async () => {
+    const deployFix = [
+      {
+        id: 1,
+        service_id: 1,
+        status: 'Healthy',
+        created_at: '2026-05-25T00:00:00Z',
+        artifact: { digest: 'sha256:abc123def456', kind: 'OciImage' },
+      },
+    ]
+    allReturns([deployFix, [], [], fixServices])
+
+    render(<ServiceDetail />, { wrapper: makeWrapper() })
+
+    expect(await screen.findByText(/sha256:abc1/)).toBeTruthy()
+    expect(screen.getByText('image')).toBeTruthy()
+  })
+
+  it('shows artifact pending when not present', async () => {
+    const deployFix = [
+      {
+        id: 1,
+        service_id: 1,
+        status: 'Building',
+        created_at: '2026-05-25T00:00:00Z',
+      },
+    ]
+    allReturns([deployFix, [], [], fixServices])
+
+    render(<ServiceDetail />, { wrapper: makeWrapper() })
+
+    expect(await screen.findByText(/artifact: pending/)).toBeTruthy()
   })
 })

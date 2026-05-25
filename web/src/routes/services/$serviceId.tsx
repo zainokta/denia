@@ -5,6 +5,7 @@ import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
 import { StatusSignal } from '#/components/StatusSignal'
 import { DeployPhase } from '#/components/DeployPhase'
+import { TlsToggle } from '#/components/TlsToggle'
 import type { Deployment } from '#/effect/schema'
 
 const getDeployments = (id: number) =>
