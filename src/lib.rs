@@ -10,6 +10,7 @@ pub mod domain;
 pub mod health;
 pub mod logs;
 pub mod metrics;
+pub mod oci;
 pub mod runtime;
 pub mod secrets;
 pub mod socket_proxy;
