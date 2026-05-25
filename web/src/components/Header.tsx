@@ -1,5 +1,10 @@
 import { Link } from '@tanstack/react-router'
+import { Suspense, lazy } from 'react'
 import ThemeToggle from './ThemeToggle'
+
+const ProjectSwitcher = lazy(() =>
+  import('./ProjectSwitcher').then((m) => ({ default: m.ProjectSwitcher })),
+)
 
 export default function Header() {
   return (
@@ -31,6 +36,13 @@ export default function Header() {
             Services
           </Link>
           <Link
+            to="/projects"
+            className="nav-link"
+            activeProps={{ className: 'nav-link is-active' }}
+          >
+            Projects
+          </Link>
+          <Link
             to="/about"
             className="nav-link"
             activeProps={{ className: 'nav-link is-active' }}
@@ -54,6 +66,9 @@ export default function Header() {
         </div>
 
         <div className="ml-auto flex items-center gap-2">
+          <Suspense fallback={null}>
+            <ProjectSwitcher />
+          </Suspense>
           <ThemeToggle />
         </div>
       </nav>
