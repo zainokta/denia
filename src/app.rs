@@ -20,8 +20,9 @@ use crate::{
     config::AppConfig,
     deploy::{DeployError, DeploymentCoordinator, SharedRoutes},
     domain::{
-        ApiToken, Credential, CredentialKind, DeploymentRequest, Job, JobRun, LoginResult, Me,
-        PrincipalView, Project, ProjectMembership, Role, ServiceConfig,
+        ApiToken, Credential, CredentialKind, DeploymentRequest, DomainStatus, Job, JobRun,
+        LoginResult, Me, PrincipalView, Project, ProjectMembership, Role, ServiceConfig,
+        ServiceDomain,
     },
     health::{FakeHealthChecker, HealthChecker},
     logs::LogStore,
@@ -29,7 +30,7 @@ use crate::{
     node_metrics::{NodeMetricsError, NodeMetricsReader, NodeSnapshot},
     runtime::{LinuxRuntime, Runtime},
     secrets::SecretRef,
-    state::SqliteStore,
+    state::{SqliteStore, StateError},
     traefik::{IngressRenderOptions, RouteSpec},
 };
 
@@ -182,6 +183,18 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/services/{service_id}/logs", get(service_logs))
         .route("/services/{service_id}/metrics", get(service_metrics))
+        .route(
+            "/services/{service_id}/domains",
+            get(list_service_domains).post(create_service_domain),
+        )
+        .route(
+            "/services/{service_id}/domains/{domain_id}",
+            delete(delete_service_domain_handler),
+        )
+        .route(
+            "/services/{service_id}/domains/{domain_id}/verify",
+            post(verify_service_domain),
+        )
         .route("/services/{service_id}/{action}", post(lifecycle_command))
         .route("/projects", get(list_projects).post(create_project))
         .route(
@@ -519,6 +532,11 @@ struct AddMemberRequest {
     role: Role,
 }
 
+#[derive(Deserialize)]
+struct CreateDomainBody {
+    hostname: String,
+}
+
 async fn list_project_members(
     State(state): State<AppState>,
     principal: Principal,
@@ -582,6 +600,152 @@ async fn list_service_deployments(
     };
     ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
     Ok(Json(state.store.list_deployments(service_id)?))
+}
+
+async fn create_service_domain(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
+    Json(body): Json<CreateDomainBody>,
+) -> Result<(StatusCode, Json<ServiceDomain>), ApiError> {
+    let svc = state
+        .store
+        .get_service(service_id)?
+        .ok_or_else(|| ApiError::NotFound("service not found".into()))?;
+    ensure_role(&state, &principal, svc.project_id, Role::Operator)?;
+
+    let hostname = crate::domains::validate_hostname(&body.hostname)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let token = crate::domains::generate_token();
+    let now = chrono::Utc::now();
+    let d = ServiceDomain {
+        id: uuid::Uuid::now_v7(),
+        service_id,
+        hostname,
+        status: DomainStatus::Pending,
+        challenge_token: token,
+        verified_at: None,
+        last_check_at: None,
+        last_error: None,
+        created_at: now,
+    };
+    state.store.put_service_domain(&d).map_err(|e| match e {
+        StateError::Sqlite(rusqlite::Error::SqliteFailure(err, _))
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            ApiError::Conflict("hostname already in use".into())
+        }
+        other => ApiError::State(other),
+    })?;
+    Ok((StatusCode::CREATED, Json(d)))
+}
+
+async fn list_service_domains(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<Vec<ServiceDomain>>, ApiError> {
+    let svc = state
+        .store
+        .get_service(service_id)?
+        .ok_or_else(|| ApiError::NotFound("service not found".into()))?;
+    ensure_role(&state, &principal, svc.project_id, Role::Viewer)?;
+    Ok(Json(state.store.list_service_domains_by_service(service_id)?))
+}
+
+async fn verify_service_domain(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path((service_id, domain_id)): axum::extract::Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Result<Json<ServiceDomain>, ApiError> {
+    let svc = state
+        .store
+        .get_service(service_id)?
+        .ok_or_else(|| ApiError::NotFound("service not found".into()))?;
+    ensure_role(&state, &principal, svc.project_id, Role::Operator)?;
+
+    let d = state
+        .store
+        .get_service_domain(domain_id)?
+        .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
+    if d.service_id != service_id {
+        return Err(ApiError::NotFound("domain not found".into()));
+    }
+    if d.status == DomainStatus::Verified {
+        return Ok(Json(d));
+    }
+
+    {
+        let mut guard = state
+            .verifying_domains
+            .lock()
+            .map_err(|_| ApiError::Conflict("verifier lock poisoned".into()))?;
+        if !guard.insert(d.id) {
+            return Err(ApiError::Conflict(
+                "domain verification already in progress".into(),
+            ));
+        }
+    }
+
+    let result = state
+        .domain_verifier
+        .verify(&d.hostname, &d.challenge_token)
+        .await;
+
+    {
+        let mut guard = state.verifying_domains.lock().unwrap();
+        guard.remove(&d.id);
+    }
+
+    let updated = match result {
+        Ok(()) => {
+            state.store.update_service_domain_status(
+                d.id,
+                DomainStatus::Verified,
+                Some(chrono::Utc::now()),
+                None,
+            )?;
+            crate::deploy::rerender_traefik(&state)?;
+            state.store.get_service_domain(d.id)?.unwrap()
+        }
+        Err(e) => {
+            state.store.update_service_domain_status(
+                d.id,
+                DomainStatus::Failed,
+                None,
+                Some(e.to_string()),
+            )?;
+            state.store.get_service_domain(d.id)?.unwrap()
+        }
+    };
+    Ok(Json(updated))
+}
+
+async fn delete_service_domain_handler(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path((service_id, domain_id)): axum::extract::Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let svc = state
+        .store
+        .get_service(service_id)?
+        .ok_or_else(|| ApiError::NotFound("service not found".into()))?;
+    ensure_role(&state, &principal, svc.project_id, Role::Operator)?;
+
+    let d = state
+        .store
+        .get_service_domain(domain_id)?
+        .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
+    if d.service_id != service_id {
+        return Err(ApiError::NotFound("domain not found".into()));
+    }
+    let was_verified = d.status == DomainStatus::Verified;
+    state.store.delete_service_domain(domain_id)?;
+    if was_verified {
+        crate::deploy::rerender_traefik(&state)?;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn lifecycle_command(
