@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 vi.mock('#/effect/runtime', () => ({
@@ -59,10 +59,6 @@ function allReturns(results: unknown[]) {
 }
 
 describe('ServiceDetail', () => {
-  beforeEach(() => {
-    cleanup()
-    mockRunQuery.mockReset()
-  })
   it('renders deployments newest first with status signals', async () => {
     allReturns([fixDeployments, [], []])
 
