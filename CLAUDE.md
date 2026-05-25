@@ -45,6 +45,8 @@ Guidelines for AI agents working on Denia, a Rust backend PaaS that runs workloa
 - Traefik integration uses the file provider. Denia generates route config and owns loopback bridge listeners.
 - Workload ingress is modeled as Denia-owned Unix sockets, with loopback bridge ports only for Traefik compatibility.
 - Runtime metrics come from cgroup v2 and procfs.
+- Runtime security hardening uses `DENIA_USERNS_BASE` (default `100000`), `DENIA_USERNS_SIZE` (default `65536`), and `DENIA_SETPRIV_BINARY` (default `setpriv`). `setpriv` must be a statically linked binary.
+- The web console (`web/`) is served by the binary itself: `src/web.rs` embeds the SPA build (`web/dist/client`) via `rust-embed` and `build_router` adds it as a fallback after `/healthz` and `/v1`. SSR is dropped; the UI is a static SPA on the same origin as `/v1`. See ADR-004. Build flow: `cd web && pnpm build`, then `cargo run` serves API + UI on `DENIA_BIND_ADDR` (default `127.0.0.1:7180`). A release `cargo build` requires `web/dist/client` to exist first (it is gitignored).
 
 ## Commits And Security
 

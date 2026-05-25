@@ -86,22 +86,28 @@ pub struct ExternalImageSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceConfig {
     pub id: Uuid,
+    pub project_id: Uuid,
     pub name: String,
     pub domains: Vec<String>,
     pub source: ServiceSource,
     pub internal_port: u16,
     pub health_check: HealthCheck,
-    pub resource_limits: ResourceLimits,
+    #[serde(default)]
+    pub resource_limits: Option<ResourceLimits>,
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
 }
 
 impl ServiceConfig {
     pub fn new(
+        project_id: Uuid,
         name: impl Into<String>,
         domains: Vec<String>,
         source: ServiceSource,
         internal_port: u16,
         health_check: HealthCheck,
-        resource_limits: ResourceLimits,
+        resource_limits: Option<ResourceLimits>,
+        env: Vec<(String, String)>,
     ) -> Result<Self, DomainError> {
         let name = name.into();
         if name.trim().is_empty() {
@@ -116,13 +122,28 @@ impl ServiceConfig {
         health_check.validate()?;
         Ok(Self {
             id: Uuid::now_v7(),
+            project_id,
             name,
             domains,
             source,
             internal_port,
             health_check,
             resource_limits,
+            env,
         })
+    }
+
+    pub fn effective_env(&self, project: &Project) -> BTreeMap<String, String> {
+        let mut map: BTreeMap<String, String> = project.shared_env.iter().cloned().collect();
+        map.extend(self.env.iter().cloned());
+        map
+    }
+
+    pub fn effective_limits(&self, project: &Project) -> ResourceLimits {
+        self.resource_limits
+            .clone()
+            .or_else(|| project.default_resource_limits.clone())
+            .unwrap_or_default()
     }
 }
 

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::sync::Arc;
 use thiserror::Error;
 
 use crate::domain::HealthCheck;
@@ -12,6 +13,16 @@ pub enum HealthError {
 #[async_trait]
 pub trait HealthChecker: Send + Sync {
     async fn check(&self, url: &str, health: &HealthCheck) -> Result<(), HealthError>;
+}
+
+#[async_trait]
+impl<T> HealthChecker for Arc<T>
+where
+    T: HealthChecker + ?Sized,
+{
+    async fn check(&self, url: &str, health: &HealthCheck) -> Result<(), HealthError> {
+        (**self).check(url, health).await
+    }
 }
 
 #[derive(Debug, Clone)]

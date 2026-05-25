@@ -19,6 +19,10 @@ Each ADR should include:
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
 | [001](001-initial-backend-architecture.md) | Initial Backend Architecture | Accepted | 2026-05-24 |
+| [002](002-frontend-effect-logic-layer.md) | Frontend Effect Logic Layer | Proposed | 2026-05-24 |
+| [003](003-linux-runtime-process-runner.md) | Linux Runtime Process Runner | Accepted | 2026-05-24 |
+| [004](004-embed-web-console.md) | Embed Web Console in Service Binary | Proposed | 2026-05-24 |
+| [005](005-runtime-security-hardening.md) | Runtime Security Hardening | Proposed | 2026-05-25 |
 
 ## Contributing
 

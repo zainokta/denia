@@ -33,6 +33,16 @@ pub trait CommandRunner: Send + Sync {
     async fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput, CommandError>;
 }
 
+#[async_trait]
+impl<T> CommandRunner for Arc<T>
+where
+    T: CommandRunner + ?Sized,
+{
+    async fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput, CommandError> {
+        (**self).run(program, args).await
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TokioCommandRunner;
 

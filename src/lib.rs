@@ -1,6 +1,7 @@
 pub mod app;
 pub mod artifacts;
 pub mod bridge;
+pub mod cgroup_launcher;
 pub mod command;
 pub mod config;
 pub mod deploy;
@@ -10,5 +11,7 @@ pub mod logs;
 pub mod metrics;
 pub mod runtime;
 pub mod secrets;
+pub mod socket_proxy;
 pub mod state;
 pub mod traefik;
+pub mod web;

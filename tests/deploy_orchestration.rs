@@ -1,6 +1,8 @@
+use uuid::Uuid;
+
 use denia::{
     artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource},
-    bridge::{BridgeAllocator, BridgeTarget},
+    bridge::{BridgeAllocator, BridgeTarget, FakeBridgeManager},
     deploy::{DeploymentCoordinator, DeploymentPlan},
     domain::{
         DeploymentStatus, ExternalImageSource, HealthCheck, ResourceLimits, RuntimeStartRequest,
@@ -11,6 +13,8 @@ use denia::{
     state::SqliteStore,
     traefik::{RouteSpec, render_file_provider_config},
 };
+
+const DEFAULT_PROJECT_ID: Uuid = Uuid::from_u64_pair(1, 0);
 
 #[test]
 fn bridge_allocator_assigns_stable_loopback_ports() {
@@ -74,6 +78,7 @@ async fn coordinator_promotes_only_after_health_check_passes() {
     let service = store
         .put_service(
             ServiceConfig::new(
+                DEFAULT_PROJECT_ID,
                 "web",
                 vec!["web.example.test".to_string()],
                 ServiceSource::ExternalImage(ExternalImageSource {
@@ -82,7 +87,8 @@ async fn coordinator_promotes_only_after_health_check_passes() {
                 }),
                 3000,
                 HealthCheck::new("/ready", 5),
-                ResourceLimits::default(),
+                Some(ResourceLimits::default()),
+                vec![],
             )
             .expect("service"),
         )
@@ -131,12 +137,14 @@ async fn coordinator_writes_traefik_config_on_promotion() {
         runtime,
         health,
         BridgeAllocator::new(19000),
+        std::sync::Arc::new(FakeBridgeManager::default()),
         config_path.clone(),
     );
 
     let service = store
         .put_service(
             ServiceConfig::new(
+                DEFAULT_PROJECT_ID,
                 "web",
                 vec!["web.example.test".to_string()],
                 ServiceSource::ExternalImage(ExternalImageSource {
@@ -145,7 +153,8 @@ async fn coordinator_writes_traefik_config_on_promotion() {
                 }),
                 3000,
                 HealthCheck::new("/ready", 5),
-                ResourceLimits::default(),
+                Some(ResourceLimits::default()),
+                vec![],
             )
             .expect("service"),
         )

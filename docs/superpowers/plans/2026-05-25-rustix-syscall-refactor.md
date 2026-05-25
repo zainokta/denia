@@ -3,9 +3,9 @@
 **Status:** Draft · **Date:** 2026-05-25 · **Implements:** [spec](../specs/2026-05-25-rustix-syscall-refactor.md)
 
 
-**Goal:** Replace `unshare`, `setpriv`, `chown -R`, and `kill` CLI invocations with in-process `rustix` syscalls. Remove `setpriv` binary injection entirely.
+**Goal:** Replace `unshare`, `setpriv`, `chown -R`, and test `kill` CLI invocations with in-process syscalls via `rustix` where available. Remove `setpriv` binary injection entirely.
 
-**Pre-requisite:** The OCI in-process plan (`2026-05-25-inprocess-oci-acquisition`) should land first since it touches the same `acquirer.rs` file and the chown path.
+**Pre-requisites:** Runtime security hardening should land first because this plan removes its `setpriv` and `chown` CLI pieces. The OCI in-process plan (`2026-05-25-inprocess-oci-acquisition`) should also land first because it touches the same `acquirer.rs` file and the rootfs materialization path.
 
 ---
 
@@ -14,7 +14,7 @@
 ### 1. Crate + module scaffold
 
 **Files:**
-- Edit: `Cargo.toml` — add `rustix = "1"` to `[dependencies]`
+- Edit: `Cargo.toml` — add `rustix = { version = "1", features = ["fs", "mount", "pipe", "process", "thread"] }` to `[dependencies]`; add `libc` only if process creation / exec needs a tiny fallback not exposed by `rustix`
 - Edit: `src/lib.rs` — after `pub mod secrets;` add `pub mod syscall;`
 - New: `src/syscall/mod.rs`
 
@@ -49,34 +49,26 @@ pub enum SyscallError {
 ### 2. `src/syscall/caps.rs`
 
 ```rust
-use rustix::process::PrctlFlags;
 use crate::syscall::SyscallError;
 
 pub fn set_no_new_privs() -> Result<(), SyscallError> {
-    rustix::process::prctl_1arg(PrctlFlags::SET_NO_NEW_PRIVS, 1)
+    rustix::thread::set_no_new_privs(true)
         .map_err(|e| SyscallError::Capability(format!("PR_SET_NO_NEW_PRIVS: {e}")))
 }
 
 pub fn drop_bounding_caps() -> Result<(), SyscallError> {
-    // PR_CAPBSET_DROP for all capabilities
-    // Iterate known caps; rustix may expose via LinuxCapability enum or fall back to libc
-    for cap in 0..41u64 { // CAP_LAST_CAP + 1
-        unsafe {
-            let rc = libc::prctl(libc::PR_CAPBSET_DROP, cap, 0, 0, 0);
-            if rc != 0 {
-                // EINVAL means the cap doesn't exist on this kernel — non-fatal
-                let e = io::Error::last_os_error();
-                if e.raw_os_error() != Some(libc::EINVAL) {
-                    return Err(SyscallError::Capability(format!("drop cap {cap}: {e}")));
-                }
-            }
-        }
+    // Iterate all rustix::thread::Capability variants supported by the crate.
+    // If rustix has no iterator, keep a local list of variants and update it with
+    // the rustix version bump.
+    for cap in all_capabilities() {
+        rustix::thread::remove_capability_from_bounding_set(cap)
+            .map_err(|e| SyscallError::Capability(format!("drop cap {cap:?}: {e}")))?;
     }
     Ok(())
 }
 ```
 
-Note: If rustix adds `CAPBSET_DROP` support by implementation time, switch to it. The `unsafe` block is minimal and self-contained.
+Do not default to `libc::prctl`; rustix exposes `remove_capability_from_bounding_set`. Add a `libc` fallback only if a specific capability cannot be represented by rustix, and document that narrow gap.
 
 ### 3. `src/syscall/chown.rs`
 
@@ -112,14 +104,16 @@ Wait — I need to check if `walkdir` is already a dependency. If not, use `std:
 ### 4. `src/syscall/signal.rs`
 
 ```rust
-use rustix::process::Signal;
+use rustix::process::{Pid, Signal};
 
 pub fn kill(pid: u32, signal: Signal) -> Result<(), SyscallError> {
-    rustix::process::kill_process(
-        rustix::process::Pid::from_raw(pid as i32),
-        signal,
-    )
-    .map_err(|e| SyscallError::Signal {
+    let Some(raw_pid) = Pid::from_raw(pid as i32) else {
+        return Err(SyscallError::Signal {
+            pid,
+            reason: "invalid pid".to_string(),
+        });
+    };
+    rustix::process::kill_process(raw_pid, signal).map_err(|e| SyscallError::Signal {
         pid,
         reason: e.to_string(),
     })
@@ -128,12 +122,11 @@ pub fn kill(pid: u32, signal: Signal) -> Result<(), SyscallError> {
 
 ### 5. `src/syscall/ns.rs` — core namespace orchestration
 
-This is the largest piece. The `create_namespace` function:
+This is the largest piece. Do not implement the naive "fork, unshare NEWPID, exec" shape: `unshare(CLONE_NEWPID)` affects the next child, not the caller. Use either `clone`/`clone3` with `CLONE_NEWPID` directly if available, or a stage-1 process that calls `unshare(CLONE_NEWPID)` and then forks the workload.
 
 ```rust
 use rustix::thread::CloneFlags;
-use rustix::process::{fork, ForkResult};
-use std::os::unix::process::CommandExt;
+use std::os::fd::OwnedFd;
 use std::path::Path;
 
 pub struct NamespaceConfig<'a> {
@@ -143,80 +136,35 @@ pub struct NamespaceConfig<'a> {
     pub workdir: &'a Path,
     pub argv: &'a [String],
     pub env: &'a [(String, String)],
+    pub cgroup_path: &'a Path,
 }
 
-pub fn create_namespace(config: NamespaceConfig) -> Result<u32, SyscallError> {
-    // 1. Create sync pipe
-    let (read_fd, write_fd) = rustix::pipe::pipe()
-        .map_err(|e| SyscallError::Namespace(format!("pipe: {e}")))?;
+pub fn spawn_namespaced_process(config: NamespaceConfig) -> Result<u32, SyscallError> {
+    // Parent side:
+    // 1. Prebuild CString argv/env before fork/clone.
+    // 2. Create two pipes: stage1_ready and stage1_go.
+    // 3. Fork/clone a stage-1 child.
+    // 4. Wait for READY after stage1 unshares/enters NEWUSER.
+    // 5. Write /proc/<stage1>/setgroups = "deny", then uid_map/gid_map.
+    // 6. Write stage1 pid to cgroup.procs before release so workload inherits cgroup.
+    // 7. Release stage1 via stage1_go.
+    // 8. Return the tracked host pid. If stage1 reports a separate workload host pid,
+    //    return that pid; otherwise return stage1 pid and have stage1 forward signals.
+    todo!("implementation follows the handshake above")
+}
 
-    // 2. Fork (child will unshare + exec, parent writes uid_map)
-    match unsafe { fork()? } {
-        ForkResult::Parent { child_pid } => {
-            drop(write_fd); // close write end in parent
-            // Wait for child to unshare NEWUSER
-            let mut buf = [0u8; 1];
-            rustix::io::read(&read_fd, &mut buf)
-                .map_err(|e| SyscallError::Namespace(format!("sync read: {e}")))?;
-            // Write uid_map
-            let uid_map = format!("0 {} {}\n", config.userns_base, config.userns_size);
-            std::fs::write(format!("/proc/{}/uid_map", child_pid.as_raw()), &uid_map)
-                .map_err(|e| SyscallError::Namespace(format!("write uid_map: {e}")))?;
-            // Write gid_map (needs setgroups deny first)
-            std::fs::write(format!("/proc/{}/setgroups", child_pid.as_raw()), "deny")
-                .map_err(|e| SyscallError::Namespace(format!("write setgroups: {e}")))?;
-            let gid_map = format!("0 {} {}\n", config.userns_base, config.userns_size);
-            std::fs::write(format!("/proc/{}/gid_map", child_pid.as_raw()), &gid_map)
-                .map_err(|e| SyscallError::Namespace(format!("write gid_map: {e}")))?;
-            drop(read_fd); // close read end → child unblocks
-            Ok(child_pid.as_raw() as u32)
-        }
-        ForkResult::Child => {
-            drop(read_fd); // close read end in child
-            // Unshare namespaces
-            rustix::thread::unshare(
-                CloneFlags::NEWUSER | CloneFlags::NEWPID | CloneFlags::NEWNS |
-                CloneFlags::NEWUTS | CloneFlags::NEWIPC
-            ).map_err(|e| SyscallError::Namespace(format!("unshare: {e}")))?;
-            // Signal parent we've unshared
-            drop(write_fd);
-            // Wait for parent to write maps
-            let mut buf = [0u8; 1];
-            let _ = rustix::io::read(&read_fd, &mut buf); // blocks until parent closes
-            // Now drop privileges
-            super::caps::set_no_new_privs()?;
-            super::caps::drop_bounding_caps()?;
-            // Unmount old proc, mount new proc
-            rustix::mount::unmount("/proc", rustix::mount::UnmountFlags::DETACH)
-                .map_err(|e| SyscallError::Namespace(format!("umount /proc: {e}")))?;
-            rustix::mount::mount("proc", "/proc", "proc", rustix::mount::MountFlags::empty(), b"")
-                .map_err(|e| SyscallError::Namespace(format!("mount /proc: {e}")))?;
-            // Bind-mount rootfs (required for pivot_root)
-            rustix::mount::mount(
-                config.rootfs,
-                config.rootfs,
-                "",
-                rustix::mount::MountFlags::BIND | rustix::mount::MountFlags::REC,
-                b"",
-            ).map_err(|e| SyscallError::Namespace(format!("bind mount rootfs: {e}")))?;
-            // pivot_root
-            let put_old = config.rootfs.join(".put_old");
-            std::fs::create_dir_all(&put_old)
-                .map_err(|e| SyscallError::Namespace(format!("create put_old: {e}")))?;
-            rustix::fs::pivot_root(config.rootfs, &put_old)
-                .map_err(|e| SyscallError::Namespace(format!("pivot_root: {e}")))?;
-            // chdir to workdir (now relative to new root)
-            rustix::process::chdir(config.workdir)
-                .map_err(|e| SyscallError::Namespace(format!("chdir: {e}")))?;
-            // execvp
-            let mut cmd = std::process::Command::new(&config.argv[0]);
-            cmd.args(&config.argv[1..])
-                .envs(config.env.iter().map(|(k, v)| (k, v)));
-            let err = cmd.exec();
-            // execvp only returns on error
-            Err(SyscallError::Namespace(format!("execvp: {err}")))
-        }
-    }
+fn stage1(config: NamespaceConfig, ready: OwnedFd, go: OwnedFd) -> ! {
+    // Child side:
+    // 1. unshare_unsafe(NEWUSER | NEWPID | NEWNS | NEWUTS | NEWIPC), or use clone/clone3 equivalent.
+    // 2. signal READY; wait for GO.
+    // 3. set_no_new_privs(true); drop bounding caps.
+    // 4. make mount propagation private; bind-mount rootfs onto itself.
+    // 5. pivot_root via rustix::process::pivot_root; unmount /.put_old.
+    // 6. create /proc if needed; mount proc inside the new root.
+    // 7. chdir to workdir.
+    // 8. If using unshare(CLONE_NEWPID), fork workload now so it enters the new PID namespace.
+    // 9. workload child execve with prebuilt C strings; stage1 waits/reaps.
+    unreachable!()
 }
 ```
 
@@ -224,6 +172,7 @@ Edge cases:
 - **fork() panic on EAGAIN/ENOMEM**: rustix returns `Err` — handle gracefully.
 - **uid_map write failure**: usual cause is a prior write with different range. Clean up child, return error.
 - **pivot_root fails**: ensure rootfs is a mount point (bind-mount it first as shown).
+- **cgroup assignment race**: parent must assign stage1 to `cgroup.procs` before releasing it to fork/exec workload, otherwise workload can run outside the intended cgroup.
 
 ### 6. Wire `LinuxRuntime`
 
@@ -242,9 +191,8 @@ Changes:
   2. Compute rootfs path, cgroup path, deployment dir
   3. Create deployment dir, socket dir, cgroup dirs
   4. Write `cpu.max`, `memory.max`
-  5. `spawn_blocking(|| create_namespace(config)).await` → get child pid
-  6. Write pid to `cgroup.procs`
-  7. Return `RuntimeStatus`
+  5. `spawn_blocking(|| spawn_namespaced_process(config)).await` → get tracked host pid; this function performs the cgroup-before-exec barrier internally
+  6. Return `RuntimeStatus`
 
 ```rust
 #[async_trait]
@@ -284,6 +232,7 @@ impl Runtime for LinuxRuntime {
         let rootfs = rootfs_path.clone();
         let argv = process.argv.clone();
         let env = process.env.clone();
+        let cgroup_for_child = cgroup_path.clone();
         let pid = tokio::task::spawn_blocking(move || {
             let config = crate::syscall::ns::NamespaceConfig {
                 userns_base,
@@ -292,15 +241,14 @@ impl Runtime for LinuxRuntime {
                 workdir: Path::new(&process.workdir),
                 argv: &argv,
                 env: &env,
+                cgroup_path: &cgroup_for_child,
             };
-            crate::syscall::ns::create_namespace(config)
+            crate::syscall::ns::spawn_namespaced_process(config)
                 .map_err(|e| std::io::Error::other(e.to_string()))
         })
         .await
         .map_err(|e| RuntimeError::Io(std::io::Error::other(e.to_string())))?
         .map_err(|e| RuntimeError::Io(e))?;
-
-        std::fs::write(cgroup_path.join("cgroup.procs"), format!("{pid}\n"))?;
 
         Ok(RuntimeStatus {
             service_name: request.service_name,
@@ -314,7 +262,7 @@ impl Runtime for LinuxRuntime {
 }
 ```
 
-Remove the `children` map (parent no longer tracks `tokio::process::Child` — stop() uses the syscall signal module with the stored pid). Add a `pids: Arc<Mutex<HashMap<String, u32>>>` to track pid-to-service mapping for `stop()`.
+Remove the `children` map (parent no longer tracks `tokio::process::Child` — stop() uses the syscall signal module with the stored pid). Add a `pids: Arc<Mutex<HashMap<String, u32>>>` to track pid-to-service mapping for `stop()`. If stage1 remains as a supervisor, make signal semantics explicit: either signal the reported workload host pid or signal stage1 and have it forward/terminate the workload.
 
 ### 7. Wire `ArtifactAcquirer`
 
@@ -356,7 +304,7 @@ Remove `.with_setpriv(config.setpriv_binary.clone())` from `LinuxRuntime` constr
 **Files:**
 - Edit: `src/runtime.rs` tests
 
-The `plan_includes_user_namespace_and_setpriv_wrapper` test is replaced by a unit test that constructs a `NamespaceConfig` from a `RuntimeStartRequest` and asserts the fields (`userns_base`, `userns_size`, argv, env, rootfs, workdir) are correct. No actual fork/exec is performed in unit tests — the privileged integration test covers the full syscall path.
+The `plan_includes_user_namespace_and_setpriv_wrapper` test is replaced by a unit test that constructs a `NamespaceConfig` from a `RuntimeStartRequest` and asserts the fields (`userns_base`, `userns_size`, argv, env, rootfs, workdir, cgroup_path) are correct. No actual fork/exec is performed in unit tests — the privileged integration test covers the full syscall path.
 
 - Edit: `tests/linux_runtime_privileged.rs`
 
@@ -396,14 +344,15 @@ Remove `DENIA_SETPRIV_BINARY` reference, add `rustix` to the Rust conventions se
 2. `cargo fmt --all`
 3. `cargo clippy --all-targets --all-features` — no new warnings.
 4. `cargo test` — full suite green.
-5. `DENIA_RUN_PRIVILEGED_TESTS=1 cargo test --test linux_runtime_privileged -- --ignored` — `NoNewPrivs: 1` + cleared `CapBnd` still asserted, workload pid != 0.
+5. `DENIA_RUN_PRIVILEGED_TESTS=1 cargo test --test linux_runtime_privileged -- --ignored` — `NoNewPrivs: 1` + cleared `CapBnd` still asserted, workload pid != 0, and `NSpid` proves the workload is inside the new PID namespace.
 6. `grep -rn "chown\|setpriv\|unshare" src/ | grep -v comment` — returns nothing (outside doc comments).
 
 ## Risks / Watch-Points
 
-- **fork() in tokio:** `spawn_blocking` on a dedicated thread is the standard pattern. The child side never touches tokio state. If the fork itself hangs (due to another thread holding a lock), the `spawn_blocking` task will hang — set a reasonable timeout on the deploy path.
+- **fork() in tokio:** `spawn_blocking` on a dedicated thread is the least bad pattern, but child code must not touch tokio state, logging, or allocation-heavy std APIs after fork. Prebuild argv/env C strings before fork and call only the small syscall/exec path in the child. Set a deploy timeout so a stuck stage1 cannot hang forever.
 - **walkdir dependency:** Check if `walkdir` is already in `Cargo.toml`. If not, avoid adding it and hand-roll `std::fs::read_dir` recursion in `chown.rs` (~20 lines).
-- **CAPBSET_DROP via rustix:** If rustix 1.x doesn't expose `PR_CAPBSET_DROP`, the minimal `unsafe { libc::prctl(...) }` block in `caps.rs` is acceptable and well-documented.
+- **CAPBSET_DROP via rustix:** rustix exposes `remove_capability_from_bounding_set`; use it first. Fall back to `libc::prctl(PR_CAPBSET_DROP, ...)` only for a documented rustix coverage gap.
 - **uid_map ordering:** `setgroups deny` must be written before `gid_map`. The code above does this correctly.
 - **pivot_root on non-mount rootfs:** The bind-mount of rootfs onto itself works because `mount(..., MS_BIND|MS_REC)` makes rootfs a mount point. Remove the bind mount from `.put_old` cleanup after pivot_root.
 - **child cleanup on error:** If uid_map write fails, the child is stuck waiting for the parent pipe — parent must kill the child. Add a `Drop` or explicit `kill` on the child pid for error paths.
+- **PID namespace trap:** Never exec workload directly in a process that only called `unshare(CLONE_NEWPID)`. It stays in the old PID namespace; only the next child enters the new one.
