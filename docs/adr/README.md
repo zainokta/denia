@@ -30,6 +30,7 @@ Each ADR should include:
 | [010](010-jobs-scheduler.md) | Jobs and Scheduler | Proposed | 2026-05-25 |
 | [011](011-inprocess-oci-acquisition.md) | In-Process OCI Image Acquisition | Proposed | 2026-05-25 |
 | [012](012-src-modularization.md) | src/ Modularization and Per-Aggregate Repositories | Proposed | 2026-05-25 |
+| [013](013-domain-verification.md) | Domain Support With HTTP File Verification | Accepted | 2026-05-25 |
 
 ## Contributing
 
