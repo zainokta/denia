@@ -83,6 +83,7 @@ export class Service extends Schema.Class<Service>('Service')({
   domains: Schema.Array(Schema.String),
   internal_port: Schema.Number,
   status: Schema.optional(Schema.String),
+  tls_enabled: Schema.optional(Schema.Boolean),
 }) {}
 
 export const Services = Schema.Array(Service)
@@ -113,3 +114,11 @@ export class MetricSnapshot extends Schema.Class<MetricSnapshot>('MetricSnapshot
 }) {}
 
 export const Metrics = Schema.Array(MetricSnapshot)
+
+export class RouteView extends Schema.Class<RouteView>('RouteView')({
+  service_name: Schema.String,
+  domains: Schema.Array(Schema.String),
+  bridge_port: Schema.Number,
+  tls: Schema.Boolean,
+}) {}
+export const RouteViews = Schema.Array(RouteView)

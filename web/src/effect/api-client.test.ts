@@ -5,7 +5,7 @@ import { ApiClient, ApiClientLive } from './api-client'
 import { AppConfig } from './config'
 import { ApiError } from './errors'
 import { clearToken, getToken, setToken, subscribe } from './auth-store'
-import { LoginResult, Me } from './schema'
+import { LoginResult, Me, RouteView, RouteViews } from './schema'
 
 const TestLayer = ApiClientLive.pipe(
   Layer.provide(
@@ -167,6 +167,49 @@ describe('Auth schema', () => {
   )
 })
 
+describe('RouteView schema', () => {
+  it.effect('decodes a RouteView', () =>
+    Schema.decodeUnknownEffect(RouteView)({
+      service_name: 'web',
+      domains: ['example.com', 'www.example.com'],
+      bridge_port: 9090,
+      tls: true,
+    }).pipe(
+      Effect.map((rv) => {
+        expect(rv.service_name).toBe('web')
+        expect(rv.domains).toEqual(['example.com', 'www.example.com'])
+        expect(rv.bridge_port).toBe(9090)
+        expect(rv.tls).toBe(true)
+      }),
+    ),
+  )
+
+  it.effect('decodes an array of RouteViews', () =>
+    Schema.decodeUnknownEffect(RouteViews)([
+      {
+        service_name: 'web',
+        domains: ['example.com'],
+        bridge_port: 9090,
+        tls: true,
+      },
+      {
+        service_name: 'api',
+        domains: ['api.example.com'],
+        bridge_port: 9091,
+        tls: false,
+      },
+    ]).pipe(
+      Effect.map((routes) => {
+        expect(routes.length).toBe(2)
+        expect(routes[0].service_name).toBe('web')
+        expect(routes[0].tls).toBe(true)
+        expect(routes[1].service_name).toBe('api')
+        expect(routes[1].tls).toBe(false)
+      }),
+    ),
+  )
+})
+
 describe('Auth ApiClient methods', () => {
   it.effect('ApiClient has auth + service methods', () =>
     Effect.gen(function* () {
@@ -257,6 +300,96 @@ const mockApi = (success = true) =>
             }),
           )) as never,
   })
+
+const FIXTURE_JOB = {
+  id: '018f1100-0000-7000-0000-000000000010',
+  project_id: '018f1100-0000-7000-0000-000000000001',
+  name: 'daily-backup',
+  source: { type: 'external_image', image: 'alpine:latest', credential: null },
+  command: ['/bin/sh', '-c', 'echo hello'],
+  env: [['KEY', 'val']],
+  schedule: null,
+  max_retries: 0,
+  next_run_at: null,
+  last_enqueued_at: null,
+  created_at: '2026-05-25T00:00:00Z',
+}
+
+const FIXTURE_JOB_RUN = {
+  id: '018f1100-0000-7000-0000-000000000020',
+  job_id: '018f1100-0000-7000-0000-000000000010',
+  status: 'Succeeded',
+  attempt: 1,
+  exit_code: 0,
+  started_at: '2026-05-25T00:00:01Z',
+  finished_at: '2026-05-25T00:00:05Z',
+  created_at: '2026-05-25T00:00:00Z',
+}
+
+describe('Job schemas', () => {
+  it.effect('decodes a Job with null schedule', () =>
+    Schema.decodeUnknownEffect(Job)(FIXTURE_JOB).pipe(
+      Effect.map((job) => {
+        expect(job.id).toBe('018f1100-0000-7000-0000-000000000010')
+        expect(job.name).toBe('daily-backup')
+        expect(job.schedule).toBeNull()
+        expect(job.next_run_at).toBeNull()
+        expect(job.max_retries).toBe(0)
+        expect(job.env[0]).toEqual(['KEY', 'val'])
+      }),
+    ),
+  )
+
+  it.effect('decodes a Job with cron schedule', () =>
+    Schema.decodeUnknownEffect(Job)({
+      ...FIXTURE_JOB,
+      name: 'cron-job',
+      schedule: '*/5 * * * *',
+      next_run_at: '2026-05-25T00:05:00Z',
+    }).pipe(
+      Effect.map((job) => {
+        expect(job.schedule).toBe('*/5 * * * *')
+        expect(job.next_run_at).toBe('2026-05-25T00:05:00Z')
+      }),
+    ),
+  )
+
+  it.effect('decodes a JobRun', () =>
+    Schema.decodeUnknownEffect(JobRun)(FIXTURE_JOB_RUN).pipe(
+      Effect.map((run) => {
+        expect(run.status).toBe('Succeeded')
+        expect(run.attempt).toBe(1)
+        expect(run.exit_code).toBe(0)
+        expect(run.started_at).toBe('2026-05-25T00:00:01Z')
+        expect(run.finished_at).toBe('2026-05-25T00:00:05Z')
+      }),
+    ),
+  )
+
+  it.effect('decodes a JobRun with null exit_code and finished_at', () =>
+    Schema.decodeUnknownEffect(JobRun)({
+      ...FIXTURE_JOB_RUN,
+      status: 'Running',
+      exit_code: null,
+      started_at: '2026-05-25T00:00:01Z',
+      finished_at: null,
+    }).pipe(
+      Effect.map((run) => {
+        expect(run.status).toBe('Running')
+        expect(run.exit_code).toBeNull()
+        expect(run.finished_at).toBeNull()
+      }),
+    ),
+  )
+
+  it.effect('JobRunStatus literal type checks', () =>
+    Schema.decodeUnknownEffect(JobRunStatus)('Pending').pipe(
+      Effect.map((s) => {
+        expect(s).toBe('Pending')
+      }),
+    ),
+  )
+})
 
 describe('ApiClient projects', () => {
   it.effect('project methods exist on ApiClient', () =>
