@@ -227,7 +227,13 @@ where
                     .lock()
                     .map_err(|_| DeployError::BridgeLockPoisoned)?;
                 routes.remove(&service.name);
-                render_file_provider_config(&routes.values().cloned().collect::<Vec<_>>())?
+                let opts = crate::traefik::IngressRenderOptions {
+                    acme_resolver: String::new(),
+                    control_domain: None,
+                    control_tls: false,
+                    control_backend_addr: String::new(),
+                };
+                render_file_provider_config(&routes.values().cloned().collect::<Vec<_>>(), &opts)?
             };
             std::fs::write(&routing.traefik_config_path, yaml)?;
         }
@@ -262,12 +268,20 @@ where
             routes.insert(
                 service.name.clone(),
                 RouteSpec {
+                    route_key: format!("svc-{}", service.id),
                     service_name: service.name.clone(),
                     domains: service.domains.clone(),
                     bridge_port: bridge_target.port,
+                    tls: service.tls_enabled,
                 },
             );
-            render_file_provider_config(&routes.values().cloned().collect::<Vec<_>>())?
+            let opts = crate::traefik::IngressRenderOptions {
+                acme_resolver: String::new(),
+                control_domain: None,
+                control_tls: false,
+                control_backend_addr: String::new(),
+            };
+            render_file_provider_config(&routes.values().cloned().collect::<Vec<_>>(), &opts)?
         };
         std::fs::write(&routing.traefik_config_path, yaml)?;
         Ok(())

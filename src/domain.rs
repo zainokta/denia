@@ -96,6 +96,8 @@ pub struct ServiceConfig {
     pub resource_limits: Option<ResourceLimits>,
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    #[serde(default)]
+    pub tls_enabled: bool,
 }
 
 impl ServiceConfig {
@@ -131,6 +133,7 @@ impl ServiceConfig {
             health_check,
             resource_limits,
             env,
+            tls_enabled: false,
         })
     }
 
