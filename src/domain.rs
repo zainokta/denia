@@ -23,6 +23,10 @@ pub enum DomainError {
     InvalidSchedule,
     #[error("invalid hostname: {0}")]
     InvalidHostname(String),
+    #[error("registry endpoint cannot be empty")]
+    RegistryMissingEndpoint,
+    #[error("registry credential is required for non-anonymous auth")]
+    RegistryMissingCredential,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,6 +172,56 @@ pub struct Credential {
     pub name: String,
     pub kind: CredentialKind,
     pub secret_ref: SecretRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryAuthKind {
+    Anonymous,
+    Basic,
+    Token,
+    EcrToken,
+    GarToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Registry {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub name: String,
+    pub endpoint: String,
+    pub auth_kind: RegistryAuthKind,
+    pub credential_ref: Option<SecretRef>,
+}
+
+impl Registry {
+    pub fn new(
+        project_id: Uuid,
+        name: impl Into<String>,
+        endpoint: impl Into<String>,
+        auth_kind: RegistryAuthKind,
+        credential_ref: Option<SecretRef>,
+    ) -> Result<Self, DomainError> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(DomainError::EmptyName);
+        }
+        let endpoint = endpoint.into();
+        if endpoint.trim().is_empty() {
+            return Err(DomainError::RegistryMissingEndpoint);
+        }
+        if auth_kind != RegistryAuthKind::Anonymous && credential_ref.is_none() {
+            return Err(DomainError::RegistryMissingCredential);
+        }
+        Ok(Self {
+            id: Uuid::now_v7(),
+            project_id,
+            name,
+            endpoint,
+            auth_kind,
+            credential_ref,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -487,6 +541,37 @@ mod tests {
         assert_eq!(verified, DomainStatus::Verified);
         let failed: DomainStatus = serde_json::from_str("\"failed\"").unwrap();
         assert_eq!(failed, DomainStatus::Failed);
+    }
+
+    #[test]
+    fn registry_requires_credential_unless_anonymous() {
+        let err = Registry::new(Uuid::now_v7(), "ghcr", "ghcr.io", RegistryAuthKind::Basic, None)
+            .unwrap_err();
+        assert_eq!(err, DomainError::RegistryMissingCredential);
+
+        let ok = Registry::new(
+            Uuid::now_v7(),
+            "public",
+            "docker.io",
+            RegistryAuthKind::Anonymous,
+            None,
+        );
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn registry_rejects_empty_name_or_endpoint() {
+        let p = Uuid::now_v7();
+        let r = SecretRef::parse("ghcr-cred").unwrap();
+        assert_eq!(
+            Registry::new(p, "  ", "ghcr.io", RegistryAuthKind::Basic, Some(r.clone()))
+                .unwrap_err(),
+            DomainError::EmptyName
+        );
+        assert_eq!(
+            Registry::new(p, "ghcr", "", RegistryAuthKind::Basic, Some(r)).unwrap_err(),
+            DomainError::RegistryMissingEndpoint
+        );
     }
 
     #[test]
