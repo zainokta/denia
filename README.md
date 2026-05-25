@@ -26,24 +26,38 @@ separated internally so they can split later if a multi-node ADR is accepted.
   raw secret values. Default backend is a host-local age identity with
   root-only permissions.
 - **Artifacts** — two v1 sources: Git over SSH built via BuildKit, and external
-  OCI image pulls (`skopeo` copy + `umoci unpack` into a rootfs bundle).
-  BuildKit is used only to turn Dockerfiles into OCI artifacts — never as the
-  runtime.
-- **Runtime** — `LinuxRuntime` launches workloads with
-  `unshare --fork --pid --mount --uts --ipc --mount-proc --root <rootfs> --wd <workdir>`,
-  places them in `<cgroup_root>/<service>/<deployment_id>` cgroups, applies
-  CPU/memory limits, and cleans up failed starts. Host root is the trust
-  boundary; the agent runs rootful.
-- **Ingress** — Traefik via its file provider. Denia generates route config and
-  owns loopback bridge listeners that forward Traefik traffic to Denia-owned
-  Unix sockets per workload.
-- **Metrics** — read from cgroup v2 and procfs.
+  OCI image pulls performed **in-process** via `oci-client` +
+  `TarRootfsUnpacker` (no `skopeo`/`umoci` host binaries). Optional ECR/GAR
+  credential providers ship behind `--features ecr,gar`. See ADR-011.
+- **Runtime** — `LinuxRuntime` launches workloads under `cgroup_v2 +
+  unshare(user|pid|mount|uts|ipc) + no_new_privs + bounded-caps` and places
+  them in `<cgroup_root>/<service_id>/<deployment_id>` cgroups. Host paths are
+  keyed off the globally-unique `service_id`, so the same service name across
+  projects is isolated on disk. Host root is the trust boundary; agent runs
+  rootful.
+- **Ingress** — Traefik file provider. Denia owns the loopback-bridge listeners
+  that forward Traefik traffic to per-workload Unix sockets. Per-service TLS
+  (`tls_enabled`) emits ACME-resolved `websecure` routers with HTTP→HTTPS
+  redirect (ADR-007). The bridge tees the first HTTP request line and response
+  status into an in-process access log (ADR-009).
+- **RBAC** — Users, sessions, API tokens, and project-scoped roles
+  (Viewer/Operator/Admin) plus a bootstrap super-admin. Every `/v1` route
+  resolves a `Principal` and enforces a project-scoped role minimum (ADR-008).
+- **Projects** — Services are grouped into projects with shared env and
+  default resource limits; `effective_env` and `effective_limits` are merged
+  into each runtime start (ADR-006).
+- **Jobs** — Run-to-completion jobs with cron schedules + in-process
+  tokio scheduler, run-history with status + exit code, and Forbid concurrency
+  (409 on duplicate manual run) (ADR-010).
+- **Observability** — Node CPU/mem/disk/load via procfs + statvfs, per-service
+  request log + workload roll-up (ADR-009).
+- **Metrics** — cgroup v2 + procfs, read by `service_id`.
 
-Source modules (`src/`): `app` (router + handlers), `domain` (service/credential/
-deployment/runtime types), `state` (SQLite store), `secrets` (SOPS), `artifacts`
-(acquisition), `runtime` (Linux runner), `deploy` (health-gated coordinator),
-`bridge`, `traefik`, `logs`, `metrics`, `command` (process runner abstraction),
-`config`, `web` (embedded dashboard).
+Source modules (`src/`): `app`, `domain`, `state`, `secrets`, `artifacts`,
+`oci` (in-process puller/unpacker + credentials), `runtime`, `deploy`,
+`bridge` (with request-tee), `traefik`, `logs`, `metrics`, `node_metrics`,
+`access_log`, `scheduler`, `auth`, `command`, `config`, `syscall` (rustix
+chown/caps/ns + signal), `web`.
 
 Deployments are **health-gated**: Denia starts the new deployment, waits for the
 configured HTTP health-check path and timeout, then atomically promotes routing
@@ -53,8 +67,9 @@ and retains the previous deployment for rollback.
 
 - Rust 2024 edition (stable toolchain).
 - Linux host with **cgroup v2** and **systemd** (Ubuntu/Debian LTS baseline).
-- `unshare` (util-linux), `skopeo`, `umoci`, `sops`, and (for Git sources)
-  BuildKit (`buildctl`) available on `PATH` or configured via env.
+- `unshare` (util-linux) and `sops`. For Git sources: BuildKit (`buildctl`).
+  OCI image acquisition is in-process — no `skopeo`/`umoci`. `no_new_privs` +
+  capability-drop are applied via `rustix` in-process — no `setpriv`.
 - For building the dashboard: `pnpm` + Node (TanStack Start). See `web/`.
 
 ## Build & Run
@@ -94,29 +109,55 @@ All configuration is environment-driven (`src/config.rs`).
 | `DENIA_DATABASE_PATH` | `<data_dir>/denia.sqlite3` | SQLite path |
 | `DENIA_BUILDKIT_BINARY` | `buildctl` | BuildKit client binary |
 | `DENIA_SOPS_BINARY` | `sops` | SOPS binary |
-| `DENIA_REGISTRY_PULL_BINARY` | `skopeo` | OCI image copy binary |
-| `DENIA_OCI_UNPACK_BINARY` | `umoci` | Rootfs bundle unpack binary |
 | `DENIA_TRAEFIK_DYNAMIC_CONFIG` | `/etc/traefik/dynamic/denia.yml` | Generated Traefik file-provider config |
+| `DENIA_ACME_RESOLVER` | `le` | Traefik certResolver name used for `tls_enabled` services |
+| `DENIA_CONTROL_DOMAIN` | — | Optional Traefik router for the control plane itself |
+| `DENIA_CONTROL_TLS` | `false` | TLS on the control-plane router |
+| `DENIA_USERNS_BASE` | `100000` | uid/gid base for the workload user namespace |
+| `DENIA_USERNS_SIZE` | `65536` | uid/gid range size for the workload user namespace |
+| `DENIA_NODE_DISK_PATH` | `<data_dir>` | Path used for `statvfs` disk metrics |
+| `DENIA_ECR_USERNAME` / `DENIA_ECR_PASSWORD` | — | ECR registry auth (with `--features ecr`) |
+| `DENIA_GAR_ACCESS_TOKEN` | — | GAR registry auth (with `--features gar`) |
 
 Derived paths: `runtime/`, `artifacts/`, and `logs/` under `DENIA_DATA_DIR`.
 
 ## API
 
-`GET /healthz` is public. Everything under `/v1` requires
-`Authorization: Bearer <DENIA_ADMIN_TOKEN>`.
+`GET /healthz` is public. Everything under `/v1` requires `Authorization:
+Bearer <token>` — either the bootstrap admin token (super-admin) or a
+user session / API token issued by `/v1/auth/login` (ADR-008).
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/healthz` | Liveness probe (public) |
-| `POST` | `/v1/credentials/git` | Register a Git deploy-key credential (SOPS ref) |
-| `POST` | `/v1/credentials/registry` | Register a registry credential (SOPS ref) |
-| `GET` | `/v1/services` | List services |
-| `POST` | `/v1/services` | Create/update a service config |
-| `POST` | `/v1/deployments` | Create a deployment (Git or external image) |
-| `GET` | `/v1/services/{id}/deployments` | List deployments for a service |
-| `GET` | `/v1/services/{id}/logs` | Service logs |
-| `GET` | `/v1/services/{id}/metrics` | Runtime metric snapshots |
-| `POST` | `/v1/services/{id}/{action}` | Lifecycle command (start/stop/etc.) |
+| Method | Path | Min role | Purpose |
+|--------|------|----------|---------|
+| `GET` | `/healthz` | public | Liveness probe |
+| `POST` | `/v1/auth/login` | public | Issue a session token |
+| `POST` | `/v1/auth/logout` | authenticated | Revoke the bearer session |
+| `GET` | `/v1/me` | authenticated | Current principal + memberships |
+| `GET` / `POST` / `DELETE` | `/v1/users{,/...}` | super-admin | User management |
+| `GET` / `POST` / `DELETE` | `/v1/api-tokens{,/...}` | authenticated | Caller's API tokens |
+| `GET` | `/v1/projects` | viewer (membership-filtered) | List projects |
+| `POST` | `/v1/projects` | super-admin | Create a project |
+| `GET` | `/v1/projects/{id}` | viewer | Project detail |
+| `DELETE` | `/v1/projects/{id}` | admin | Delete (only when empty) |
+| `GET` / `POST` / `DELETE` | `/v1/projects/{id}/members{,/...}` | admin | Project membership |
+| `POST` | `/v1/credentials/{git,registry}` | super-admin | Register a SOPS-referenced credential |
+| `GET` | `/v1/services` | viewer (membership-filtered) | List services |
+| `POST` | `/v1/services` | operator | Create/update a service config |
+| `POST` | `/v1/deployments` | operator | Create a deployment (Git or external image) |
+| `GET` | `/v1/services/{id}/deployments` | viewer | List deployments |
+| `GET` | `/v1/services/{id}/logs` | operator | Service logs |
+| `GET` | `/v1/services/{id}/metrics` | viewer | cgroup snapshots |
+| `GET` | `/v1/services/{id}/requests` | operator | Recent access-log entries |
+| `POST` | `/v1/services/{id}/{action}` | operator | Lifecycle (`stop`) |
+| `GET` | `/v1/jobs?project_id=...` | viewer | List jobs |
+| `POST` | `/v1/jobs` | operator | Create a job (cron or manual) |
+| `GET` / `DELETE` | `/v1/jobs/{id}` | viewer / operator | Job detail / delete |
+| `POST` | `/v1/jobs/{id}/run` | operator | Manual trigger (409 if a run is active) |
+| `GET` | `/v1/jobs/{id}/runs` | viewer | Run history |
+| `GET` | `/v1/ingress/routes` | super-admin | Live RouteSpec snapshot |
+| `GET` | `/v1/ingress/config` | super-admin | Live Traefik dynamic YAML |
+| `GET` | `/v1/metrics/node` | super-admin | NodeSnapshot (CPU/mem/disk/load) |
+| `GET` | `/v1/workloads` | viewer (membership-filtered) | Running-workload roll-up |
 
 Credentials store only a `secret_ref` pointing at a SOPS-encrypted file; raw
 secret material never enters SQLite or logs.
@@ -157,8 +198,11 @@ planning, path safety, and cgroup-file preparation against temp directories.
 
 ## References
 
-- `docs/adr/README.md` and the ADRs (`001` backend architecture, `002` frontend
-  Effect layer, `003` Linux runtime process runner).
+- `docs/adr/README.md` and the ADRs: `001` backend architecture, `002` frontend
+  Effect layer, `003` Linux runtime process runner (in-process OCI amendment),
+  `004` embedded web console, `005` runtime security hardening, `006` projects +
+  versioned migrations, `007` ingress + TLS, `008` project-scoped RBAC,
+  `009` observability, `010` jobs scheduler, `011` in-process OCI acquisition.
 - `CLAUDE.md` — agent/contributor guidelines.
 - [Rust](https://www.rust-lang.org/) · [Axum](https://docs.rs/axum/) ·
   [SOPS](https://getsops.io/) ·
