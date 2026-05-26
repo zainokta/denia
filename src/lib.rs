@@ -1,4 +1,3 @@
-pub mod access_log;
 pub mod app;
 pub mod artifacts;
 pub mod auth;
@@ -9,9 +8,7 @@ pub mod deploy;
 pub mod domain;
 pub mod domains;
 pub mod health;
-pub mod logs;
-pub mod metrics;
-pub mod node_metrics;
+pub mod observability;
 pub mod oci;
 pub mod rate_limit;
 pub mod runtime;
@@ -23,3 +20,5 @@ pub mod syscall;
 pub mod traefik;
 pub mod web;
 pub mod workload_launcher;
+
+pub use observability::{access_log, logs, metrics, node_metrics};
