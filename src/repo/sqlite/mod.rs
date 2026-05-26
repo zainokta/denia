@@ -1,8 +1,9 @@
 //! Sqlite-backed building blocks for repo implementations.
 //!
-//! Task 8 splits the `SqliteStore` impl across per-aggregate files in this
-//! module. The struct itself stays in `state.rs`; each file here adds another
-//! `impl SqliteStore { ... }` block. Migration logic lives in `pool::run_migrations`.
+//! Task 9 adds per-aggregate `Sqlite*Repo` structs implementing each
+//! `repo::*Repo` trait alongside the existing `impl SqliteStore { ... }`
+//! blocks. Both code paths funnel through the same `*_q` free functions so
+//! SQL is never duplicated. `SqliteStore` will be deleted in Task 10.
 
 pub mod credentials;
 pub mod deployments;
@@ -15,4 +16,13 @@ pub mod services;
 pub mod tokens;
 pub mod users;
 
+pub use credentials::SqliteCredentialRepo;
+pub use deployments::SqliteDeploymentRepo;
+pub use domains::SqliteDomainRepo;
+pub use jobs::SqliteJobRepo;
 pub use pool::{SqlitePool, run_migrations};
+pub use projects::SqliteProjectRepo;
+pub use registries::SqliteRegistryRepo;
+pub use services::SqliteServiceRepo;
+pub use tokens::SqliteTokenRepo;
+pub use users::SqliteUserRepo;
