@@ -61,32 +61,9 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
                 .is_ok(),
             Err(_) => false,
         }
-    } else if let Some(rest) = hash.strip_prefix("bcrypt:") {
-        let parts: Vec<&str> = rest.splitn(2, ':').collect();
-        if parts.len() == 2 {
-            let salt = parts[0];
-            let expected = parts[1];
-            let computed = legacy_sha256_hash(salt, password);
-            if expected.as_bytes().ct_eq(computed.as_bytes()).unwrap_u8() == 1 {
-                return true;
-            }
-        }
-        false
     } else {
         false
     }
-}
-
-pub fn needs_password_rehash(hash: &str) -> bool {
-    hash.starts_with("bcrypt:")
-}
-
-fn legacy_sha256_hash(salt: &str, password: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(salt.as_bytes());
-    hasher.update(password.as_bytes());
-    hasher.update(b"denia-v1");
-    hex::encode(hasher.finalize())
 }
 
 pub fn generate_token() -> String {
@@ -183,20 +160,6 @@ mod tests {
         let hash = hash_password("secret123").unwrap();
         assert!(verify_password(&hash, "secret123"));
         assert!(!verify_password(&hash, "wrong"));
-    }
-
-    #[test]
-    fn legacy_bcrypt_prefix_is_still_verifiable() {
-        let legacy = legacy_sha256_hash("abcdefabcdefabcd", "secret123");
-        let stored = format!("bcrypt:{}:{}", "abcdefabcdefabcd", legacy);
-        assert!(verify_password(&stored, "secret123"));
-        assert!(!verify_password(&stored, "wrong"));
-    }
-
-    #[test]
-    fn needs_rehash_detects_legacy_prefix() {
-        assert!(needs_password_rehash("bcrypt:salt:hash"));
-        assert!(!needs_password_rehash("argon2id:$argon2id$v=19$..."));
     }
 
     #[test]

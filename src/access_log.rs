@@ -54,6 +54,43 @@ impl AccessLogStore {
     }
 }
 
+fn is_hex(c: char) -> bool {
+    c.is_ascii_hexdigit()
+}
+
+fn is_uuid_segment(s: &str) -> bool {
+    s.len() == 36
+        && s.chars().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => is_hex(c),
+        })
+}
+
+fn is_token_segment(s: &str) -> bool {
+    s.len() > 32 && s.chars().all(is_hex)
+}
+
+pub fn sanitize_path(path: &str) -> String {
+    let mut result = String::with_capacity(path.len());
+    for segment in path.split('/') {
+        if result.is_empty() && segment.is_empty() {
+            continue;
+        }
+        result.push('/');
+        if is_uuid_segment(segment) {
+            result.push_str("{id}");
+        } else if is_token_segment(segment) {
+            result.push_str("{token}");
+        } else {
+            result.push_str(segment);
+        }
+    }
+    if result.is_empty() {
+        result.push('/');
+    }
+    result
+}
+
 pub fn parse_request_line(line: &str) -> Option<(String, String)> {
     let mut parts = line.split_whitespace();
     let method = parts.next()?.to_string();
@@ -63,6 +100,7 @@ pub fn parse_request_line(line: &str) -> Option<(String, String)> {
         return None;
     }
     let path = raw_path.split('?').next().unwrap_or(&raw_path).to_string();
+    let path = sanitize_path(&path);
     Some((method, path))
 }
 
@@ -84,6 +122,39 @@ mod tests {
         let (method, path) = parse_request_line("GET /healthz HTTP/1.1").expect("parsed");
         assert_eq!(method, "GET");
         assert_eq!(path, "/healthz");
+    }
+
+    #[test]
+    fn parse_request_line_sanitizes_uuid() {
+        let (method, path) = parse_request_line(
+            "GET /api/users/a1b2c3d4-e5f6-7890-abcd-ef1234567890/profile HTTP/1.1",
+        )
+        .expect("parsed");
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/api/users/{id}/profile");
+    }
+
+    #[test]
+    fn sanitize_path_replaces_uuids_and_tokens() {
+        assert_eq!(sanitize_path("/healthz"), "/healthz");
+        assert_eq!(
+            sanitize_path("/api/users/a1b2c3d4-e5f6-7890-abcd-ef1234567890/profile"),
+            "/api/users/{id}/profile"
+        );
+        assert_eq!(
+            sanitize_path("/download/abcdef0123456789abcdef0123456789abcdef/file"),
+            "/download/{token}/file"
+        );
+        assert_eq!(
+            sanitize_path(
+                "/a/a1b2c3d4-e5f6-7890-abcd-ef1234567890/b/abcdef0123456789abcdef0123456789abcdef/c"
+            ),
+            "/a/{id}/b/{token}/c"
+        );
+        assert_eq!(
+            sanitize_path("/static/abcdef0123456789abcdef0123456789abcdef"),
+            "/static/{token}"
+        );
     }
 
     #[test]

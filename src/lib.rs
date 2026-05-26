@@ -13,6 +13,7 @@ pub mod logs;
 pub mod metrics;
 pub mod node_metrics;
 pub mod oci;
+pub mod rate_limit;
 pub mod runtime;
 pub mod scheduler;
 pub mod secrets;

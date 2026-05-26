@@ -28,6 +28,7 @@ use crate::{
     logs::LogStore,
     metrics::{CgroupMetricsReader, MetricsError},
     node_metrics::{NodeMetricsError, NodeMetricsReader, NodeSnapshot},
+    rate_limit::{LoginRateLimiter, rate_limit_login},
     runtime::{LinuxRuntime, Runtime},
     secrets::SecretRef,
     state::{SqliteStore, StateError},
@@ -155,7 +156,15 @@ impl AppState {
 }
 
 pub fn build_router(state: AppState) -> Router {
-    let auth_public = Router::new().route("/auth/login", post(login_handler));
+    let rate_limiter = LoginRateLimiter::default();
+    let login = Router::new()
+        .route("/auth/login", post(login_handler))
+        .route_layer(middleware::from_fn_with_state(
+            rate_limiter,
+            rate_limit_login,
+        ));
+
+    let auth_public = Router::new().merge(login);
 
     let auth_routes = Router::new()
         .route("/auth/logout", post(logout_handler))
@@ -237,6 +246,7 @@ pub fn build_router(state: AppState) -> Router {
             get(challenge_handler),
         )
         .nest("/v1", auth_public.merge(auth_routes).merge(protected))
+        .layer(middleware::from_fn(security_headers))
         .fallback(crate::web::static_handler)
         .with_state(state)
 }
@@ -992,7 +1002,7 @@ async fn login_handler(
         .map_err(|_| ApiError::Unauthorized("invalid credentials".to_string()))?;
     let session = state.store.create_session(user.id, 24)?;
     Ok(Json(LoginResult {
-        token: session.token_hash,
+        token: session.token,
         expires_at: session.expires_at,
     }))
 }
@@ -1117,7 +1127,7 @@ async fn create_api_token_handler(
     Ok((
         StatusCode::CREATED,
         Json(
-            serde_json::json!({"id": api_token.id.to_string(), "name": api_token.name, "token": api_token.token_hash}),
+            serde_json::json!({"id": api_token.id.to_string(), "name": api_token.name, "token": api_token.token}),
         ),
     ))
 }
@@ -1147,7 +1157,7 @@ async fn list_jobs(
     let project_id = params
         .get("project_id")
         .and_then(|id| uuid::Uuid::parse_str(id).ok())
-        .unwrap_or(uuid::Uuid::nil());
+        .ok_or_else(|| ApiError::BadRequest("project_id query parameter is required".into()))?;
     ensure_role(&state, &principal, project_id, Role::Viewer)?;
     Ok(Json(state.store.list_jobs(project_id)?))
 }
@@ -1316,7 +1326,10 @@ impl IntoResponse for ApiError {
                 crate::state::StateError::LastSuperAdmin => {
                     (StatusCode::CONFLICT, error.to_string())
                 }
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                ),
             },
             Self::Auth(error) => match &error {
                 crate::auth::AuthError::InvalidCredentials => {
@@ -1326,9 +1339,10 @@ impl IntoResponse for ApiError {
                 crate::auth::AuthError::InvalidToken => {
                     (StatusCode::UNAUTHORIZED, error.to_string())
                 }
-                crate::auth::AuthError::State(_) => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-                }
+                crate::auth::AuthError::State(_) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                ),
             },
             Self::InvalidSecretRef(error) => (StatusCode::BAD_REQUEST, error.to_string()),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
@@ -1338,12 +1352,42 @@ impl IntoResponse for ApiError {
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::Deploy(error) => match &error {
                 DeployError::RegistryNotFound => (StatusCode::NOT_FOUND, error.to_string()),
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                ),
             },
-            Self::Log(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
-            Self::Metrics(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
-            Self::NodeMetrics(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+            Self::Log(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error".to_string(),
+            ),
+            Self::Metrics(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error".to_string(),
+            ),
+            Self::NodeMetrics(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error".to_string(),
+            ),
         };
         (status, message).into_response()
     }
+}
+
+async fn security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        header::HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    response
 }
