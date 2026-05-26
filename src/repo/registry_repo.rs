@@ -5,7 +5,6 @@ use uuid::Uuid;
 use crate::domain::Registry;
 use crate::repo::error::RepoError;
 
-#[allow(dead_code)]
 pub trait RegistryRepo: Send + Sync + 'static {
     fn create_registry(&self, registry: &Registry) -> Result<(), RepoError>;
     fn update_registry(&self, registry: &Registry) -> Result<(), RepoError>;

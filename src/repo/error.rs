@@ -4,7 +4,6 @@
 //! `Result<_, RepoError>` in callers is mechanical. Owned by `repo::` so the
 //! repo traits do not depend on `state.rs`.
 
-#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 pub enum RepoError {
     #[error("sqlite error: {0}")]

@@ -6,7 +6,6 @@ use crate::artifacts::ArtifactRecord;
 use crate::domain::{Deployment, DeploymentRequest, DeploymentStatus};
 use crate::repo::error::RepoError;
 
-#[allow(dead_code)]
 pub trait DeploymentRepo: Send + Sync + 'static {
     fn create_deployment(&self, request: DeploymentRequest) -> Result<Deployment, RepoError>;
     fn list_deployments(&self, service_id: Uuid) -> Result<Vec<Deployment>, RepoError>;

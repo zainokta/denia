@@ -5,7 +5,6 @@ use uuid::Uuid;
 use crate::domain::Project;
 use crate::repo::error::RepoError;
 
-#[allow(dead_code)]
 pub trait ProjectRepo: Send + Sync + 'static {
     fn default_project_id(&self) -> Result<Uuid, RepoError>;
     fn put_project(&self, project: Project) -> Result<Project, RepoError>;

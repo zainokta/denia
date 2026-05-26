@@ -6,7 +6,6 @@ use uuid::Uuid;
 use crate::domain::{DomainStatus, ServiceDomain};
 use crate::repo::error::RepoError;
 
-#[allow(dead_code)]
 pub trait DomainRepo: Send + Sync + 'static {
     fn put_service_domain(&self, d: &ServiceDomain) -> Result<(), RepoError>;
     fn get_service_domain(&self, id: Uuid) -> Result<Option<ServiceDomain>, RepoError>;

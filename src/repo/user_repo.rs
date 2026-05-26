@@ -5,7 +5,6 @@ use uuid::Uuid;
 use crate::domain::{ProjectMembership, Role, Session, User};
 use crate::repo::error::RepoError;
 
-#[allow(dead_code)]
 pub trait UserRepo: Send + Sync + 'static {
     fn create_user(
         &self,
