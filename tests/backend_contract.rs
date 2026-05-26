@@ -189,6 +189,7 @@ async fn artifact_acquirer_pulls_external_image() {
                     rootfs: None,
                 },
                 layers: vec![],
+                _staging: None,
             })
         }
         async fn read_layout(&self, _dir: &std::path::Path) -> Result<PulledImage, OciError> {
@@ -534,6 +535,7 @@ impl denia::oci::OciImagePuller for RecordingPuller {
                 rootfs: None,
             },
             layers: vec![],
+            _staging: None,
         })
     }
     async fn read_layout(

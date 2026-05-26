@@ -18,18 +18,19 @@ pub enum LayerCompression {
     None,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct LayerBlob {
     pub digest: String,
     pub compression: LayerCompression,
-    pub data: Vec<u8>,
+    pub path: std::path::PathBuf,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PulledImage {
     pub digest: String,
     pub config: OciImageConfig,
     pub layers: Vec<LayerBlob>,
+    pub _staging: Option<tempfile::TempDir>,
 }
 
 #[derive(Debug, Error)]
