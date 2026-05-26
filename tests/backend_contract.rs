@@ -49,6 +49,8 @@ fn service_config_requires_explicit_internal_port_and_health_check() {
             ServiceSource::ExternalImage(ExternalImageSource {
                 image: "ghcr.io/acme/api:latest".to_string(),
                 credential: None,
+                registry_id: None,
+                image_ref: None,
             }),
             0,
             HealthCheck::new("/health", 10),
@@ -81,6 +83,8 @@ fn sqlite_store_persists_services_credentials_and_deployments() {
                 ServiceSource::ExternalImage(ExternalImageSource {
                     image: "ghcr.io/acme/web:latest".to_string(),
                     credential: Some(credential.secret_ref.clone()),
+                    registry_id: None,
+                    image_ref: None,
                 }),
                 3000,
                 HealthCheck::new("/ready", 5),
@@ -355,6 +359,8 @@ fn test_config_defines_runtime_paths_and_tool_binaries() {
 
     assert_eq!(config.buildkit_binary.to_string_lossy(), "buildctl");
     assert_eq!(config.sops_binary.to_string_lossy(), "sops");
+    assert_eq!(config.unshare_binary.to_string_lossy(), "unshare");
+    assert_eq!(config.socket_proxy_binary.to_string_lossy(), "denia");
     assert_eq!(config.runtime_dir, config.data_dir.join("runtime"));
     assert_eq!(config.artifact_dir, config.data_dir.join("artifacts"));
 }
@@ -402,6 +408,8 @@ async fn axum_router_accepts_service_creation_with_admin_token() {
         ServiceSource::ExternalImage(ExternalImageSource {
             image: "ghcr.io/acme/web:latest".to_string(),
             credential: None,
+            registry_id: None,
+            image_ref: None,
         }),
         3000,
         HealthCheck::new("/ready", 5),

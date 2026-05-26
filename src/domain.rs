@@ -27,6 +27,10 @@ pub enum DomainError {
     RegistryMissingEndpoint,
     #[error("registry credential is required for non-anonymous auth")]
     RegistryMissingCredential,
+    #[error("external image source has both legacy image and registry_id/image_ref set")]
+    RegistrySourceAmbiguous,
+    #[error("external image source requires either image or both registry_id and image_ref")]
+    RegistrySourceMissing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +93,46 @@ pub struct GitSource {
 pub struct ExternalImageSource {
     pub image: String,
     pub credential: Option<SecretRef>,
+    #[serde(default)]
+    pub registry_id: Option<Uuid>,
+    #[serde(default)]
+    pub image_ref: Option<String>,
+}
+
+impl ExternalImageSource {
+    fn uses_registry(&self) -> bool {
+        self.registry_id.is_some() || self.image_ref.is_some()
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        let registry = self.registry_id.is_some() && self.image_ref.is_some();
+        let partial_registry = self.uses_registry() && !registry;
+        let legacy = !self.image.trim().is_empty();
+        if registry && legacy {
+            return Err(DomainError::RegistrySourceAmbiguous);
+        }
+        if partial_registry {
+            return Err(DomainError::RegistrySourceMissing);
+        }
+        if !registry && !legacy {
+            return Err(DomainError::RegistrySourceMissing);
+        }
+        Ok(())
+    }
+
+    /// Returns (full_image_ref, used_registry).
+    /// `endpoint` is only used on the registry path; ignored for the legacy path.
+    pub fn resolve_ref(&self, endpoint: &str) -> Result<(String, bool), DomainError> {
+        self.validate()?;
+        if let (Some(_), Some(image_ref)) = (self.registry_id, &self.image_ref) {
+            Ok((
+                format!("{}/{}", endpoint.trim_end_matches('/'), image_ref),
+                true,
+            ))
+        } else {
+            Ok((self.image.clone(), false))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -606,6 +650,55 @@ mod tests {
         .unwrap();
         assert_eq!(reg.name, "ghcr");
         assert_eq!(reg.endpoint, "ghcr.io");
+    }
+
+    #[test]
+    fn external_image_source_resolution_matrix() {
+        // legacy: full image only
+        let legacy = ExternalImageSource {
+            image: "ghcr.io/acme/web:1".into(),
+            credential: None,
+            registry_id: None,
+            image_ref: None,
+        };
+        let (full, used_registry) = legacy.resolve_ref("docker.io").unwrap();
+        assert_eq!(full, "ghcr.io/acme/web:1");
+        assert!(!used_registry);
+
+        // new: registry + image_ref
+        let new = ExternalImageSource {
+            image: String::new(),
+            credential: None,
+            registry_id: Some(Uuid::now_v7()),
+            image_ref: Some("library/redis:7".into()),
+        };
+        let (full, used_registry) = new.resolve_ref("docker.io").unwrap();
+        assert_eq!(full, "docker.io/library/redis:7");
+        assert!(used_registry);
+
+        // ambiguous: both
+        let both = ExternalImageSource {
+            image: "x".into(),
+            credential: None,
+            registry_id: Some(Uuid::now_v7()),
+            image_ref: Some("y".into()),
+        };
+        assert_eq!(
+            both.validate().unwrap_err(),
+            DomainError::RegistrySourceAmbiguous
+        );
+
+        // missing: neither
+        let neither = ExternalImageSource {
+            image: String::new(),
+            credential: None,
+            registry_id: None,
+            image_ref: None,
+        };
+        assert_eq!(
+            neither.validate().unwrap_err(),
+            DomainError::RegistrySourceMissing
+        );
     }
 
     #[test]

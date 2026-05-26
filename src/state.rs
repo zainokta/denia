@@ -1404,6 +1404,8 @@ mod tests {
             ServiceSource::ExternalImage(crate::domain::ExternalImageSource {
                 image: "nginx".into(),
                 credential: None,
+                registry_id: None,
+                image_ref: None,
             }),
             80,
             crate::domain::HealthCheck::new("/", 5),
@@ -1460,6 +1462,8 @@ mod tests {
             ServiceSource::ExternalImage(crate::domain::ExternalImageSource {
                 image: "nginx".into(),
                 credential: None,
+                registry_id: None,
+                image_ref: None,
             }),
             80,
             crate::domain::HealthCheck::new("/", 5),

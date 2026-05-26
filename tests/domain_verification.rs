@@ -51,6 +51,8 @@ fn seed_service(store: &SqliteStore, name: &str) -> ServiceConfig {
                 ServiceSource::ExternalImage(ExternalImageSource {
                     image: "ghcr.io/acme/web:latest".to_string(),
                     credential: None,
+                    registry_id: None,
+                    image_ref: None,
                 }),
                 3000,
                 HealthCheck::new("/ready", 5),
