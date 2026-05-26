@@ -54,12 +54,14 @@ impl AppState {
     pub fn new(config: AppConfig, store: SqliteStore) -> Self {
         let bridge_start_port = config.bridge_start_port;
         let runtime = Arc::new(
-            LinuxRuntime::new_with_paths(
+            LinuxRuntime::new_with_paths_and_launcher(
                 config.runtime_dir.clone(),
                 config.artifact_dir.clone(),
                 config.cgroup_root.clone(),
+                config.unshare_binary.clone(),
             )
             .with_userns(config.userns_base, config.userns_size)
+            .with_socket_proxy(config.socket_proxy_binary.clone())
             .with_log_dir(config.log_dir.clone()),
         );
         let access_log = AccessLogStore::new();
@@ -320,12 +322,15 @@ async fn create_deployment(
                 state.ingress_options.clone(),
             );
             let acquirer = ArtifactAcquirer::new(state.config.clone());
+            let secret_store = crate::secrets::SopsSecretStore::new(state.config.data_dir.clone());
             Ok(Json(
                 coordinator
                     .deploy_external_image_source(
                         &service,
                         &acquirer,
                         state.command_runner.as_ref(),
+                        &secret_store,
+                        state.config.sops_binary.as_path(),
                     )
                     .await?,
             ))

@@ -49,6 +49,12 @@ pub enum DeployError {
     UnsupportedGitSource,
     #[error("artifact acquisition error: {0}")]
     ArtifactAcquire(#[from] ArtifactAcquireError),
+    #[error("registry not found")]
+    RegistryNotFound,
+    #[error("secret decrypt: {0}")]
+    SecretDecrypt(#[from] crate::secrets::SecretError),
+    #[error("oci error: {0}")]
+    Oci(#[from] crate::oci::OciError),
 }
 
 pub struct DeploymentCoordinator<R, H> {
@@ -175,17 +181,58 @@ where
         service: &ServiceConfig,
         acquirer: &ArtifactAcquirer,
         runner: &dyn CommandRunner,
+        secret_store: &crate::secrets::SopsSecretStore,
+        sops_binary: &std::path::Path,
     ) -> Result<Deployment, DeployError> {
         let ServiceSource::ExternalImage(source) = &service.source else {
             return Err(DeployError::UnsupportedServiceSource);
         };
+
+        let (full_ref, auth) = if let Some(registry_id) = source.registry_id {
+            let registry = self
+                .store
+                .registry(registry_id)?
+                .ok_or(DeployError::RegistryNotFound)?;
+            let payload = match &registry.credential_ref {
+                Some(secret_ref) => Some(
+                    secret_store
+                        .decrypt(runner, sops_binary, secret_ref)
+                        .await?,
+                ),
+                None => None,
+            };
+            let auth = crate::oci::credentials::resolve_registry_auth(
+                registry.auth_kind,
+                payload.as_ref(),
+            )?;
+            let (full_ref, _) = source
+                .resolve_ref(&registry.endpoint)
+                .map_err(|_| DeployError::UnsupportedServiceSource)?;
+            (full_ref, auth)
+        } else {
+            let (full_ref, _) = source
+                .resolve_ref("")
+                .map_err(|_| DeployError::UnsupportedServiceSource)?;
+            let auth = match &source.credential {
+                Some(secret_ref) => {
+                    let payload = secret_store
+                        .decrypt(runner, sops_binary, secret_ref)
+                        .await?;
+                    crate::oci::credentials::resolve_registry_auth(
+                        crate::domain::RegistryAuthKind::Basic,
+                        Some(&payload),
+                    )?
+                }
+                None => RegistryAuth::Anonymous,
+            };
+            (full_ref, auth)
+        };
+
         let artifact = acquirer
             .acquire_rootfs_bundle_from_image_config(
                 runner,
-                ArtifactAcquireRequest::ExternalImage {
-                    image: source.image.clone(),
-                },
-                RegistryAuth::Anonymous,
+                ArtifactAcquireRequest::ExternalImage { image: full_ref },
+                auth,
             )
             .await?;
 
