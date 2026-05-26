@@ -73,6 +73,20 @@ mod tests {
     }
 
     #[test]
+    fn token_maps_to_bearer() {
+        let p = SecretPayload::new("abc123");
+        match resolve_registry_auth(RegistryAuthKind::Token, Some(&p)).unwrap() {
+            RegistryAuth::Bearer(t) => assert_eq!(t, "abc123"),
+            _ => panic!("expected bearer"),
+        }
+    }
+
+    #[test]
+    fn token_requires_payload() {
+        assert!(resolve_registry_auth(RegistryAuthKind::Token, None).is_err());
+    }
+
+    #[test]
     fn ecr_and_gar_map_to_fixed_users() {
         let p = SecretPayload::new("tok");
         match resolve_registry_auth(RegistryAuthKind::EcrToken, Some(&p)).unwrap() {
