@@ -32,6 +32,7 @@ Each ADR should include:
 | [012](012-src-modularization.md) | src/ Modularization and Per-Aggregate Repositories | Proposed | 2026-05-25 |
 | [013](013-domain-verification.md) | Domain Support With HTTP File Verification | Accepted | 2026-05-25 |
 | [014](014-per-service-registry.md) | Per-Service OCI Registry Configuration | Proposed | 2026-05-26 |
+| [015](015-streaming-oci-layer-staging.md) | Streaming OCI Layer Staging | Proposed | 2026-05-27 |
 
 ## Contributing
 
