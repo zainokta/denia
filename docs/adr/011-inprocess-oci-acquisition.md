@@ -56,3 +56,6 @@ operator setup and the failure modes of `Command::new`.
 ## References
 
 - Amends ADR-003 (Linux Runtime Process Runner).
+- Amended by ADR-014 (Per-Service OCI Registry Configuration): replaces
+  `StaticCredentialProvider`/env-var ECR/GAR with project-scoped `Registry`
+  records and changes `OciImagePuller::pull` to accept explicit `RegistryAuth`.
