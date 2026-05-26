@@ -43,7 +43,7 @@ pub fn read_oci_layout(layout_dir: &Path) -> Result<PulledImage, OciError> {
         .map_err(|e| OciError::Layout(format!("cannot read config blob: {e}")))?;
 
     let config: super::config::OciImageConfig =
-        serde_json::from_slice(&config_bytes).map_err(|e| OciError::Json(e))?;
+        serde_json::from_slice(&config_bytes).map_err(OciError::Json)?;
 
     let mut layers = Vec::new();
     if let Some(layer_list) = manifest["layers"].as_array() {
