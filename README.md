@@ -63,6 +63,68 @@ Deployments are **health-gated**: Denia starts the new deployment, waits for the
 configured HTTP health-check path and timeout, then atomically promotes routing
 and retains the previous deployment for rollback.
 
+## Workflow
+
+End-to-end view of how a request reaches a workload, and how a deployment is
+produced and promoted.
+
+```mermaid
+flowchart TB
+  classDef store fill:#fef3c7,stroke:#92400e,color:#78350f
+  classDef edge fill:#dbeafe,stroke:#1e40af,color:#1e3a8a
+  classDef rt fill:#dcfce7,stroke:#166534,color:#14532d
+  classDef warn fill:#fee2e2,stroke:#991b1b,color:#7f1d1d
+
+  Client["CLI · Dashboard · curl"]
+  Edge["Traefik<br/>:80 / :443 + ACME"]:::edge
+  Challenge["GET /.well-known/<br/>denia-challenge/{token}"]
+
+  Client -- "Bearer token" --> Auth["require_auth<br/>src/app.rs:953"]
+  Auth -- "Principal + project role" --> API["/v1 handlers<br/>src/app.rs:157"]
+
+  API --> Store[("SQLite<br/>services · deployments · users<br/>jobs · routes · domains")]:::store
+  API -. "secret_ref only" .-> SOPS[("SOPS files<br/>data_dir/secrets/*.sops.yaml")]:::store
+
+  API -- "POST /v1/deployments" --> Coord["DeploymentCoordinator<br/>src/deploy.rs"]
+
+  Coord --> Acq{"artifact source"}
+  Acq -- "Git" --> BK["BuildKit (buildctl)<br/>→ OCI layout"]
+  Acq -- "OCI image" --> Pull["oci-client pull<br/>+ TarRootfsUnpacker<br/>(in-process, ADR-011)"]
+  BK --> Bundle["rootfs + process.json<br/>chown to userns_base"]
+  Pull --> Bundle
+
+  Bundle --> Plan["LinuxRuntime::plan / prepare<br/>cgroup v2: cpu.max · memory.max"]
+  Plan --> Spawn["spawn_namespaced_process<br/>unshare user · pid · mnt · uts · ipc<br/>pivot_root · no_new_privs · drop caps<br/>(ADR-003, ADR-005)"]:::rt
+  Spawn --> Sock["guest /run/denia/service.sock"]
+
+  Sock --> Health{"health gate<br/>poll 5s"}
+  Health -- "fail" --> Rollback["retain prior deployment"]:::warn
+  Health -- "pass" --> Promote["promote_deployment<br/>UPSERT promoted_deployments"]
+
+  Promote --> Routing["write_routing_config<br/>allocate bridge port"]
+  Routing --> Bridge["LoopbackBridge<br/>127.0.0.1:N → unix sock<br/>tees access log (ADR-009)"]:::rt
+  Routing --> Traefik["render_file_provider_config<br/>dynamic YAML (ADR-007)"]
+
+  Traefik --> Edge
+  Edge --> Bridge
+  Bridge --> Workload["workload<br/>isolated namespace"]:::rt
+
+  Verify["POST /domains/{id}/verify<br/>HttpDomainVerifier"] -- "fetch challenge file" --> Edge
+  Edge --> Challenge
+  Challenge -- "constant-time match" --> Verify
+  Verify -- "Verified → rerender" --> Traefik
+
+  Sched["Scheduler<br/>tokio cron tick (ADR-010)"] -- "Forbid concurrency" --> JobRun["job_runs row"]
+  JobRun --> Spawn
+```
+
+Key stage transitions in code: `create_deployment` (`src/state.rs:524`) →
+`runtime.plan` (`src/runtime.rs:243`) → `runtime.prepare` (`src/runtime.rs:308`)
+→ `spawn_namespaced_process` (`src/syscall/ns.rs:342`) →
+`wait_for_service_socket` (`src/runtime.rs:831`) → `health.check` →
+`promote_deployment` (`src/state.rs:596`) → `write_routing_config`
+(`src/deploy.rs:307`).
+
 ## Requirements
 
 - Rust 2024 edition (stable toolchain).
@@ -203,10 +265,12 @@ planning, path safety, and cgroup-file preparation against temp directories.
 ## References
 
 - `docs/adr/README.md` and the ADRs: `001` backend architecture, `002` frontend
-  Effect layer, `003` Linux runtime process runner (in-process OCI amendment),
-  `004` embedded web console, `005` runtime security hardening, `006` projects +
-  versioned migrations, `007` ingress + TLS, `008` project-scoped RBAC,
-  `009` observability, `010` jobs scheduler, `011` in-process OCI acquisition.
+  Effect layer, `003` Linux runtime process runner (in-process namespace adapter
+  amendment), `004` embedded web console, `005` runtime security hardening,
+  `006` projects + versioned migrations, `007` ingress + TLS, `008`
+  project-scoped RBAC, `009` observability, `010` jobs scheduler, `011`
+  in-process OCI acquisition, `012` `src/` modularization, `013` domain
+  verification, `014` per-service registry.
 - `CLAUDE.md` — agent/contributor guidelines.
 - [Rust](https://www.rust-lang.org/) · [Axum](https://docs.rs/axum/) ·
   [SOPS](https://getsops.io/) ·
