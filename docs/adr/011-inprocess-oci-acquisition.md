@@ -61,3 +61,6 @@ operator setup and the failure modes of `Command::new`.
 - Amended by ADR-014 (Per-Service OCI Registry Configuration): replaces
   `StaticCredentialProvider`/env-var ECR/GAR with project-scoped `Registry`
   records and changes `OciImagePuller::pull` to accept explicit `RegistryAuth`.
+- Amended by ADR-015 (Streaming OCI Layer Staging): delivers the streaming pull
+  deferred in consequence #3 — `LayerBlob` is now file-backed and layers stream
+  to disk instead of buffering the whole image in RAM.
