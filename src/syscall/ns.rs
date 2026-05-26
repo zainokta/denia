@@ -741,7 +741,7 @@ unsafe fn child_exec(
     }
 
     let old_root = plan.rootfs.to_bytes_with_nul();
-    let old_root_path = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(&old_root) };
+    let old_root_path = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(old_root) };
     let mut old_root_buf = old_root_path.to_bytes().to_vec();
     old_root_buf.extend_from_slice(b"/.old_root\0");
     let old_root_target = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(&old_root_buf) };

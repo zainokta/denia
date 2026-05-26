@@ -208,13 +208,13 @@ fn validate_symlink_target(target: &Path, rootfs_dir: &Path) -> Result<(), OciEr
     let root_canonical = rootfs_dir
         .canonicalize()
         .unwrap_or_else(|_| rootfs_dir.to_path_buf());
-    if let Ok(canonical) = joined.canonicalize() {
-        if !canonical.starts_with(&root_canonical) {
-            return Err(OciError::UnsafePath(format!(
-                "symlink target escapes rootfs: {}",
-                target.display()
-            )));
-        }
+    if let Ok(canonical) = joined.canonicalize()
+        && !canonical.starts_with(&root_canonical)
+    {
+        return Err(OciError::UnsafePath(format!(
+            "symlink target escapes rootfs: {}",
+            target.display()
+        )));
     }
     Ok(())
 }

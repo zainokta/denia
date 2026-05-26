@@ -120,7 +120,7 @@ where
 }
 
 pub fn resolve_auth(store: &SqliteStore, token: &str, admin_token: &str) -> Option<Principal> {
-    if token.as_bytes().len() == admin_token.as_bytes().len()
+    if token.len() == admin_token.len()
         && token.as_bytes().ct_eq(admin_token.as_bytes()).unwrap_u8() == 1
     {
         return Some(Principal::super_admin());
