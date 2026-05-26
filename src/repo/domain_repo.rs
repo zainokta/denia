@@ -23,5 +23,6 @@ pub trait DomainRepo: Send + Sync + 'static {
         last_error: Option<String>,
     ) -> Result<(), RepoError>;
     fn delete_service_domain(&self, id: Uuid) -> Result<(), RepoError>;
+    fn list_verified_hostnames(&self, service_id: Uuid) -> Result<Vec<String>, RepoError>;
     fn list_all_service_domains(&self) -> Result<Vec<ServiceDomain>, RepoError>;
 }
