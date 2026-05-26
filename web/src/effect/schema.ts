@@ -196,7 +196,7 @@ export const JobRunStatus = Schema.Literals([
 ])
 export type JobRunStatus = typeof JobRunStatus.Type
 
-const GitSource = Schema.Struct({
+export const GitSource = Schema.Struct({
   type: Schema.Literal('git'),
   repo_url: Schema.String,
   git_ref: Schema.String,
@@ -204,16 +204,20 @@ const GitSource = Schema.Struct({
   context_path: Schema.String,
   credential: Schema.Struct({ name: Schema.String, key: Schema.String }),
 })
+export type GitSource = typeof GitSource.Type
 
-const ExternalImageSource = Schema.Struct({
+export const ExternalImageSource = Schema.Struct({
   type: Schema.Literal('external_image'),
   image: Schema.String,
   credential: Schema.NullOr(
     Schema.Struct({ name: Schema.String, key: Schema.String }),
   ),
+  registry_id: Schema.NullOr(Schema.String),
+  image_ref: Schema.NullOr(Schema.String),
 })
+export type ExternalImageSource = typeof ExternalImageSource.Type
 
-const ServiceSource = Schema.Union([GitSource, ExternalImageSource])
+export const ServiceSource = Schema.Union([GitSource, ExternalImageSource])
 
 export class Job extends Schema.Class<Job>('Job')({
   id: Schema.String,
@@ -243,3 +247,32 @@ export class JobRun extends Schema.Class<JobRun>('JobRun')({
 }) {}
 
 export const JobRuns = Schema.Array(JobRun)
+
+export class ServiceDomain extends Schema.Class<ServiceDomain>('ServiceDomain')({
+  id: Schema.String,
+  hostname: Schema.String,
+  status: Schema.Literals(['verified', 'pending', 'failed']),
+  verified_at: Schema.NullOr(Schema.String),
+  last_error: Schema.NullOr(Schema.String),
+  created_at: Schema.String,
+}) {}
+
+export const ServiceDomains = Schema.Array(ServiceDomain)
+
+export class Registry extends Schema.Class<Registry>('Registry')({
+  id: Schema.String,
+  project_id: Schema.String,
+  name: Schema.String,
+  endpoint: Schema.String,
+  auth_kind: Schema.Literals(['Anonymous', 'Basic', 'Token', 'EcrToken', 'GarToken']),
+  credential_ref: Schema.NullOr(Schema.String),
+}) {}
+
+export const Registries = Schema.Array(Registry)
+
+export class RegistryInput extends Schema.Class<RegistryInput>('RegistryInput')({
+  name: Schema.String,
+  endpoint: Schema.String,
+  auth_kind: Schema.Literals(['Anonymous', 'Basic', 'Token', 'EcrToken', 'GarToken']),
+  credential_ref: Schema.NullOr(Schema.String),
+}) {}

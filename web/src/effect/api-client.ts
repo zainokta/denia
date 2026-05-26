@@ -24,10 +24,15 @@ import {
   ProjectMember,
   ProjectMembers,
   Projects,
+  Registries,
+  Registry,
+  RegistryInput,
   type Role,
   RouteView,
   RouteViews,
   Service,
+  ServiceDomain,
+  ServiceDomains,
   Services,
   User,
   WorkloadView,
@@ -96,7 +101,10 @@ export class ApiClient extends Context.Service<
       ApiError | DecodeError
     >
     readonly createDeployment: (
-      input: { service_id: number },
+      input: {
+        service_id: number
+        source?: { type: 'git', repo_url: string, git_ref: string, dockerfile_path: string, context_path: string, credential?: { name: string, key: string } } | { type: 'external_image', image?: string, registry_id?: string, image_ref?: string, credential?: { name: string, key: string } | null }
+      },
     ) => Effect.Effect<Deployment, ApiError | DecodeError>
     readonly stopService: (
       id: number,
@@ -155,6 +163,38 @@ export class ApiClient extends Context.Service<
       ReadonlyArray<AccessEntry>,
       ApiError | DecodeError
     >
+    readonly listDomains: (
+      serviceId: number,
+    ) => Effect.Effect<
+      ReadonlyArray<ServiceDomain>,
+      ApiError | DecodeError
+    >
+    readonly addDomain: (
+      serviceId: number,
+      hostname: string,
+    ) => Effect.Effect<ServiceDomain, ApiError | DecodeError>
+    readonly verifyDomain: (
+      serviceId: number,
+      domainId: string,
+    ) => Effect.Effect<ServiceDomain, ApiError | DecodeError>
+    readonly deleteDomain: (
+      serviceId: number,
+      domainId: string,
+    ) => Effect.Effect<void, ApiError>
+    readonly listRegistries: (
+      projectId: string,
+    ) => Effect.Effect<
+      ReadonlyArray<Registry>,
+      ApiError | DecodeError
+    >
+    readonly createRegistry: (
+      projectId: string,
+      input: RegistryInput,
+    ) => Effect.Effect<Registry, ApiError | DecodeError>
+    readonly deleteRegistry: (
+      projectId: string,
+      registryId: string,
+    ) => Effect.Effect<void, ApiError>
   }
 >()('ApiClient') {}
 
@@ -508,15 +548,34 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         ApiError | DecodeError
       >
 
-    const createDeployment = (input: { service_id: number }) =>
+    const createDeployment = (input: {
+      service_id: number
+      source?:
+        | {
+            type: 'git'
+            repo_url: string
+            git_ref: string
+            dockerfile_path: string
+            context_path: string
+            credential?: { name: string; key: string }
+          }
+        | {
+            type: 'external_image'
+            image?: string
+            registry_id?: string
+            image_ref?: string
+            credential?: { name: string; key: string } | null
+          }
+    }) =>
       Effect.gen(function* () {
+        const body: Record<string, unknown> = { source: input.source }
         const response = yield* http
           .post(url(`/v1/services/${input.service_id}/deployments`), {
             headers: {
               ...authHeaders(),
               'content-type': 'application/json',
             },
-            body: jsonBody({}),
+            body: jsonBody(body),
           })
           .pipe(Effect.mapError(httpError))
         return yield* parseResponse(response, Deployment)
@@ -679,6 +738,87 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, AccessEntries)
       })
 
+    const listDomains = (serviceId: number) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/services/${serviceId}/domains`), {
+            headers: authHeaders(),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, ServiceDomains)
+      })
+
+    const addDomain = (serviceId: number, hostname: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url(`/v1/services/${serviceId}/domains`), {
+            headers: {
+              ...authHeaders(),
+              'content-type': 'application/json',
+            },
+            body: jsonBody({ hostname }),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, ServiceDomain)
+      })
+
+    const verifyDomain = (serviceId: number, domainId: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(
+            url(`/v1/services/${serviceId}/domains/${domainId}/verify`),
+            { headers: authHeaders() },
+          )
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, ServiceDomain)
+      })
+
+    const deleteDomain = (serviceId: number, domainId: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .del(
+            url(`/v1/services/${serviceId}/domains/${domainId}`),
+            { headers: authHeaders() },
+          )
+          .pipe(Effect.mapError(httpError))
+        return yield* parseDeleteResponse(response)
+      })
+
+    const listRegistries = (projectId: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/projects/${projectId}/registries`), {
+            headers: authHeaders(),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Registries)
+      })
+
+    const createRegistry = (projectId: string, input: RegistryInput) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url(`/v1/projects/${projectId}/registries`), {
+            headers: {
+              ...authHeaders(),
+              'content-type': 'application/json',
+            },
+            body: jsonBody(input),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Registry)
+      })
+
+    const deleteRegistry = (projectId: string, registryId: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .del(
+            url(`/v1/projects/${projectId}/registries/${registryId}`),
+            { headers: authHeaders() },
+          )
+          .pipe(Effect.mapError(httpError))
+        return yield* parseDeleteResponse(response)
+      })
+
     return {
       listNodes,
       login,
@@ -715,6 +855,13 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       getNodeMetrics,
       listWorkloads,
       listServiceRequests,
+      listDomains,
+      addDomain,
+      verifyDomain,
+      deleteDomain,
+      listRegistries,
+      createRegistry,
+      deleteRegistry,
     }
   }),
 )

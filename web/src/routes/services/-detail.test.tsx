@@ -19,6 +19,16 @@ vi.mock('@tanstack/react-router', async () => {
   }
 })
 
+vi.mock('#/hooks/useAuth', () => ({
+  useAuth: () => ({
+    isSuperAdmin: true,
+    roleForActiveProject: () => 'admin',
+    token: 'test',
+    me: undefined,
+  }),
+  can: (_required: string, _userRole: string) => true,
+}))
+
 import { runQuery } from '#/effect/runtime'
 import { ServiceDetail } from './\$serviceId'
 

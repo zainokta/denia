@@ -16,7 +16,7 @@ const createJob = (input: {
   id: string
   project_id: string
   name: string
-  source: { type: 'external_image'; image: string; credential: null }
+  source: { type: 'external_image'; image: string; credential: null; registry_id: null; image_ref: null }
   command: string[] | null
   env: Array<[string, string]>
   schedule: string | null
@@ -95,7 +95,7 @@ export function JobsIndex() {
           id: crypto.randomUUID(),
           project_id: projectId,
           name,
-          source: { type: 'external_image', image, credential: null },
+          source: { type: 'external_image', image, credential: null, registry_id: null, image_ref: null },
           command: command.trim() ? command.split(' ') : null,
           env,
           schedule: schedule.trim() || null,
