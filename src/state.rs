@@ -1116,20 +1116,29 @@ impl SqliteStore {
     }
 
     pub fn delete_registry(&self, id: Uuid) -> Result<(), StateError> {
-        let registry = self.registry(id)?.ok_or(StateError::RegistryNotFound)?;
         let connection = self.connection()?;
+        let json: Option<String> = connection
+            .query_row(
+                "SELECT config_json FROM registries WHERE id = ?1",
+                params![id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let registry: Registry = match json {
+            Some(j) => serde_json::from_str(&j)?,
+            None => return Err(StateError::RegistryNotFound),
+        };
         let mut stmt =
             connection.prepare("SELECT config_json FROM services WHERE project_id = ?1")?;
         let rows = stmt.query_map(params![registry.project_id.to_string()], |row| {
             row.get::<_, String>(0)
         })?;
         for row in rows {
-            if let Ok(svc) = serde_json::from_str::<ServiceConfig>(&row?) {
-                if let crate::domain::ServiceSource::ExternalImage(src) = &svc.source {
-                    if src.registry_id == Some(id) {
-                        return Err(StateError::RegistryInUse);
-                    }
-                }
+            let svc: ServiceConfig = serde_json::from_str(&row?)?;
+            if let crate::domain::ServiceSource::ExternalImage(src) = &svc.source
+                && src.registry_id == Some(id)
+            {
+                return Err(StateError::RegistryInUse);
             }
         }
         drop(stmt);
@@ -1512,10 +1521,7 @@ mod tests {
         .unwrap();
 
         store.create_registry(&reg).unwrap();
-        assert_eq!(
-            store.registry(reg.id).unwrap().unwrap().endpoint,
-            "ghcr.io"
-        );
+        assert_eq!(store.registry(reg.id).unwrap().unwrap().endpoint, "ghcr.io");
         assert_eq!(store.registries_for_project(project.id).unwrap().len(), 1);
 
         // duplicate (project_id, name) rejected
@@ -1570,6 +1576,66 @@ mod tests {
         assert!(matches!(
             store.delete_registry(reg.id).unwrap_err(),
             crate::state::StateError::RegistryInUse
+        ));
+    }
+
+    #[test]
+    fn delete_registry_happy_path() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        let project = store
+            .put_project(crate::domain::Project::new("p", None).unwrap())
+            .unwrap();
+        let reg = crate::domain::Registry::new(
+            project.id,
+            "ghcr",
+            "ghcr.io",
+            crate::domain::RegistryAuthKind::Anonymous,
+            None,
+        )
+        .unwrap();
+        store.create_registry(&reg).unwrap();
+
+        store.delete_registry(reg.id).unwrap();
+        assert!(store.registry(reg.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn update_registry_round_trip_and_not_found() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        let project = store
+            .put_project(crate::domain::Project::new("p", None).unwrap())
+            .unwrap();
+        let mut reg = crate::domain::Registry::new(
+            project.id,
+            "ghcr",
+            "ghcr.io",
+            crate::domain::RegistryAuthKind::Anonymous,
+            None,
+        )
+        .unwrap();
+        store.create_registry(&reg).unwrap();
+
+        // rename + update
+        reg.name = "ghcr-renamed".into();
+        store.update_registry(&reg).unwrap();
+        let fetched = store.registry(reg.id).unwrap().unwrap();
+        assert_eq!(fetched.name, "ghcr-renamed");
+
+        // unknown id -> RegistryNotFound
+        let mut unknown = crate::domain::Registry::new(
+            project.id,
+            "other",
+            "other.io",
+            crate::domain::RegistryAuthKind::Anonymous,
+            None,
+        )
+        .unwrap();
+        unknown.id = uuid::Uuid::now_v7(); // fresh id never inserted
+        assert!(matches!(
+            store.update_registry(&unknown).unwrap_err(),
+            crate::state::StateError::RegistryNotFound
         ));
     }
 
