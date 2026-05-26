@@ -35,6 +35,10 @@ impl super::OciRootfsUnpacker for TarRootfsUnpacker {
 }
 
 fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
+    const MAX_UNCOMPRESSED_BYTES: u64 = 10u64 * 1024 * 1024 * 1024;
+    const MAX_SINGLE_FILE_BYTES: u64 = 2u64 * 1024 * 1024 * 1024;
+    const MAX_FILE_COUNT: u64 = 1_000_000;
+
     let reader: Box<dyn Read> = match layer.compression {
         LayerCompression::Gzip => Box::new(GzDecoder::new(&layer.data[..])),
         LayerCompression::Zstd => {
@@ -47,6 +51,8 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
 
     let mut archive = Archive::new(reader);
     let mut pending_whiteouts: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut total_bytes: u64 = 0;
+    let mut file_count: u64 = 0;
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -89,25 +95,52 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
             continue;
         }
 
+        let is_symlink = entry.header().entry_type().is_symlink();
         if entry.header().entry_type().is_dir() {
             fs::create_dir_all(&safe_path)?;
-        } else if entry.header().entry_type().is_symlink() {
+        } else if is_symlink {
             let target = entry
                 .link_name()?
                 .ok_or_else(|| OciError::Io(std::io::Error::other("symlink without target")))?;
+            validate_symlink_target(&target, rootfs_dir)?;
             let _ = fs::remove_file(&safe_path);
             std::os::unix::fs::symlink(&target, &safe_path)?;
         } else {
+            let entry_size = entry.header().entry_size()?;
+            if entry_size > MAX_SINGLE_FILE_BYTES {
+                return Err(OciError::Io(std::io::Error::other(format!(
+                    "file exceeds per-file size limit ({} > {}): {}",
+                    entry_size,
+                    MAX_SINGLE_FILE_BYTES,
+                    entry_path.display()
+                ))));
+            }
+            file_count += 1;
+            if file_count > MAX_FILE_COUNT {
+                return Err(OciError::Io(std::io::Error::other(format!(
+                    "layer exceeds file count limit ({} > {})",
+                    file_count, MAX_FILE_COUNT
+                ))));
+            }
             if let Some(parent) = safe_path.parent() {
                 fs::create_dir_all(parent)?;
             }
             let mut file = fs::File::create(&safe_path)?;
-            std::io::copy(&mut entry, &mut file)?;
+            let written = std::io::copy(&mut entry, &mut file)?;
+            total_bytes += written;
+            if total_bytes > MAX_UNCOMPRESSED_BYTES {
+                return Err(OciError::Io(std::io::Error::other(format!(
+                    "layer exceeds total size limit ({} > {})",
+                    total_bytes, MAX_UNCOMPRESSED_BYTES
+                ))));
+            }
         }
 
-        let mode = entry.header().mode()?;
-        if mode != 0 {
-            let _ = fs::set_permissions(&safe_path, fs::Permissions::from_mode(mode));
+        if !is_symlink {
+            let mode = entry.header().mode()?;
+            if mode != 0 {
+                let _ = fs::set_permissions(&safe_path, fs::Permissions::from_mode(mode));
+            }
         }
     }
 
@@ -154,6 +187,36 @@ fn safe_join(root: &Path, entry: &Path) -> Result<PathBuf, OciError> {
     }
 
     Ok(joined)
+}
+
+fn validate_symlink_target(target: &Path, rootfs_dir: &Path) -> Result<(), OciError> {
+    if target.is_absolute() {
+        return Err(OciError::UnsafePath(format!(
+            "symlink target is absolute: {}",
+            target.display()
+        )));
+    }
+    for component in target.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(OciError::UnsafePath(format!(
+                "symlink target contains parent dir: {}",
+                target.display()
+            )));
+        }
+    }
+    let joined = rootfs_dir.join(target);
+    let root_canonical = rootfs_dir
+        .canonicalize()
+        .unwrap_or_else(|_| rootfs_dir.to_path_buf());
+    if let Ok(canonical) = joined.canonicalize() {
+        if !canonical.starts_with(&root_canonical) {
+            return Err(OciError::UnsafePath(format!(
+                "symlink target escapes rootfs: {}",
+                target.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

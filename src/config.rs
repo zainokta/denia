@@ -10,7 +10,6 @@ pub struct AppConfig {
     pub data_dir: PathBuf,
     pub buildkit_binary: PathBuf,
     pub sops_binary: PathBuf,
-    pub unshare_binary: PathBuf,
     pub socket_proxy_binary: PathBuf,
     pub runtime_dir: PathBuf,
     pub cgroup_root: PathBuf,
@@ -30,6 +29,8 @@ pub struct AppConfig {
 pub enum ConfigError {
     #[error("DENIA_ADMIN_TOKEN must be set")]
     MissingAdminToken,
+    #[error("DENIA_ADMIN_TOKEN must be at least 32 characters long")]
+    AdminTokenTooShort,
     #[error("invalid DENIA_BIND_ADDR: {0}")]
     InvalidBindAddr(#[from] std::net::AddrParseError),
 }
@@ -38,6 +39,9 @@ impl AppConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let admin_token =
             env::var("DENIA_ADMIN_TOKEN").map_err(|_| ConfigError::MissingAdminToken)?;
+        if admin_token.len() < 32 {
+            return Err(ConfigError::AdminTokenTooShort);
+        }
         let bind_addr = env::var("DENIA_BIND_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:7180".to_string())
             .parse()?;
@@ -52,9 +56,6 @@ impl AppConfig {
         );
         let sops_binary =
             PathBuf::from(env::var("DENIA_SOPS_BINARY").unwrap_or_else(|_| "sops".to_string()));
-        let unshare_binary = PathBuf::from(
-            env::var("DENIA_UNSHARE_BINARY").unwrap_or_else(|_| "unshare".to_string()),
-        );
         let socket_proxy_binary = env::var("DENIA_SOCKET_PROXY_BINARY")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::current_exe().unwrap_or_else(|_| "denia".into()));
@@ -95,7 +96,6 @@ impl AppConfig {
             data_dir,
             buildkit_binary,
             sops_binary,
-            unshare_binary,
             socket_proxy_binary,
             runtime_dir,
             cgroup_root,
@@ -121,7 +121,6 @@ impl AppConfig {
             data_dir: data_dir.clone(),
             buildkit_binary: PathBuf::from("buildctl"),
             sops_binary: PathBuf::from("sops"),
-            unshare_binary: PathBuf::from("unshare"),
             socket_proxy_binary: PathBuf::from("denia"),
             runtime_dir: data_dir.join("runtime"),
             cgroup_root: data_dir.join("cgroup"),

@@ -22,6 +22,10 @@ pub enum SyscallError {
         path: std::path::PathBuf,
         reason: String,
     },
+    #[error("child setup failed during {stage}")]
+    ChildSetup { stage: &'static str },
+    #[error("child setup timed out during {stage}")]
+    ChildSetupTimeout { stage: &'static str },
     #[error("signal delivery failed for pid {pid}: {reason}")]
     Signal { pid: u32, reason: String },
 }

@@ -1,17 +1,19 @@
 use std::{
     collections::HashMap,
     fs::OpenOptions,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    os::unix::fs::{FileTypeExt, PermissionsExt},
+    path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::time::{Duration, Instant, sleep};
 
 use crate::artifacts::ArtifactKind;
 use crate::domain::{JobOutcome, JobRunRequest, RuntimeStartRequest, RuntimeStatus};
+use crate::syscall::chown;
 use crate::syscall::ns::{NamespaceConfig, spawn_namespaced_process};
 use crate::syscall::signal::{self, ProcessStatus};
 
@@ -37,10 +39,16 @@ pub enum RuntimeError {
     UnsafeRuntimePath { path: PathBuf },
     #[error("invalid runtime resource limit: {reason}")]
     InvalidResourceLimit { reason: String },
-    #[error("namespace launcher binary not found: {path}")]
-    NamespaceLauncherUnavailable { path: PathBuf },
     #[error("socket proxy binary not found: {path}")]
     SocketProxyUnavailable { path: PathBuf },
+    #[error("service socket did not become ready: {path}")]
+    ServiceSocketUnavailable { path: PathBuf },
+    #[error("{action} failed at {path}: {source}")]
+    PathIo {
+        action: &'static str,
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("manifest json error: {0}")]
@@ -140,9 +148,6 @@ pub struct LinuxRuntimeProcessSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinuxRuntimePlan {
-    pub program: PathBuf,
-    pub args: Vec<String>,
-    pub env: Vec<(String, String)>,
     pub namespace: NamespaceConfig,
     pub rootfs_path: PathBuf,
     pub socket_path: PathBuf,
@@ -158,7 +163,6 @@ pub struct LinuxRuntime {
     artifact_dir: PathBuf,
     cgroup_root: PathBuf,
     log_dir: PathBuf,
-    unshare_binary: PathBuf,
     socket_proxy_source: PathBuf,
     userns_base: u32,
     userns_size: u32,
@@ -169,6 +173,9 @@ const SOCKET_PROXY_TARGET: &str = "/.denia/socket-proxy";
 const WORKLOAD_LAUNCHER_TARGET: &str = "/.denia/workload-launcher";
 const GUEST_SERVICE_SOCKET: &str = "/run/denia/service.sock";
 const GUEST_SERVICE_SOCKET_ENV: &str = "DENIA_SERVICE_SOCKET";
+const SERVICE_SOCKET_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVICE_SOCKET_READY_POLL: Duration = Duration::from_millis(50);
+const CGROUP_CONTROLLERS: &[&str] = &["cpu", "memory"];
 
 #[derive(Debug)]
 struct TrackedChild {
@@ -200,15 +207,6 @@ impl LinuxRuntime {
         artifact_dir: impl Into<PathBuf>,
         cgroup_root: impl Into<PathBuf>,
     ) -> Self {
-        Self::new_with_paths_and_launcher(runtime_dir, artifact_dir, cgroup_root, "unshare")
-    }
-
-    pub fn new_with_paths_and_launcher(
-        runtime_dir: impl Into<PathBuf>,
-        artifact_dir: impl Into<PathBuf>,
-        cgroup_root: impl Into<PathBuf>,
-        unshare_binary: impl Into<PathBuf>,
-    ) -> Self {
         let runtime_dir = runtime_dir.into();
         let log_dir = runtime_dir
             .parent()
@@ -219,7 +217,6 @@ impl LinuxRuntime {
             artifact_dir: artifact_dir.into(),
             cgroup_root: cgroup_root.into(),
             log_dir,
-            unshare_binary: unshare_binary.into(),
             socket_proxy_source: std::env::current_exe().unwrap_or_else(|_| "denia".into()),
             userns_base: 100000,
             userns_size: 65536,
@@ -294,33 +291,10 @@ impl LinuxRuntime {
             .with_uid_map(self.userns_base, self.userns_size)
             .with_cgroup_path(cgroup_path.clone())
             .with_workdir(process.workdir.clone())
-            .with_env(env.clone());
-
-        let mut args = vec![
-            "--user".to_string(),
-            format!("--map-users=0,{},{}", self.userns_base, self.userns_size),
-            format!("--map-groups=0,{},{}", self.userns_base, self.userns_size),
-            "--fork".to_string(),
-            "--pid".to_string(),
-            "--net".to_string(),
-            "--mount".to_string(),
-            "--propagation".to_string(),
-            "private".to_string(),
-            "--uts".to_string(),
-            "--ipc".to_string(),
-            "--mount-proc".to_string(),
-            "--root".to_string(),
-            rootfs_path.display().to_string(),
-            "--wd".to_string(),
-            process.workdir,
-            "--".to_string(),
-        ];
-        args.extend(child_argv);
+            .with_env(env.clone())
+            .with_deferred_hardening();
 
         Ok(LinuxRuntimePlan {
-            program: self.unshare_binary.clone(),
-            args,
-            env,
             namespace,
             rootfs_path,
             socket_path,
@@ -339,21 +313,29 @@ impl LinuxRuntime {
         validate_resource_limits(request)?;
         self.inject_socket_proxy(&plan.rootfs_path)?;
         self.prepare_socket_directory(plan)?;
-        std::fs::create_dir_all(&plan.deployment_dir)?;
-        std::fs::create_dir_all(&plan.cgroup_path)?;
+        create_dir_all("create deployment runtime directory", &plan.deployment_dir)?;
+        prepare_cgroup_directory(&self.cgroup_root, &plan.cgroup_path, CGROUP_CONTROLLERS)?;
         std::fs::write(
             plan.cgroup_path.join("cpu.max"),
             cpu_max(request.cpu_millis),
-        )?;
+        )
+        .map_err(path_io(
+            "write cgroup cpu.max",
+            plan.cgroup_path.join("cpu.max"),
+        ))?;
         std::fs::write(
             plan.cgroup_path.join("memory.max"),
             format!("{}\n", request.memory_bytes),
-        )?;
+        )
+        .map_err(path_io(
+            "write cgroup memory.max",
+            plan.cgroup_path.join("memory.max"),
+        ))?;
         Ok(())
     }
 
     pub fn cleanup(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
-        remove_dir_if_exists(&plan.cgroup_path)?;
+        remove_cgroup_dir_if_exists(&plan.cgroup_path)?;
         remove_dir_if_exists(&plan.deployment_dir)?;
         Ok(())
     }
@@ -376,16 +358,33 @@ impl LinuxRuntime {
         create_runtime_directory(&target_dir)?;
         let target = rootfs.join(target_path.trim_start_matches('/'));
         remove_existing_runtime_file(&target)?;
-        std::fs::copy(&proxy_source, &target)?;
-        let mut perms = std::fs::metadata(&target)?.permissions();
+        std::fs::copy(&proxy_source, &target)
+            .map_err(path_io("copy runtime helper into rootfs", &target))?;
+        let mut perms = std::fs::metadata(&target)
+            .map_err(path_io("stat injected runtime helper", &target))?
+            .permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(&target, perms)?;
+        std::fs::set_permissions(&target, perms)
+            .map_err(path_io("chmod injected runtime helper", &target))?;
         Ok(())
     }
 
     fn prepare_socket_directory(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
-        create_runtime_directory(&plan.rootfs_path.join("run"))?;
-        create_runtime_directory(&plan.rootfs_path.join("run/denia"))?;
+        let run_dir = plan.rootfs_path.join("run");
+        let socket_dir = plan.rootfs_path.join("run/denia");
+        create_runtime_directory(&run_dir)?;
+        create_runtime_directory(&socket_dir)?;
+        self.chown_socket_directory(&run_dir)?;
+        self.chown_socket_directory(&socket_dir)?;
+        remove_existing_runtime_file(&plan.socket_path)?;
+        Ok(())
+    }
+
+    fn chown_socket_directory(&self, path: &Path) -> Result<(), RuntimeError> {
+        if !rustix::process::geteuid().is_root() {
+            return Ok(());
+        }
+        chown::recursive_lchown(path, self.userns_base, self.userns_base)?;
         Ok(())
     }
 }
@@ -407,6 +406,104 @@ fn resolve_host_binary(source: &Path) -> Option<PathBuf> {
     None
 }
 
+fn path_io(
+    action: &'static str,
+    path: impl Into<PathBuf>,
+) -> impl FnOnce(std::io::Error) -> RuntimeError {
+    let path = path.into();
+    move |source| RuntimeError::PathIo {
+        action,
+        path,
+        source,
+    }
+}
+
+fn create_dir_all(action: &'static str, path: &Path) -> Result<(), RuntimeError> {
+    std::fs::create_dir_all(path).map_err(path_io(action, path))
+}
+
+fn prepare_cgroup_directory(
+    root: &Path,
+    path: &Path,
+    controllers: &[&str],
+) -> Result<(), RuntimeError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| RuntimeError::UnsafeRuntimePath {
+            path: path.to_path_buf(),
+        })?;
+    let root_existed = root.exists();
+    if !root_existed && let Some(parent) = root.parent() {
+        enable_cgroup_controllers(parent, controllers)?;
+    }
+    create_dir_all("create cgroup root directory", root)?;
+    if !cgroup_has_requested_controllers(root, controllers)?
+        && let Some(parent) = root.parent()
+    {
+        enable_cgroup_controllers(parent, controllers)?;
+    }
+    enable_cgroup_controllers(root, controllers)?;
+
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Err(RuntimeError::UnsafeRuntimePath {
+                path: path.to_path_buf(),
+            });
+        };
+        current.push(part);
+        create_dir_all("create cgroup directory", &current)?;
+        if current != path {
+            enable_cgroup_controllers(&current, controllers)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn enable_cgroup_controllers(path: &Path, controllers: &[&str]) -> Result<(), RuntimeError> {
+    let controllers_path = path.join("cgroup.controllers");
+    let subtree_control_path = path.join("cgroup.subtree_control");
+    if !controllers_path.exists() || !subtree_control_path.exists() {
+        return Ok(());
+    }
+
+    let available = std::fs::read_to_string(&controllers_path)
+        .map_err(path_io("read cgroup controllers", &controllers_path))?;
+    let requested = controllers
+        .iter()
+        .filter(|controller| {
+            available
+                .split_whitespace()
+                .any(|available| available == **controller)
+        })
+        .map(|controller| format!("+{controller}"))
+        .collect::<Vec<_>>();
+    if requested.is_empty() {
+        return Ok(());
+    }
+
+    std::fs::write(&subtree_control_path, format!("{}\n", requested.join(" ")))
+        .map_err(path_io("enable cgroup controllers", &subtree_control_path))
+}
+
+fn cgroup_has_requested_controllers(
+    path: &Path,
+    controllers: &[&str],
+) -> Result<bool, RuntimeError> {
+    let controllers_path = path.join("cgroup.controllers");
+    if !controllers_path.exists() {
+        return Ok(true);
+    }
+    let available = std::fs::read_to_string(&controllers_path)
+        .map_err(path_io("read cgroup controllers", &controllers_path))?;
+    Ok(controllers.iter().all(|controller| {
+        available
+            .split_whitespace()
+            .any(|available| available == *controller)
+    }))
+}
+
 #[async_trait]
 impl Runtime for LinuxRuntime {
     async fn start(&self, request: RuntimeStartRequest) -> Result<RuntimeStatus, RuntimeError> {
@@ -425,7 +522,9 @@ impl Runtime for LinuxRuntime {
             .namespace
             .clone()
             .with_stdio_paths(log_path.clone(), log_path);
-        let pid = match spawn_namespaced_process(&namespace) {
+        let pid = match tokio::task::spawn_blocking(move || spawn_namespaced_process(&namespace))
+            .await?
+        {
             Ok(pid) => Some(pid),
             Err(error) => {
                 let _ = self.cleanup(&plan);
@@ -433,10 +532,14 @@ impl Runtime for LinuxRuntime {
             }
         };
         let status_cgroup_path = plan.cgroup_path.clone();
-        let tracked_child = TrackedChild {
-            process: TrackedProcess::NativePid(pid.expect("native pid")),
-            plan,
-        };
+        let mut process = TrackedProcess::NativePid(pid.expect("native pid"));
+        if let Err(error) = wait_for_service_socket(&status_socket_path, &mut process).await {
+            let mut tracked_child = TrackedChild { process, plan };
+            let _ = terminate_tracked_child(&mut tracked_child).await;
+            let _ = self.cleanup(&tracked_child.plan);
+            return Err(error);
+        }
+        let tracked_child = TrackedChild { process, plan };
         let insert_result = {
             match self.children.lock() {
                 Ok(mut children) => {
@@ -531,7 +634,7 @@ impl Runtime for LinuxRuntime {
             .join(request.run_id.to_string());
         self.inject_workload_launcher(&rootfs_path)?;
         std::fs::create_dir_all(&run_dir)?;
-        std::fs::create_dir_all(&cgroup_path)?;
+        prepare_cgroup_directory(&self.cgroup_root, &cgroup_path, CGROUP_CONTROLLERS)?;
         std::fs::write(cgroup_path.join("cpu.max"), cpu_max(request.cpu_millis))?;
         std::fs::write(
             cgroup_path.join("memory.max"),
@@ -540,7 +643,7 @@ impl Runtime for LinuxRuntime {
 
         let cleanup = || {
             let _ = std::fs::write(cgroup_path.join("cgroup.kill"), "1\n");
-            let _ = remove_dir_if_exists(&cgroup_path);
+            let _ = remove_cgroup_dir_if_exists(&cgroup_path);
             let _ = remove_dir_if_exists(&run_dir);
         };
 
@@ -552,7 +655,9 @@ impl Runtime for LinuxRuntime {
             .with_workdir(process.workdir)
             .with_env(env_map.into_iter().collect());
         let started_at = chrono::Utc::now();
-        let pid = match spawn_namespaced_process(&namespace) {
+        let pid = match tokio::task::spawn_blocking(move || spawn_namespaced_process(&namespace))
+            .await?
+        {
             Ok(pid) => pid,
             Err(error) => {
                 cleanup();
@@ -705,6 +810,50 @@ fn remove_dir_if_exists(path: &Path) -> Result<(), RuntimeError> {
     }
 }
 
+fn remove_cgroup_dir_if_exists(path: &Path) -> Result<(), RuntimeError> {
+    match remove_cgroup_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RuntimeError::Io(error)),
+    }
+}
+
+fn remove_cgroup_dir(path: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            remove_cgroup_dir(&entry.path())?;
+        }
+    }
+    std::fs::remove_dir(path)
+}
+
+async fn wait_for_service_socket(
+    path: &Path,
+    process: &mut TrackedProcess,
+) -> Result<(), RuntimeError> {
+    let deadline = Instant::now() + SERVICE_SOCKET_READY_TIMEOUT;
+    loop {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_socket() => return Ok(()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(RuntimeError::Io(error)),
+        }
+        if process.try_wait()? {
+            return Err(RuntimeError::ServiceSocketUnavailable {
+                path: path.to_path_buf(),
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(RuntimeError::ServiceSocketUnavailable {
+                path: path.to_path_buf(),
+            });
+        }
+        sleep(SERVICE_SOCKET_READY_POLL).await;
+    }
+}
+
 async fn terminate_tracked_child(tracked: &mut TrackedChild) -> Result<(), RuntimeError> {
     match std::fs::write(tracked.plan.cgroup_path.join("cgroup.kill"), "1\n") {
         Ok(()) => {}
@@ -752,7 +901,8 @@ impl TrackedProcess {
 }
 
 fn validate_runtime_directory(path: &Path) -> Result<(), RuntimeError> {
-    let metadata = std::fs::symlink_metadata(path)?;
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(path_io("stat runtime directory", path))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(RuntimeError::UnsafeRuntimePath {
             path: path.to_path_buf(),
@@ -771,10 +921,10 @@ fn create_runtime_directory(path: &Path) -> Result<(), RuntimeError> {
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir_all(path)?;
+            create_dir_all("create runtime directory", path)?;
             validate_runtime_directory(path)?;
         }
-        Err(error) => return Err(RuntimeError::Io(error)),
+        Err(error) => return Err(path_io("stat runtime directory", path)(error)),
     }
     Ok(())
 }
@@ -787,10 +937,10 @@ fn remove_existing_runtime_file(path: &Path) -> Result<(), RuntimeError> {
                     path: path.to_path_buf(),
                 });
             }
-            std::fs::remove_file(path)?;
+            std::fs::remove_file(path).map_err(path_io("remove existing runtime file", path))?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(RuntimeError::Io(error)),
+        Err(error) => return Err(path_io("stat existing runtime file", path)(error)),
     }
     Ok(())
 }
@@ -874,11 +1024,25 @@ mod tests {
 
         let plan = runtime.plan(&request).expect("plan");
 
-        let args = &plan.args;
         assert_eq!(plan.namespace.rootfs, plan.rootfs_path);
         assert_eq!(plan.namespace.workdir, "/");
-        assert_eq!(plan.namespace.env, plan.env);
+        assert_eq!(
+            plan.namespace.env,
+            vec![(
+                GUEST_SERVICE_SOCKET_ENV.to_string(),
+                GUEST_SERVICE_SOCKET.to_string()
+            )]
+        );
         assert_eq!(plan.namespace.cgroup_path, plan.cgroup_path);
+        assert_eq!(
+            plan.namespace.uid_map,
+            Some(crate::syscall::ns::UidMap {
+                inside: 0,
+                outside: 200000,
+                size: 10000,
+            })
+        );
+        assert_eq!(plan.namespace.uid_map, plan.namespace.gid_map);
         assert_eq!(
             plan.namespace.argv,
             vec![
@@ -892,56 +1056,6 @@ mod tests {
                 "hello".to_string(),
             ]
         );
-
-        let user_pos = args
-            .iter()
-            .position(|a| a == "--user")
-            .expect("--user flag present");
-
-        let map_users_idx = args
-            .iter()
-            .position(|a| a.contains("--map-users="))
-            .expect("--map-users= flag present");
-        assert!(map_users_idx > user_pos, "--map-users after --user");
-
-        assert!(
-            args.contains(&"--map-users=0,200000,10000".to_string()),
-            "expected --map-users=0,200000,10000, got: {:?}",
-            args.iter()
-                .filter(|a| a.contains("map-users"))
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            args.contains(&"--map-groups=0,200000,10000".to_string()),
-            "expected --map-groups=0,200000,10000"
-        );
-
-        assert_eq!(plan.program, PathBuf::from("unshare"));
-        assert_eq!(args[0], "--user");
-        let sep_pos = args
-            .iter()
-            .position(|a| a == "/.denia/socket-proxy")
-            .expect("socket proxy present");
-        assert!(
-            args[sep_pos - 1] == "--",
-            "socket proxy follows compatibility separator"
-        );
-        assert!(args[sep_pos + 1] == "--listen", "proxy listen flag");
-        assert!(
-            args[sep_pos + 2] == "/run/denia/service.sock",
-            "proxy listens on guest service socket"
-        );
-        assert!(args[sep_pos + 3] == "--connect", "proxy connect flag");
-        assert!(
-            args[sep_pos + 4] == "127.0.0.1:8080",
-            "proxy connects to the service internal port"
-        );
-        assert!(args[sep_pos + 5] == "--", "proxy child separator present");
-        assert!(
-            args[sep_pos + 6] == "/bin/echo",
-            "workload argv follows proxy separator"
-        );
-        assert!(args[sep_pos + 7] == "hello", "workload arg follows argv[0]");
     }
 
     #[test]
@@ -966,30 +1080,6 @@ mod tests {
             matches!(error, RuntimeError::UnsafeRuntimePath { ref path } if path == &rootfs),
             "expected unsafe rootfs path, got: {error:?}"
         );
-    }
-
-    #[test]
-    fn plan_keeps_namespace_launcher_as_compatibility_payload() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let runtime_dir = tmp.path().join("runtime");
-        let artifact_dir = tmp.path().join("artifacts");
-        let cgroup_dir = tmp.path().join("cgroup");
-        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
-        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
-
-        let missing_launcher = tmp.path().join("missing-unshare");
-        let runtime = LinuxRuntime::new_with_paths_and_launcher(
-            runtime_dir.clone(),
-            artifact_dir.clone(),
-            cgroup_dir,
-            &missing_launcher,
-        );
-        let (artifact, _, _) = write_process_bundle(&artifact_dir, "sha256:missing-unshare");
-        let request = runtime_request(&runtime_dir, artifact, "test-svc");
-
-        let plan = runtime.plan(&request).expect("plan");
-
-        assert_eq!(plan.program, missing_launcher);
     }
 
     #[test]
@@ -1059,6 +1149,63 @@ mod tests {
     }
 
     #[test]
+    fn prepare_removes_stale_service_socket_before_launch() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let runtime_dir = tmp.path().join("runtime");
+        let artifact_dir = tmp.path().join("artifacts");
+        let cgroup_dir = tmp.path().join("cgroup");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+
+        let (artifact, _bundle_dir, rootfs) =
+            write_process_bundle(&artifact_dir, "sha256:stale-socket");
+        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
+        let request = runtime_request(&runtime_dir, artifact, "test-svc");
+        let plan = runtime.plan(&request).expect("plan");
+        std::fs::create_dir_all(rootfs.join("run/denia")).expect("socket dir");
+        std::fs::write(&plan.socket_path, "stale").expect("stale socket marker");
+
+        runtime.prepare(&plan, &request).expect("prepare");
+
+        assert!(
+            !plan.socket_path.exists(),
+            "prepare must remove a stale service socket before readiness waits"
+        );
+    }
+
+    #[test]
+    fn prepare_rejects_service_socket_symlink() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let runtime_dir = tmp.path().join("runtime");
+        let artifact_dir = tmp.path().join("artifacts");
+        let cgroup_dir = tmp.path().join("cgroup");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+
+        let (artifact, _bundle_dir, rootfs) =
+            write_process_bundle(&artifact_dir, "sha256:socket-link");
+        let outside_socket = tmp.path().join("outside-socket");
+        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
+        let request = runtime_request(&runtime_dir, artifact, "test-svc");
+        let plan = runtime.plan(&request).expect("plan");
+        std::fs::create_dir_all(rootfs.join("run/denia")).expect("socket dir");
+        symlink(&outside_socket, &plan.socket_path).expect("socket symlink");
+
+        let error = runtime
+            .prepare(&plan, &request)
+            .expect_err("service socket symlink rejected");
+
+        assert!(
+            matches!(error, RuntimeError::UnsafeRuntimePath { ref path } if path == &plan.socket_path),
+            "expected unsafe service socket path, got: {error:?}"
+        );
+        assert!(
+            !outside_socket.exists(),
+            "prepare must not remove or write through a rootfs socket symlink"
+        );
+    }
+
+    #[test]
     fn prepare_rejects_socket_proxy_target_symlink() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let runtime_dir = tmp.path().join("runtime");
@@ -1120,6 +1267,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prepare_cgroup_directory_enables_controllers_on_parents() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path().join("cgroup");
+        let service = root.join("service");
+        let deployment = service.join("deployment");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::write(root.join("cgroup.controllers"), "cpu memory io\n").expect("controllers");
+        std::fs::write(root.join("cgroup.subtree_control"), "").expect("subtree");
+        std::fs::create_dir_all(&service).expect("service");
+        std::fs::write(service.join("cgroup.controllers"), "cpu memory\n").expect("controllers");
+        std::fs::write(service.join("cgroup.subtree_control"), "").expect("subtree");
+
+        prepare_cgroup_directory(&root, &deployment, CGROUP_CONTROLLERS).expect("prepare cgroup");
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("cgroup.subtree_control")).expect("root subtree"),
+            "+cpu +memory\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(service.join("cgroup.subtree_control"))
+                .expect("service subtree"),
+            "+cpu +memory\n"
+        );
+        assert!(deployment.exists());
+    }
+
+    #[test]
+    fn prepare_cgroup_directory_skips_non_cgroup_temp_dirs() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path().join("plain-cgroup");
+        let deployment = root.join("service").join("deployment");
+
+        prepare_cgroup_directory(&root, &deployment, CGROUP_CONTROLLERS).expect("prepare cgroup");
+
+        assert!(deployment.exists());
+    }
+
+    #[test]
+    fn cgroup_has_requested_controllers_requires_every_controller() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let cgroup = tmp.path().join("cgroup");
+        std::fs::create_dir(&cgroup).expect("cgroup dir");
+        std::fs::write(cgroup.join("cgroup.controllers"), "cpu\n").expect("controllers");
+
+        assert!(!cgroup_has_requested_controllers(&cgroup, CGROUP_CONTROLLERS).expect("check"));
+        assert!(cgroup_has_requested_controllers(&cgroup, &["cpu"]).expect("check"));
+    }
+
     #[tokio::test]
     async fn terminate_tracked_child_uses_cgroup_kill_when_available() {
         let tmp = tempfile::tempdir().expect("temp dir");
@@ -1134,9 +1330,6 @@ mod tests {
         let mut tracked = TrackedChild {
             process: TrackedProcess::NativePid(pid),
             plan: LinuxRuntimePlan {
-                program: "launcher".into(),
-                args: Vec::new(),
-                env: Vec::new(),
                 namespace: NamespaceConfig::new(
                     tmp.path().join("rootfs"),
                     vec!["/bin/true".to_string()],
@@ -1165,5 +1358,82 @@ mod tests {
             "child should be reaped after termination"
         );
         std::mem::forget(child);
+    }
+
+    #[tokio::test]
+    async fn wait_for_service_socket_returns_when_socket_path_appears() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let socket_path = tmp.path().join("service.sock");
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep child");
+        let mut process = TrackedProcess::NativePid(child.id());
+        let create_path = socket_path.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _listener =
+                std::os::unix::net::UnixListener::bind(create_path).expect("bind socket marker");
+        });
+
+        wait_for_service_socket(&socket_path, &mut process)
+            .await
+            .expect("service socket ready");
+
+        assert!(socket_path.exists());
+        assert!(
+            matches!(process, TrackedProcess::NativePid(pid) if pid != 0),
+            "process should still be tracked after readiness"
+        );
+        let _ = terminate_tracked_process(&mut process).await;
+        std::mem::forget(child);
+    }
+
+    #[tokio::test]
+    async fn wait_for_service_socket_errors_when_launcher_exits_first() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let socket_path = tmp.path().join("service.sock");
+        let child = std::process::Command::new("true")
+            .spawn()
+            .expect("true child");
+        let mut process = TrackedProcess::NativePid(child.id());
+
+        let error = wait_for_service_socket(&socket_path, &mut process)
+            .await
+            .expect_err("socket should not be ready");
+
+        assert!(
+            matches!(error, RuntimeError::ServiceSocketUnavailable { ref path } if path == &socket_path),
+            "expected service socket unavailable, got: {error:?}"
+        );
+        assert!(
+            matches!(process, TrackedProcess::NativePid(0)),
+            "process should be marked reaped"
+        );
+        std::mem::forget(child);
+    }
+
+    #[test]
+    fn remove_dir_if_exists_removes_normal_runtime_tree() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let path = tmp.path().join("runtime/service/deployment");
+        std::fs::create_dir_all(path.join("logs")).expect("runtime dirs");
+        std::fs::write(path.join("logs/stdout.log"), "hello").expect("runtime file");
+
+        remove_dir_if_exists(&path).expect("remove runtime tree");
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remove_cgroup_dir_removes_nested_empty_cgroup_dirs() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let path = tmp.path().join("cgroup/service/deployment");
+        std::fs::create_dir_all(path.join("child")).expect("cgroup dirs");
+
+        remove_cgroup_dir(&path).expect("remove cgroup tree");
+
+        assert!(!path.exists());
     }
 }

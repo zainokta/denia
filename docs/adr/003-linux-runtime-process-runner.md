@@ -38,29 +38,36 @@ The runner must keep host root as the trust boundary, place workloads into Denia
 - `LinuxRuntime` injects the configured Denia socket-proxy binary into the rootfs as `/.denia/socket-proxy` and uses it as the namespace stage-1 process. The default is the current Denia executable, and production hosts may override it with `DENIA_SOCKET_PROXY_BINARY`.
 - The stage-1 socket proxy brings the namespace loopback interface up, binds `/run/denia/service.sock`, starts the hardened workload command as its child, and forwards each accepted Unix-socket stream to `127.0.0.1:<internal_port>` inside the workload network namespace.
 - Runtime socket directory preparation rejects a symlinked `<rootfs>/run` path before creating `<rootfs>/run/denia`.
+- Runtime socket directory preparation assigns `<rootfs>/run` and `<rootfs>/run/denia` to the configured user-namespace base uid/gid when Denia is running as root, so the stage-1 socket proxy can bind `/run/denia/service.sock` as container root after uid/gid mapping.
+- Runtime socket preparation removes a stale `<rootfs>/run/denia/service.sock` before launch and rejects it if the rootfs provides a symlink or directory at that path, so readiness cannot pass on a leftover socket marker.
 - Service names used in runtime paths are restricted to ASCII alphanumeric, `-`, and `_`.
 - The rootfs path must exist, be a real directory, and not be a symlink before launch planning succeeds.
 - `argv[0]` and `workdir` must be absolute paths inside the rootfs.
 - Environment keys must be non-empty and must not contain `=` or NUL.
 - Workload process launch clears Denia's host environment before applying the explicit `process.json` environment.
 - Cgroups are created under `<cgroup_root>/<service>/<deployment_id>`.
+- Denia enables the configured resource controllers on each cgroup parent it owns before creating child workload cgroups, so `cpu.max`, `memory.max`, and `cgroup.procs` operations happen inside a valid cgroup v2 subtree.
 - CPU and memory limits must be non-zero before cgroup files are written.
 - CPU limits are written to cgroup v2 `cpu.max` with a `100000` microsecond period.
 - Memory limits are written to cgroup v2 `memory.max`.
 - Runtime helper injection rejects symlinked `/.denia` directories and symlinked `/.denia/socket-proxy` or `/.denia/workload-launcher` targets before writing into the rootfs.
-- Runtime process launch uses Denia's native fork/unshare/exec adapter in `src/syscall/ns.rs`. The parent writes uid/gid maps and attaches the child to `cgroup.procs`; the child then chroots, mounts proc, applies hardening, and execs the injected stage-1 helper.
-- `src/syscall/ns.rs` owns the in-process namespace setup contract and direct runner syscall adapter. It now validates user namespace id-map and cgroup path requirements, builds the Linux clone flags, records the target `cgroup.procs` path, materializes C-compatible argv/env/rootfs/workdir payloads before fork, writes the `setgroups`, `/proc/<pid>/uid_map`, and `/proc/<pid>/gid_map` setup files, attaches the child to cgroup v2, then performs fork/unshare/chroot/proc-mount/no-new-privs/capability-drop/exec in the syscall boundary.
+- Runtime process launch uses Denia's native fork/unshare/exec adapter in `src/syscall/ns.rs`, invoked from async runtime paths through `tokio::task::spawn_blocking` so fork/unshare does not run on a core Tokio worker. The parent attaches the stage-1 child to `cgroup.procs` before releasing it to unshare namespaces, writes uid/gid maps after the user namespace exists, and the child then chroots, mounts proc, optionally applies hardening, and execs the injected helper.
+- `src/syscall/ns.rs` owns the in-process namespace setup contract and direct runner syscall adapter. It now validates user namespace id-map and cgroup path requirements, builds the Linux clone flags, records the target `cgroup.procs` path, materializes C-compatible argv/env/rootfs/workdir payloads and null-terminated exec pointer arrays before fork, pre-opens requested stdout/stderr files before entering the mapped user namespace, attaches the child to cgroup v2 before namespace creation, writes the `setgroups`, `/proc/<pid>/uid_map`, and `/proc/<pid>/gid_map` setup files after the child unshares the user namespace, then performs chroot/proc-mount/no-new-privs/capability-drop/exec in the syscall boundary.
+- The native runner uses a close-on-exec child setup status pipe. A failed child setup stage reports a named boundary such as `unshare`, `chroot`, `mount proc`, or `execve`; EOF proves the stage-1 process reached `execve`.
+- Parent-side launch handshakes are time-bound. If the stage-1 process does not report readiness or reach `execve` before the setup timeout, Denia kills and reaps the stage-1 host process and returns a setup-timeout error instead of leaving `Runtime::start` blocked indefinitely.
 - `LinuxRuntimePlan` carries the native `NamespaceConfig`, so service launch has one authoritative rootfs/workdir/env/cgroup/argv payload for the syscall runner.
-- Service namespace launch executes `/.denia/socket-proxy --listen /run/denia/service.sock --connect 127.0.0.1:<internal_port> -- <argv...>` through the native adapter.
+- Service namespace launch executes `/.denia/socket-proxy --listen /run/denia/service.sock --connect 127.0.0.1:<internal_port> -- <argv...>` through the native adapter. Service launch defers `no_new_privs` and capability bounding-set drops to the socket proxy because the proxy must bring loopback up inside the fresh network namespace before it hardens itself and starts the workload.
+- `Runtime::start` waits for the host-visible rootfs socket path to appear as a Unix socket after spawning the native launcher. If the launcher exits first or the socket is not created before the readiness timeout, Denia terminates the tracked cgroup, removes prepared runtime/cgroup directories, and returns a startup error instead of reporting `running`.
 - Job namespace launch applies the same namespace and cgroup setup, then executes `/.denia/workload-launcher -- <argv...>` instead of the socket proxy because jobs do not expose ingress.
 - If launch fails after preparation, Denia removes the prepared deployment directory and cgroup directory.
-- If cgroup placement fails before the namespace launcher is executed, `spawn` returns an error and Denia removes the prepared deployment and cgroup directories.
+- If cgroup placement, id-map setup, or child setup fails before `execve`, `spawn` kills and reaps the stage-1 host process before returning an error, and Denia removes the prepared deployment and cgroup directories.
 - If a service is started again while Denia still tracks an older child for the same service, Denia stops the older child after the replacement child is tracked.
 - When Denia stops a tracked service child, it writes `1` to `cgroup.kill` when the cgroup v2 kill file is available, falls back to killing the tracked launcher process, then removes the tracked deployment runtime directory and cgroup directory.
 - When Denia replaces a tracked service child, it uses the same cgroup-wide termination path before removing the replaced child deployment runtime directory and cgroup directory.
 - Before start and stop decisions, Denia reaps tracked children that already exited and removes their deployment runtime and cgroup directories.
+- Cgroup cleanup uses directory-only removal as a fallback because cgroup v2 exposes kernel pseudo-files that must not be unlinked like normal filesystem files.
 
-The normal test suite verifies planning, path safety, and cgroup file preparation using temporary directories. The real `start` path is covered by ignored privileged tests that require `DENIA_RUN_PRIVILEGED_TESTS=1`, root, cgroup v2, and Linux namespace permissions.
+The normal test suite verifies planning, path safety, and cgroup file preparation using temporary directories. The real `start` path is covered by ignored privileged tests that require `DENIA_RUN_PRIVILEGED_TESTS=1`, root, cgroup v2, Linux namespace permissions, and a static busybox through `DENIA_PRIVILEGED_BUSYBOX_STATIC` or `/usr/lib/nix/busybox`. The service socket-proxy path uses `DENIA_PRIVILEGED_DENIA_HELPER_STATIC` when a static Denia helper is available; otherwise the test builds a static fallback socket-proxy fixture with `cc -static` so the native service launch, readiness, and cgroup path can still be exercised.
 
 ## Consequences
 
@@ -100,7 +107,7 @@ The normal test suite verifies planning, path safety, and cgroup file preparatio
 
 ### Negative
 
-- The compatibility `unshare` plan payload is still present in tests and config while callers migrate, but runtime launch no longer depends on util-linux `unshare`.
+- Runtime launch no longer depends on util-linux `unshare`.
 - External image acquisition and unpacking are now in-process (`oci-client` + `TarRootfsUnpacker`); `skopeo` and `umoci` are no longer host dependencies (ADR-011 amendment).
 - Runtime launch no longer depends on a host-side cgroup launcher trampoline; cgroup placement is performed by Denia around the native fork/unshare flow, with raw Linux calls isolated in `src/syscall/ns.rs` instead of `src/runtime.rs`.
 - The injected `/.denia/socket-proxy` must be usable inside the target rootfs. A fully static Denia release binary is the expected production packaging shape for scratch/distroless images.

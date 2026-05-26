@@ -43,6 +43,8 @@ pub enum DeployError {
     BridgeLockPoisoned,
     #[error("bridge error: {0}")]
     Bridge(#[from] BridgeError),
+    #[error("bridge port pool exhausted")]
+    BridgePortExhausted,
     #[error("service does not use an external image source")]
     UnsupportedServiceSource,
     #[error("service does not use a git source")]
@@ -314,7 +316,8 @@ where
             .bridge
             .lock()
             .map_err(|_| DeployError::BridgeLockPoisoned)?
-            .assign(&service.name, socket_path.to_path_buf());
+            .assign(&service.name, socket_path.to_path_buf())
+            .ok_or(DeployError::BridgePortExhausted)?;
         routing.manager.activate(bridge_target.clone()).await?;
 
         let hostnames = self.store.list_verified_hostnames(service.id)?;

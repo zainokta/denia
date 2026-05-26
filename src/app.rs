@@ -54,11 +54,10 @@ impl AppState {
     pub fn new(config: AppConfig, store: SqliteStore) -> Self {
         let bridge_start_port = config.bridge_start_port;
         let runtime = Arc::new(
-            LinuxRuntime::new_with_paths_and_launcher(
+            LinuxRuntime::new_with_paths(
                 config.runtime_dir.clone(),
                 config.artifact_dir.clone(),
                 config.cgroup_root.clone(),
-                config.unshare_binary.clone(),
             )
             .with_userns(config.userns_base, config.userns_size)
             .with_socket_proxy(config.socket_proxy_binary.clone())
@@ -990,7 +989,7 @@ async fn login_handler(
     let user = state
         .store
         .verify_login(&input.username, &input.password)
-        .map_err(|_| ApiError::Conflict("invalid credentials".to_string()))?;
+        .map_err(|_| ApiError::Unauthorized("invalid credentials".to_string()))?;
     let session = state.store.create_session(user.id, 24)?;
     Ok(Json(LoginResult {
         token: session.token_hash,

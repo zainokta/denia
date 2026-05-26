@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Date
 
@@ -40,12 +40,14 @@ Workload isolation is hardened through three runtime additions:
    maps to without following symlinks.
 
 `src/syscall/ns.rs` validates argv/env/rootfs/workdir before fork, writes uid/gid maps from the
-parent, attaches the child to cgroup v2, mounts proc, applies `no_new_privs`, drops the capability
-bounding set, and execs the injected helper. Services exec `/.denia/socket-proxy`, which owns
-Denia's Unix socket contract, brings the namespace loopback interface up, and bridges it to the
-workload's configured internal TCP port inside the namespace. Jobs exec
-`/.denia/workload-launcher`. Production hosts can provide the injected proxy through
-`DENIA_SOCKET_PROXY_BINARY`; the default is the current Denia executable.
+parent, attaches the child to cgroup v2, mounts proc, and execs the injected helper. Jobs use the
+adapter's default pre-exec `no_new_privs` and capability bounding-set drop before executing
+`/.denia/workload-launcher`. Services exec `/.denia/socket-proxy` with hardening deferred because
+the proxy must bring the namespace loopback interface up before dropping capabilities; the proxy
+then applies `no_new_privs`, drops the capability bounding set, owns Denia's Unix socket contract,
+and bridges accepted streams to the workload's configured internal TCP port inside the namespace.
+Production hosts can provide the injected proxy through `DENIA_SOCKET_PROXY_BINARY`; the default is
+the current Denia executable.
 Seccomp and broader network device/DNS setup inside the workload network namespace are explicitly
 deferred.
 
@@ -85,8 +87,9 @@ deferred.
 
 ## Alternatives Considered
 
-- **Move to `nix`/`rustix` syscalls**: Deferred. The CLI approach keeps the surface small and
-  auditable. A syscall refactor is better paired with seccomp work in a future pass.
+- **Use only safe Rust APIs**: Rejected for the native runner because Linux `fork`, `unshare`,
+  `mount`, `chroot`, `prctl`, and `execve` require raw syscall boundaries. Denia keeps those calls
+  isolated in syscall modules and keeps runtime business logic on safe wrappers.
 - **Per-service uid ranges**: Deferred. A single shared range is sufficient for the current
   single-node control plane. Per-service isolation via idmapped mounts or separate ranges
   can be added when multi-tenancy isolation requirements grow.

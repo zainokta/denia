@@ -1,60 +1,62 @@
 # Spec: Runtime Security Hardening (TODO #12 / #13)
 
-Status: Draft · Date: 2026-05-25 · Sub-project A of the TODO decomposition
+Status: Done · Date: 2026-05-25 · Sub-project A of the TODO decomposition
+
+> **Implementation note:** The implementation diverged from the original CLI/setpriv
+> approach and instead uses Denia's native fork/unshare/exec syscall adapter
+> (`src/syscall/ns.rs`) with in-process `rustix` syscalls for `no_new_privs` and
+> capability bounding-set drop (`src/syscall/caps.rs`). See ADR-005 for rationale.
 
 ## Problem
 
-Denia runs untrusted workload images under its own Linux runtime. Today
-`src/runtime.rs` launches workloads with:
+Denia runs untrusted workload images under its own Linux runtime. Previously
+`src/runtime.rs` launched workloads via `unshare(1)` with PID, mount, UTS, and
+IPC namespaces.
 
-```
-unshare --fork --pid --mount --uts --ipc --mount-proc --root <rootfs> --wd <wd> -- <argv>
-```
-
-There is **no user namespace, no uid/gid mapping, no capability drop, and no
-`no_new_privs`**. The Denia agent runs as host root, so a workload's `root` is
-**host root**. A container escape or a malicious image can therefore harm the
+There was **no user namespace, no uid/gid mapping, no capability drop, and no
+`no_new_privs`**. The Denia agent runs as host root, so a workload's `root` was
+**host root**. A container escape or a malicious image could therefore harm the
 host (TODO #12).
-
-TODO #13 ("are we calling system-level Linux or via command?"): isolation is
-**command + filesystem**, not raw syscalls. Namespaces come from `unshare(1)`;
-cgroup limits are direct cgroup-v2 fs writes (`cpu.max`, `memory.max`,
-`cgroup.procs`). No `clone`/`setns`/seccomp syscalls are used.
 
 ## Goal
 
 Workloads stop running as host root, run with `no_new_privs`, and run with a
-dropped capability bounding set, keeping the existing CLI-tool approach. Seccomp
-and network namespace are explicitly out of scope for this pass.
+dropped capability bounding set. Seccomp and network namespace are explicitly
+out of scope for this pass.
 
 ## Decisions
 
 - **Hardening depth:** user namespace + uid/gid map + `no_new_privs` + capability
   drop. No seccomp, no network namespace this pass.
-- **Mechanism:** stay CLI. `unshare` user-namespace flags plus a `setpriv`
-  wrapper. No move to `nix`/`rustix` syscalls (that is deferred to whenever
-  seccomp is added).
-- **Cap-drop placement:** because `unshare --root` chroots into the workload
-  rootfs, the privilege-dropping tool must exist *inside* the rootfs. Inject a
-  static `setpriv` into the rootfs at prepare time and run it as the argv
-  wrapper.
+- **Mechanism:** direct syscall adapter. Denia's native fork/unshare/exec adapter
+  (`src/syscall/ns.rs`) sets up user namespaces, writes uid/gid maps from the
+  parent, attaches to cgroup v2, mounts proc, and drops privileges in-process
+  via `rustix::thread` syscalls (`src/syscall/caps.rs`). `setpriv` is no longer
+  a host dependency.
+- **Cap-drop placement:** `no_new_privs` and capability bounding-set drop are
+  applied in the child process after namespace setup and before exec. Services
+  defer hardening to the socket-proxy helper (which needs capabilities to bring
+  up loopback), then the proxy drops capabilities before running the workload.
+  Jobs apply immediate hardening.
 - **uid range:** a single node-wide range from config (`base`, `size`); map
   container `0 -> base`. The extracted rootfs bundle is chowned to `base` at
-  acquisition. Per-service ranges and idmapped mounts are deferred.
+  acquisition via `syscall::chown::recursive_lchown`. Per-service ranges and
+  idmapped mounts are deferred.
 
-## Target launch command
+## Namespace configuration
 
-```
-unshare --user \
-  --map-users=0,<BASE>,<SIZE> --map-groups=0,<BASE>,<SIZE> \
-  --fork --pid --mount --uts --ipc --mount-proc \
-  --root <rootfs> --wd <workdir> -- \
-  /.denia/setpriv --no-new-privs --bounding-set -all -- <argv...>
-```
+Denia uses a typed `NamespaceConfig` (in `src/syscall/ns.rs`) with fields:
+- `userns: bool` (default `true`)
+- `uid_map`, `gid_map`: container-to-host mapping
+- `pid_ns`, `mount_ns`, `uts_ns`, `ipc_ns`, `net_ns`: all default `true`
+- `mount_proc: bool` (default `true`)
+- `no_new_privs: bool` (default `true`)
+- `drop_bounding_caps: bool` (default `true`)
 
-Container uid/gid 0 maps to host `BASE`; the workload is root *inside* the
-namespace but an unprivileged `BASE` on the host. `setpriv` (inside the rootfs)
-clears the capability bounding set and sets `no_new_privs` before exec.
+The `spawn_namespaced_process()` function handles fork, unshare with all
+configured namespace flags, uid/gid map writing via `/proc/<pid>/uid_map` and
+`/proc/<pid>/gid_map` (with `setgroups deny`), cgroup attachment, proc mount,
+`no_new_privs` + capability bounding-set drop, and `execve`.
 
 ## Threat model addressed
 
@@ -66,14 +68,16 @@ clears the capability bounding set and sets `no_new_privs` before exec.
 
 ## Constraints / risks
 
-- **Static setpriv required.** A dynamically linked `setpriv` fails inside a
-  scratch rootfs. The configured binary must be a statically linked build.
-- **Shared-bundle mutation.** Injecting `setpriv` and chowning happen on a
-  digest-shared bundle; idempotent, but concurrent first-deploys of the same
-  digest could race. Acceptable for now.
+- The injected Denia socket-proxy binary must be usable inside the rootfs;
+  production packaging should prefer a static Denia binary for scratch/distroless
+  images.
+- Shared-bundle mutation (chown + helper injection) on digest-shared bundles
+  could race on concurrent first-deploys of the same digest. Acceptable for
+  current single-node control plane.
 - Requires kernel user-namespace support. Running as root usually bypasses
   `kernel.unprivileged_userns_clone=0`, but a kernel can still disable or omit
   user namespaces.
+- Raw Linux calls requiring `unsafe` are isolated in `src/syscall/` modules.
 
 ## Success criteria
 

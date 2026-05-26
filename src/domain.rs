@@ -31,6 +31,8 @@ pub enum DomainError {
     RegistrySourceAmbiguous,
     #[error("external image source requires either image or both registry_id and image_ref")]
     RegistrySourceMissing,
+    #[error("invalid git build path field '{field}': {reason}")]
+    InvalidGitBuildPath { field: String, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +99,42 @@ pub struct ExternalImageSource {
     pub registry_id: Option<Uuid>,
     #[serde(default)]
     pub image_ref: Option<String>,
+}
+
+impl GitSource {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        validate_build_path(&self.context_path, "context_path")?;
+        validate_build_path(&self.dockerfile_path, "dockerfile_path")?;
+        Ok(())
+    }
+}
+
+fn validate_build_path(path: &str, field: &str) -> Result<(), DomainError> {
+    if path.is_empty() {
+        return Err(DomainError::InvalidGitBuildPath {
+            field: field.to_string(),
+            reason: "path must not be empty".to_string(),
+        });
+    }
+    if path.starts_with('/') {
+        return Err(DomainError::InvalidGitBuildPath {
+            field: field.to_string(),
+            reason: "path must not be absolute".to_string(),
+        });
+    }
+    if path.contains("..") {
+        return Err(DomainError::InvalidGitBuildPath {
+            field: field.to_string(),
+            reason: "path must not contain parent directory reference".to_string(),
+        });
+    }
+    if path.contains('\0') || path.contains('\n') || path.contains('\r') {
+        return Err(DomainError::InvalidGitBuildPath {
+            field: field.to_string(),
+            reason: "path contains invalid characters".to_string(),
+        });
+    }
+    Ok(())
 }
 
 impl ExternalImageSource {
@@ -171,10 +209,20 @@ impl ServiceConfig {
         if domains.is_empty() {
             return Err(DomainError::MissingDomain);
         }
+        for domain in &domains {
+            if let Err(e) = crate::domains::validate_hostname(domain) {
+                return Err(DomainError::InvalidHostname(format!(
+                    "domain '{domain}': {e}"
+                )));
+            }
+        }
         if internal_port == 0 {
             return Err(DomainError::InvalidPort);
         }
         health_check.validate()?;
+        if let ServiceSource::Git(git) = &source {
+            git.validate()?;
+        }
         Ok(Self {
             id: Uuid::now_v7(),
             project_id,

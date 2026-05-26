@@ -121,9 +121,23 @@ impl Default for HttpDomainVerifier {
 #[async_trait::async_trait]
 impl DomainVerifier for HttpDomainVerifier {
     async fn verify(&self, hostname: &str, token: &str) -> Result<(), DomainVerifyError> {
+        if hostname.parse::<std::net::IpAddr>().is_ok() {
+            return Err(DomainVerifyError::DnsLookupFailed);
+        }
+
         let base = match &self.base_url_override {
             Some(b) => b.clone(),
-            None => format!("http://{hostname}"),
+            None => {
+                let resolved = tokio::net::lookup_host((hostname, 80u16))
+                    .await
+                    .map_err(|_| DomainVerifyError::DnsLookupFailed)?;
+                for addr in resolved {
+                    if is_internal_ip(&addr.ip()) {
+                        return Err(DomainVerifyError::DnsLookupFailed);
+                    }
+                }
+                format!("http://{hostname}")
+            }
         };
         let url = format!("{base}/.well-known/denia-challenge/{token}");
 
@@ -163,6 +177,24 @@ impl DomainVerifier for HttpDomainVerifier {
             return Err(DomainVerifyError::BodyMismatch);
         }
         Ok(())
+    }
+}
+
+fn is_internal_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.octets()[0] == 0xfe && v6.octets()[1] == 0x80
+        }
     }
 }
 
