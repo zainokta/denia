@@ -401,15 +401,6 @@ impl SqliteUserRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
-
-    /// Adapter used during Task 10 wiring; deleted after step 10.6.
-    pub fn from_store(store: &SqliteStore) -> Self {
-        Self {
-            pool: SqlitePool {
-                inner: Arc::clone(&store.connection),
-            },
-        }
-    }
 }
 
 impl UserRepo for SqliteUserRepo {

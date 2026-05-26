@@ -2,16 +2,28 @@ use chrono::Utc;
 use denia::{
     artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource},
     bridge::{BridgeAllocator, BridgeTarget, FakeBridgeManager},
-    deploy::{DeploymentCoordinator, DeploymentPlan},
+    deploy::{DeploymentCoordinator, DeploymentPlan, DeploymentRepos},
     domain::{
         DeploymentStatus, DomainStatus, ExternalImageSource, HealthCheck, ResourceLimits,
         RuntimeStartRequest, ServiceConfig, ServiceDomain, ServiceSource,
     },
     health::FakeHealthChecker,
+    repo::sqlite::{SqliteDeploymentRepo, SqliteDomainRepo, SqliteProjectRepo, SqliteRegistryRepo},
     runtime::{FakeRuntime, Runtime},
     state::SqliteStore,
 };
+use std::sync::Arc;
 use uuid::Uuid;
+
+fn build_repos(store: &SqliteStore) -> DeploymentRepos {
+    let pool = store.pool();
+    DeploymentRepos {
+        deployments: Arc::new(SqliteDeploymentRepo::new(pool.clone())),
+        projects: Arc::new(SqliteProjectRepo::new(pool.clone())),
+        registries: Arc::new(SqliteRegistryRepo::new(pool.clone())),
+        domains: Arc::new(SqliteDomainRepo::new(pool)),
+    }
+}
 
 fn seed_verified_domain(store: &SqliteStore, service_id: Uuid, hostname: &str) {
     store
@@ -92,7 +104,7 @@ async fn coordinator_promotes_only_after_health_check_passes() {
     store.migrate().expect("migrate");
     let runtime = FakeRuntime::default();
     let health = FakeHealthChecker::healthy();
-    let coordinator = DeploymentCoordinator::new(store.clone(), runtime, health);
+    let coordinator = DeploymentCoordinator::new(build_repos(&store), runtime, health);
 
     let project_id = store.default_project_id().expect("default project");
     let service = store
@@ -155,7 +167,7 @@ async fn coordinator_writes_traefik_config_on_promotion() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("denia.yml");
     let coordinator = DeploymentCoordinator::new_with_routing(
-        store.clone(),
+        build_repos(&store),
         runtime,
         health,
         BridgeAllocator::new(19000),

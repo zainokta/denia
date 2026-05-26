@@ -18,7 +18,7 @@ use crate::{
     bridge::{BridgeAllocator, BridgeManager, LoopbackBridgeSupervisor},
     command::{CommandRunner, TokioCommandRunner},
     config::AppConfig,
-    deploy::{DeployError, DeploymentCoordinator, SharedRoutes},
+    deploy::{DeployError, DeploymentCoordinator, DeploymentRepos, SharedRoutes},
     domain::{
         ApiToken, Credential, CredentialKind, DeploymentRequest, DomainStatus, Job, JobRun,
         LoginResult, Me, PrincipalView, Project, ProjectMembership, Role, ServiceConfig,
@@ -29,16 +29,33 @@ use crate::{
     metrics::{CgroupMetricsReader, MetricsError},
     node_metrics::{NodeMetricsError, NodeMetricsReader, NodeSnapshot},
     rate_limit::{LoginRateLimiter, rate_limit_login},
+    repo::{
+        CredentialRepo, DeploymentRepo, DomainRepo, JobRepo, ProjectRepo, RegistryRepo, RepoError,
+        ServiceRepo, TokenRepo, UserRepo,
+        sqlite::{
+            SqliteCredentialRepo, SqliteDeploymentRepo, SqliteDomainRepo, SqliteJobRepo,
+            SqliteProjectRepo, SqliteRegistryRepo, SqliteServiceRepo, SqliteTokenRepo,
+            SqliteUserRepo,
+        },
+    },
     runtime::{LinuxRuntime, Runtime},
     secrets::SecretRef,
-    state::{SqliteStore, StateError},
+    state::SqliteStore,
     traefik::{IngressRenderOptions, RouteSpec},
 };
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: AppConfig,
-    pub store: SqliteStore,
+    pub services: Arc<dyn ServiceRepo>,
+    pub domains: Arc<dyn DomainRepo>,
+    pub registries: Arc<dyn RegistryRepo>,
+    pub projects: Arc<dyn ProjectRepo>,
+    pub users: Arc<dyn UserRepo>,
+    pub deployments: Arc<dyn DeploymentRepo>,
+    pub jobs: Arc<dyn JobRepo>,
+    pub tokens: Arc<dyn TokenRepo>,
+    pub credentials: Arc<dyn CredentialRepo>,
     runtime: Arc<dyn Runtime>,
     health: Arc<dyn HealthChecker>,
     command_runner: Arc<dyn CommandRunner>,
@@ -52,7 +69,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: AppConfig, store: SqliteStore) -> Self {
+    pub fn new(config: AppConfig, store: &SqliteStore) -> Self {
         let bridge_start_port = config.bridge_start_port;
         let runtime = Arc::new(
             LinuxRuntime::new_with_paths(
@@ -80,7 +97,7 @@ impl AppState {
 
     pub fn new_with_deploy_dependencies<R, H, C, B, M>(
         config: AppConfig,
-        store: SqliteStore,
+        store: &SqliteStore,
         runtime: R,
         health: H,
         command_runner: C,
@@ -109,7 +126,7 @@ impl AppState {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_deploy_dependencies_and_log<R, H, C, B, M>(
         config: AppConfig,
-        store: SqliteStore,
+        store: &SqliteStore,
         runtime: R,
         health: H,
         command_runner: C,
@@ -130,9 +147,18 @@ impl AppState {
             control_tls: config.control_tls,
             control_backend_addr: format!("http://{}", config.bind_addr),
         };
+        let pool = store.pool();
         Self {
             config,
-            store,
+            services: Arc::new(SqliteServiceRepo::new(pool.clone())),
+            domains: Arc::new(SqliteDomainRepo::new(pool.clone())),
+            registries: Arc::new(SqliteRegistryRepo::new(pool.clone())),
+            projects: Arc::new(SqliteProjectRepo::new(pool.clone())),
+            users: Arc::new(SqliteUserRepo::new(pool.clone())),
+            deployments: Arc::new(SqliteDeploymentRepo::new(pool.clone())),
+            jobs: Arc::new(SqliteJobRepo::new(pool.clone())),
+            tokens: Arc::new(SqliteTokenRepo::new(pool.clone())),
+            credentials: Arc::new(SqliteCredentialRepo::new(pool)),
             runtime: Arc::new(runtime),
             health: Arc::new(health),
             command_runner: Arc::new(command_runner),
@@ -152,6 +178,17 @@ impl AppState {
     ) -> Self {
         self.domain_verifier = verifier;
         self
+    }
+
+    /// Build a `DeploymentRepos` bundle from this state for handler-side
+    /// coordinator construction.
+    fn deployment_repos(&self) -> DeploymentRepos {
+        DeploymentRepos {
+            deployments: self.deployments.clone(),
+            projects: self.projects.clone(),
+            registries: self.registries.clone(),
+            domains: self.domains.clone(),
+        }
     }
 }
 
@@ -259,7 +296,7 @@ async fn challenge_handler(
     State(state): State<AppState>,
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
-    match state.store.get_service_domain_by_token(&token)? {
+    match state.domains.get_service_domain_by_token(&token)? {
         Some(_) => Ok(([(header::CONTENT_TYPE, "text/plain")], token).into_response()),
         None => Err(ApiError::NotFound("challenge token not found".into())),
     }
@@ -277,7 +314,7 @@ fn ensure_role(
     let user_id = principal
         .user_id
         .ok_or_else(|| ApiError::Forbidden("authenticated user required".to_string()))?;
-    let role = state.store.role_for(user_id, project_id)?;
+    let role = state.users.role_for(user_id, project_id)?;
     require_project_role(principal, role, min).map_err(Into::into)
 }
 
@@ -293,14 +330,14 @@ async fn list_services(
     State(state): State<AppState>,
     principal: Principal,
 ) -> Result<Json<Vec<ServiceConfig>>, ApiError> {
-    let all = state.store.list_services()?;
+    let all = state.services.list_services()?;
     if principal.is_super_admin {
         return Ok(Json(all));
     }
     let user_id = principal
         .user_id
         .ok_or_else(|| ApiError::Forbidden("authenticated user required".to_string()))?;
-    let memberships = state.store.list_memberships_for_user(user_id)?;
+    let memberships = state.users.list_memberships_for_user(user_id)?;
     let allowed: std::collections::HashSet<uuid::Uuid> =
         memberships.into_iter().map(|m| m.project_id).collect();
     Ok(Json(
@@ -321,7 +358,7 @@ async fn put_service(
             .map_err(|e| ApiError::BadRequest(e.to_string()))?;
         if let Some(registry_id) = src.registry_id {
             let registry = state
-                .store
+                .registries
                 .registry(registry_id)?
                 .ok_or_else(|| ApiError::NotFound("registry not found".into()))?;
             if registry.project_id != service.project_id {
@@ -329,7 +366,7 @@ async fn put_service(
             }
         }
     }
-    Ok(Json(state.store.put_service(service)?))
+    Ok(Json(state.services.put_service(service)?))
 }
 
 async fn create_deployment(
@@ -337,14 +374,14 @@ async fn create_deployment(
     principal: Principal,
     Json(request): Json<DeploymentRequest>,
 ) -> Result<Json<crate::domain::Deployment>, ApiError> {
-    let Some(service) = state.store.get_service(request.service_id())? else {
+    let Some(service) = state.services.get_service(request.service_id())? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
     ensure_role(&state, &principal, service.project_id, Role::Operator)?;
     match request {
         DeploymentRequest::ExternalImage { .. } => {
             let coordinator = DeploymentCoordinator::new_with_shared_routing(
-                state.store.clone(),
+                state.deployment_repos(),
                 state.runtime.clone(),
                 state.health.clone(),
                 state.bridge_allocator.clone(),
@@ -369,7 +406,7 @@ async fn create_deployment(
         }
         DeploymentRequest::Git { .. } => {
             let coordinator = DeploymentCoordinator::new_with_shared_routing(
-                state.store.clone(),
+                state.deployment_repos(),
                 state.runtime.clone(),
                 state.health.clone(),
                 state.bridge_allocator.clone(),
@@ -412,14 +449,14 @@ async fn list_workloads(
     State(state): State<AppState>,
     principal: Principal,
 ) -> Result<Json<Vec<WorkloadView>>, ApiError> {
-    let services = state.store.list_services()?;
+    let services = state.services.list_services()?;
     let allowed = if principal.is_super_admin {
         None
     } else {
         let user_id = principal
             .user_id
             .ok_or_else(|| ApiError::Forbidden("authenticated user required".to_string()))?;
-        let memberships = state.store.list_memberships_for_user(user_id)?;
+        let memberships = state.users.list_memberships_for_user(user_id)?;
         Some(
             memberships
                 .into_iter()
@@ -435,7 +472,7 @@ async fn list_workloads(
         {
             continue;
         }
-        let deployment_id = state.store.promoted_deployment(service.id)?;
+        let deployment_id = state.deployments.promoted_deployment(service.id)?;
         let (cpu, mem) = match deployment_id {
             Some(d) => match reader.read_by_id(&service.name, service.id, d) {
                 Ok(snap) => (Some(snap.cpu_usage_usec), Some(snap.memory_current_bytes)),
@@ -445,7 +482,7 @@ async fn list_workloads(
         };
         let status = match deployment_id {
             Some(d) => state
-                .store
+                .deployments
                 .list_deployments(service.id)?
                 .into_iter()
                 .find(|dep| dep.id == d)
@@ -470,7 +507,7 @@ async fn list_service_requests(
     principal: Principal,
     axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Vec<AccessEntry>>, ApiError> {
-    let Some(service) = state.store.get_service(service_id)? else {
+    let Some(service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
     ensure_role(&state, &principal, service.project_id, Role::Operator)?;
@@ -510,14 +547,14 @@ async fn list_projects(
     State(state): State<AppState>,
     principal: Principal,
 ) -> Result<Json<Vec<Project>>, ApiError> {
-    let all = state.store.list_projects()?;
+    let all = state.projects.list_projects()?;
     if principal.is_super_admin {
         return Ok(Json(all));
     }
     let user_id = principal
         .user_id
         .ok_or_else(|| ApiError::Forbidden("authenticated user required".to_string()))?;
-    let memberships = state.store.list_memberships_for_user(user_id)?;
+    let memberships = state.users.list_memberships_for_user(user_id)?;
     let allowed: std::collections::HashSet<uuid::Uuid> =
         memberships.into_iter().map(|m| m.project_id).collect();
     Ok(Json(
@@ -534,7 +571,7 @@ async fn get_project(
 ) -> Result<Json<Project>, ApiError> {
     ensure_role(&state, &principal, project_id, Role::Viewer)?;
     let project = state
-        .store
+        .projects
         .get_project(project_id)?
         .ok_or_else(|| ApiError::NotFound("project not found".to_string()))?;
     Ok(Json(project))
@@ -546,7 +583,7 @@ async fn create_project(
     Json(project): Json<Project>,
 ) -> Result<Json<Project>, ApiError> {
     ensure_super_admin(&principal)?;
-    Ok(Json(state.store.put_project(project)?))
+    Ok(Json(state.projects.put_project(project)?))
 }
 
 async fn delete_project(
@@ -555,7 +592,7 @@ async fn delete_project(
     axum::extract::Path(project_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     ensure_role(&state, &principal, project_id, Role::Admin)?;
-    state.store.delete_project(project_id)?;
+    state.projects.delete_project(project_id)?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -576,7 +613,7 @@ async fn list_project_members(
     axum::extract::Path(project_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Vec<ProjectMembership>>, ApiError> {
     ensure_role(&state, &principal, project_id, Role::Viewer)?;
-    Ok(Json(state.store.list_members(project_id)?))
+    Ok(Json(state.users.list_members(project_id)?))
 }
 
 async fn add_project_member(
@@ -587,7 +624,7 @@ async fn add_project_member(
 ) -> Result<(StatusCode, Json<ProjectMembership>), ApiError> {
     ensure_role(&state, &principal, project_id, Role::Admin)?;
     state
-        .store
+        .users
         .set_membership(input.user_id, project_id, input.role)?;
     Ok((
         StatusCode::CREATED,
@@ -605,7 +642,7 @@ async fn remove_project_member(
     axum::extract::Path((project_id, user_id)): axum::extract::Path<(uuid::Uuid, uuid::Uuid)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     ensure_role(&state, &principal, project_id, Role::Admin)?;
-    state.store.remove_membership(user_id, project_id)?;
+    state.users.remove_membership(user_id, project_id)?;
     Ok(Json(serde_json::json!({"removed": true})))
 }
 
@@ -624,7 +661,7 @@ async fn list_registries(
     axum::extract::Path(project_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Vec<crate::domain::Registry>>, ApiError> {
     ensure_role(&state, &principal, project_id, Role::Admin)?;
-    Ok(Json(state.store.registries_for_project(project_id)?))
+    Ok(Json(state.registries.registries_for_project(project_id)?))
 }
 
 async fn create_registry(
@@ -647,7 +684,7 @@ async fn create_registry(
         credential_ref,
     )
     .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    state.store.create_registry(&registry)?;
+    state.registries.create_registry(&registry)?;
     Ok((StatusCode::CREATED, Json(registry)))
 }
 
@@ -658,7 +695,7 @@ async fn get_registry(
 ) -> Result<Json<crate::domain::Registry>, ApiError> {
     ensure_role(&state, &principal, project_id, Role::Admin)?;
     let registry = state
-        .store
+        .registries
         .registry(registry_id)?
         .ok_or_else(|| ApiError::NotFound("registry not found".into()))?;
     if registry.project_id != project_id {
@@ -675,7 +712,7 @@ async fn update_registry_handler(
 ) -> Result<Json<crate::domain::Registry>, ApiError> {
     ensure_role(&state, &principal, project_id, Role::Admin)?;
     let existing = state
-        .store
+        .registries
         .registry(registry_id)?
         .ok_or_else(|| ApiError::NotFound("registry not found".into()))?;
     if existing.project_id != project_id {
@@ -695,7 +732,7 @@ async fn update_registry_handler(
     )
     .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     updated.id = registry_id;
-    state.store.update_registry(&updated)?;
+    state.registries.update_registry(&updated)?;
     Ok(Json(updated))
 }
 
@@ -706,13 +743,13 @@ async fn delete_registry_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     ensure_role(&state, &principal, project_id, Role::Admin)?;
     let registry = state
-        .store
+        .registries
         .registry(registry_id)?
         .ok_or_else(|| ApiError::NotFound("registry not found".into()))?;
     if registry.project_id != project_id {
         return Err(ApiError::NotFound("registry not found".into()));
     }
-    state.store.delete_registry(registry_id)?;
+    state.registries.delete_registry(registry_id)?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -725,7 +762,7 @@ async fn put_credential(
     let secret_ref = SecretRef::parse(input.secret_ref).map_err(ApiError::InvalidSecretRef)?;
     Ok(Json(
         state
-            .store
+            .credentials
             .put_credential(input.name, input.kind, secret_ref)?,
     ))
 }
@@ -735,11 +772,11 @@ async fn list_service_deployments(
     principal: Principal,
     axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Vec<crate::domain::Deployment>>, ApiError> {
-    let Some(service) = state.store.get_service(service_id)? else {
+    let Some(service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
     ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
-    Ok(Json(state.store.list_deployments(service_id)?))
+    Ok(Json(state.deployments.list_deployments(service_id)?))
 }
 
 async fn create_service_domain(
@@ -749,7 +786,7 @@ async fn create_service_domain(
     Json(body): Json<CreateDomainBody>,
 ) -> Result<(StatusCode, Json<ServiceDomain>), ApiError> {
     let svc = state
-        .store
+        .services
         .get_service(service_id)?
         .ok_or_else(|| ApiError::NotFound("service not found".into()))?;
     ensure_role(&state, &principal, svc.project_id, Role::Operator)?;
@@ -770,13 +807,13 @@ async fn create_service_domain(
         last_error: None,
         created_at: now,
     };
-    state.store.put_service_domain(&d).map_err(|e| match e {
-        StateError::Sqlite(rusqlite::Error::SqliteFailure(err, _))
+    state.domains.put_service_domain(&d).map_err(|e| match e {
+        RepoError::Sqlite(rusqlite::Error::SqliteFailure(err, _))
             if err.code == rusqlite::ErrorCode::ConstraintViolation =>
         {
             ApiError::Conflict("hostname already in use".into())
         }
-        other => ApiError::State(other),
+        other => ApiError::Repo(other),
     })?;
     Ok((StatusCode::CREATED, Json(d)))
 }
@@ -787,12 +824,12 @@ async fn list_service_domains(
     axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Vec<ServiceDomain>>, ApiError> {
     let svc = state
-        .store
+        .services
         .get_service(service_id)?
         .ok_or_else(|| ApiError::NotFound("service not found".into()))?;
     ensure_role(&state, &principal, svc.project_id, Role::Viewer)?;
     Ok(Json(
-        state.store.list_service_domains_by_service(service_id)?,
+        state.domains.list_service_domains_by_service(service_id)?,
     ))
 }
 
@@ -802,13 +839,13 @@ async fn verify_service_domain(
     axum::extract::Path((service_id, domain_id)): axum::extract::Path<(uuid::Uuid, uuid::Uuid)>,
 ) -> Result<Json<ServiceDomain>, ApiError> {
     let svc = state
-        .store
+        .services
         .get_service(service_id)?
         .ok_or_else(|| ApiError::NotFound("service not found".into()))?;
     ensure_role(&state, &principal, svc.project_id, Role::Operator)?;
 
     let d = state
-        .store
+        .domains
         .get_service_domain(domain_id)?
         .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
     if d.service_id != service_id {
@@ -842,23 +879,23 @@ async fn verify_service_domain(
 
     let updated = match result {
         Ok(()) => {
-            state.store.update_service_domain_status(
+            state.domains.update_service_domain_status(
                 d.id,
                 DomainStatus::Verified,
                 Some(chrono::Utc::now()),
                 None,
             )?;
             crate::deploy::rerender_traefik(&state)?;
-            state.store.get_service_domain(d.id)?.unwrap()
+            state.domains.get_service_domain(d.id)?.unwrap()
         }
         Err(e) => {
-            state.store.update_service_domain_status(
+            state.domains.update_service_domain_status(
                 d.id,
                 DomainStatus::Failed,
                 None,
                 Some(e.to_string()),
             )?;
-            state.store.get_service_domain(d.id)?.unwrap()
+            state.domains.get_service_domain(d.id)?.unwrap()
         }
     };
     Ok(Json(updated))
@@ -870,20 +907,20 @@ async fn delete_service_domain_handler(
     axum::extract::Path((service_id, domain_id)): axum::extract::Path<(uuid::Uuid, uuid::Uuid)>,
 ) -> Result<StatusCode, ApiError> {
     let svc = state
-        .store
+        .services
         .get_service(service_id)?
         .ok_or_else(|| ApiError::NotFound("service not found".into()))?;
     ensure_role(&state, &principal, svc.project_id, Role::Operator)?;
 
     let d = state
-        .store
+        .domains
         .get_service_domain(domain_id)?
         .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
     if d.service_id != service_id {
         return Err(ApiError::NotFound("domain not found".into()));
     }
     let was_verified = d.status == DomainStatus::Verified;
-    state.store.delete_service_domain(domain_id)?;
+    state.domains.delete_service_domain(domain_id)?;
     if was_verified {
         crate::deploy::rerender_traefik(&state)?;
     }
@@ -895,14 +932,14 @@ async fn lifecycle_command(
     principal: Principal,
     axum::extract::Path((service_id, action)): axum::extract::Path<(uuid::Uuid, String)>,
 ) -> Result<(StatusCode, Json<LifecycleResponse>), ApiError> {
-    let Some(service) = state.store.get_service(service_id)? else {
+    let Some(service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
     ensure_role(&state, &principal, service.project_id, Role::Operator)?;
     match action.as_str() {
         "stop" => {
             let coordinator = DeploymentCoordinator::new_with_shared_routing(
-                state.store.clone(),
+                state.deployment_repos(),
                 state.runtime.clone(),
                 state.health.clone(),
                 state.bridge_allocator.clone(),
@@ -928,7 +965,7 @@ async fn service_logs(
     principal: Principal,
     axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    let Some(service) = state.store.get_service(service_id)? else {
+    let Some(service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
     ensure_role(&state, &principal, service.project_id, Role::Operator)?;
@@ -945,11 +982,11 @@ async fn service_metrics(
     principal: Principal,
     axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Vec<crate::metrics::MetricSnapshot>>, ApiError> {
-    let Some(service) = state.store.get_service(service_id)? else {
+    let Some(service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
     ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
-    let Some(deployment_id) = state.store.promoted_deployment(service_id)? else {
+    let Some(deployment_id) = state.deployments.promoted_deployment(service_id)? else {
         return Ok(Json(Vec::new()));
     };
     let reader = CgroupMetricsReader::new(state.config.cgroup_root.clone());
@@ -973,7 +1010,12 @@ async fn require_auth(
         .map(|s| s.to_string());
 
     if let Some(token) = token
-        && let Some(principal) = resolve_auth(&state.store, &token, &state.config.admin_token)
+        && let Some(principal) = resolve_auth(
+            state.users.as_ref(),
+            state.tokens.as_ref(),
+            &token,
+            &state.config.admin_token,
+        )
     {
         let mut request = request;
         request.extensions_mut().insert(principal);
@@ -997,10 +1039,10 @@ async fn login_handler(
         return Err(ApiError::BadRequest("already authenticated".to_string()));
     }
     let user = state
-        .store
+        .users
         .verify_login(&input.username, &input.password)
         .map_err(|_| ApiError::Unauthorized("invalid credentials".to_string()))?;
-    let session = state.store.create_session(user.id, 24)?;
+    let session = state.users.create_session(user.id, 24)?;
     Ok(Json(LoginResult {
         token: session.token,
         expires_at: session.expires_at,
@@ -1018,7 +1060,7 @@ async fn logout_handler(
         .and_then(|v| v.strip_prefix("Bearer "));
     if let Some(t) = token {
         let th = crate::auth::hash_token(t);
-        let _ = state.store.delete_session(&th);
+        let _ = state.users.delete_session(&th);
     }
     Ok((
         StatusCode::OK,
@@ -1041,10 +1083,10 @@ async fn me_handler(
         .user_id
         .ok_or(ApiError::Conflict("no user".to_string()))?;
     let user = state
-        .store
+        .users
         .get_user(user_id)?
         .ok_or_else(|| ApiError::NotFound("user not found".to_string()))?;
-    let memberships = state.store.list_memberships_for_user(user_id)?;
+    let memberships = state.users.list_memberships_for_user(user_id)?;
     Ok(Json(Me {
         principal: PrincipalView::User { user },
         is_super_admin: principal.is_super_admin,
@@ -1059,7 +1101,7 @@ async fn list_users(
     if !principal.is_super_admin {
         return Err(ApiError::Forbidden("super admin required".to_string()));
     }
-    Ok(Json(state.store.list_users()?))
+    Ok(Json(state.users.list_users()?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1080,7 +1122,7 @@ async fn create_user_handler(
     }
     let hash = crate::auth::hash_password(&input.password)?;
     state
-        .store
+        .users
         .create_user(&input.username, &hash, input.is_super_admin)?;
     Ok((
         StatusCode::CREATED,
@@ -1096,7 +1138,7 @@ async fn delete_user_handler(
     if !principal.is_super_admin {
         return Err(ApiError::Forbidden("super admin required".to_string()));
     }
-    state.store.delete_user(user_id)?;
+    state.users.delete_user(user_id)?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -1112,7 +1154,7 @@ async fn list_api_tokens_handler(
     let user_id = principal
         .user_id
         .ok_or(ApiError::Forbidden("real user required".to_string()))?;
-    Ok(Json(state.store.list_api_tokens(user_id)?))
+    Ok(Json(state.tokens.list_api_tokens(user_id)?))
 }
 
 async fn create_api_token_handler(
@@ -1123,7 +1165,7 @@ async fn create_api_token_handler(
     let user_id = principal
         .user_id
         .ok_or(ApiError::Forbidden("real user required".to_string()))?;
-    let api_token = state.store.create_api_token(user_id, &input.name)?;
+    let api_token = state.tokens.create_api_token(user_id, &input.name)?;
     Ok((
         StatusCode::CREATED,
         Json(
@@ -1140,12 +1182,12 @@ async fn revoke_api_token_handler(
     let user_id = principal
         .user_id
         .ok_or(ApiError::Forbidden("real user required".to_string()))?;
-    let tokens = state.store.list_api_tokens(user_id)?;
+    let tokens = state.tokens.list_api_tokens(user_id)?;
     let belongs = tokens.iter().any(|t| t.id == token_id);
     if !belongs {
         return Err(ApiError::NotFound("token not found".to_string()));
     }
-    state.store.revoke_api_token(token_id)?;
+    state.tokens.revoke_api_token(token_id)?;
     Ok(Json(serde_json::json!({"revoked": true})))
 }
 
@@ -1159,7 +1201,7 @@ async fn list_jobs(
         .and_then(|id| uuid::Uuid::parse_str(id).ok())
         .ok_or_else(|| ApiError::BadRequest("project_id query parameter is required".into()))?;
     ensure_role(&state, &principal, project_id, Role::Viewer)?;
-    Ok(Json(state.store.list_jobs(project_id)?))
+    Ok(Json(state.jobs.list_jobs(project_id)?))
 }
 
 async fn create_job(
@@ -1168,7 +1210,7 @@ async fn create_job(
     Json(job): Json<Job>,
 ) -> Result<(StatusCode, Json<Job>), ApiError> {
     ensure_role(&state, &principal, job.project_id, Role::Operator)?;
-    let stored = state.store.put_job(job)?;
+    let stored = state.jobs.put_job(job)?;
     Ok((StatusCode::CREATED, Json(stored)))
 }
 
@@ -1178,7 +1220,7 @@ async fn get_job(
     axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Job>, ApiError> {
     let job = state
-        .store
+        .jobs
         .get_job(job_id)?
         .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
     ensure_role(&state, &principal, job.project_id, Role::Viewer)?;
@@ -1191,11 +1233,11 @@ async fn delete_job(
     axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let job = state
-        .store
+        .jobs
         .get_job(job_id)?
         .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
     ensure_role(&state, &principal, job.project_id, Role::Operator)?;
-    state.store.delete_job(job_id)?;
+    state.jobs.delete_job(job_id)?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -1205,16 +1247,16 @@ async fn run_job(
     axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<(StatusCode, Json<JobRun>), ApiError> {
     let job = state
-        .store
+        .jobs
         .get_job(job_id)?
         .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
     ensure_role(&state, &principal, job.project_id, Role::Operator)?;
-    if state.store.active_run(job_id)?.is_some() {
+    if state.jobs.active_run(job_id)?.is_some() {
         return Err(ApiError::Conflict(
             "job already has an active run".to_string(),
         ));
     }
-    let run = state.store.create_job_run(job_id)?;
+    let run = state.jobs.create_job_run(job_id)?;
     Ok((StatusCode::ACCEPTED, Json(run)))
 }
 
@@ -1224,11 +1266,11 @@ async fn list_job_runs(
     axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Vec<JobRun>>, ApiError> {
     let job = state
-        .store
+        .jobs
         .get_job(job_id)?
         .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
     ensure_role(&state, &principal, job.project_id, Role::Viewer)?;
-    Ok(Json(state.store.list_job_runs(job_id)?))
+    Ok(Json(state.jobs.list_job_runs(job_id)?))
 }
 
 #[derive(Debug, Serialize)]
@@ -1252,6 +1294,7 @@ struct LifecycleResponse {
 #[derive(Debug)]
 pub enum ApiError {
     State(crate::state::StateError),
+    Repo(RepoError),
     Auth(crate::auth::AuthError),
     InvalidSecretRef(crate::secrets::SecretRefError),
     BadRequest(String),
@@ -1283,6 +1326,12 @@ impl From<crate::auth::AuthError> for ApiError {
 impl From<crate::state::StateError> for ApiError {
     fn from(value: crate::state::StateError) -> Self {
         Self::State(value)
+    }
+}
+
+impl From<RepoError> for ApiError {
+    fn from(value: RepoError) -> Self {
+        Self::Repo(value)
     }
 }
 
@@ -1326,6 +1375,18 @@ impl IntoResponse for ApiError {
                 crate::state::StateError::LastSuperAdmin => {
                     (StatusCode::CONFLICT, error.to_string())
                 }
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                ),
+            },
+            Self::Repo(error) => match &error {
+                RepoError::ProjectNotEmpty => (StatusCode::CONFLICT, error.to_string()),
+                RepoError::UnknownProject => (StatusCode::NOT_FOUND, error.to_string()),
+                RepoError::RegistryNotFound => (StatusCode::NOT_FOUND, error.to_string()),
+                RepoError::RegistryInUse => (StatusCode::CONFLICT, error.to_string()),
+                RepoError::InvalidCredentials => (StatusCode::UNAUTHORIZED, error.to_string()),
+                RepoError::LastSuperAdmin => (StatusCode::CONFLICT, error.to_string()),
                 _ => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal server error".to_string(),

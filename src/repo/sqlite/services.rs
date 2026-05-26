@@ -4,8 +4,6 @@
 //! pre-Task-10 facade) and `SqliteServiceRepo` (the trait impl introduced by
 //! Task 9) delegate to those functions so bodies are never duplicated.
 
-use std::sync::Arc;
-
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
@@ -87,15 +85,6 @@ pub struct SqliteServiceRepo {
 impl SqliteServiceRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
-    }
-
-    /// Adapter used during Task 10 wiring; deleted after step 10.6.
-    pub fn from_store(store: &SqliteStore) -> Self {
-        Self {
-            pool: SqlitePool {
-                inner: Arc::clone(&store.connection),
-            },
-        }
     }
 }
 

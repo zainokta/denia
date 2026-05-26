@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
     let scheduler_task = tokio::spawn(run_until_shutdown(scheduler.clone(), shutdown_rx));
 
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
-    let app = build_router(AppState::new(config, store));
+    let app = build_router(AppState::new(config, &store));
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
