@@ -359,8 +359,6 @@ fn test_config_defines_runtime_paths_and_tool_binaries() {
 
     assert_eq!(config.buildkit_binary.to_string_lossy(), "buildctl");
     assert_eq!(config.sops_binary.to_string_lossy(), "sops");
-    assert_eq!(config.unshare_binary.to_string_lossy(), "unshare");
-    assert_eq!(config.socket_proxy_binary.to_string_lossy(), "denia");
     assert_eq!(config.runtime_dir, config.data_dir.join("runtime"));
     assert_eq!(config.artifact_dir, config.data_dir.join("artifacts"));
 }

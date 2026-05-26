@@ -699,6 +699,30 @@ mod tests {
             neither.validate().unwrap_err(),
             DomainError::RegistrySourceMissing
         );
+
+        // partial: only registry_id set -> missing
+        let only_registry_id = ExternalImageSource {
+            image: String::new(),
+            credential: None,
+            registry_id: Some(Uuid::now_v7()),
+            image_ref: None,
+        };
+        assert_eq!(
+            only_registry_id.validate().unwrap_err(),
+            DomainError::RegistrySourceMissing
+        );
+
+        // partial: only image_ref set -> missing
+        let only_image_ref = ExternalImageSource {
+            image: String::new(),
+            credential: None,
+            registry_id: None,
+            image_ref: Some("library/redis:7".into()),
+        };
+        assert_eq!(
+            only_image_ref.validate().unwrap_err(),
+            DomainError::RegistrySourceMissing
+        );
     }
 
     #[test]
