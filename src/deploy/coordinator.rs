@@ -4,59 +4,25 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use thiserror::Error;
-
-use crate::{
-    artifacts::acquirer::{ArtifactAcquireError, ArtifactAcquireRequest, ArtifactAcquirer},
-    artifacts::{ArtifactRecord, ArtifactSource},
-    bridge::{BridgeAllocator, BridgeError, BridgeManager},
-    command::CommandRunner,
-    domain::ServiceSource,
-    domain::{Deployment, DeploymentRequest, DeploymentStatus, RuntimeStartRequest, ServiceConfig},
-    health::{HealthChecker, HealthError},
-    oci::RegistryAuth,
-    runtime::{Runtime, RuntimeError},
-    state::{SqliteStore, StateError},
-    traefik::{IngressRenderOptions, RouteSpec, TraefikError, render_file_provider_config},
+use crate::artifacts::acquirer::{ArtifactAcquireRequest, ArtifactAcquirer};
+use crate::artifacts::{ArtifactRecord, ArtifactSource};
+use crate::bridge::{BridgeAllocator, BridgeManager};
+use crate::command::CommandRunner;
+use crate::deploy::error::DeployError;
+use crate::deploy::routes::{SharedRoutes, default_ingress_options};
+use crate::domain::ServiceSource;
+use crate::domain::{
+    Deployment, DeploymentRequest, DeploymentStatus, RuntimeStartRequest, ServiceConfig,
 };
-
-pub type SharedRoutes = Arc<Mutex<BTreeMap<String, RouteSpec>>>;
+use crate::health::HealthChecker;
+use crate::oci::RegistryAuth;
+use crate::runtime::Runtime;
+use crate::state::{SqliteStore, StateError};
+use crate::traefik::{IngressRenderOptions, RouteSpec, render_file_provider_config};
 
 pub struct DeploymentPlan {
     pub service: ServiceConfig,
     pub artifact: ArtifactRecord,
-}
-
-#[derive(Debug, Error)]
-pub enum DeployError {
-    #[error("state error: {0}")]
-    State(#[from] StateError),
-    #[error("runtime error: {0}")]
-    Runtime(#[from] RuntimeError),
-    #[error("health error: {0}")]
-    Health(#[from] HealthError),
-    #[error("traefik error: {0}")]
-    Traefik(#[from] TraefikError),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("bridge allocator lock poisoned")]
-    BridgeLockPoisoned,
-    #[error("bridge error: {0}")]
-    Bridge(#[from] BridgeError),
-    #[error("bridge port pool exhausted")]
-    BridgePortExhausted,
-    #[error("service does not use an external image source")]
-    UnsupportedServiceSource,
-    #[error("service does not use a git source")]
-    UnsupportedGitSource,
-    #[error("artifact acquisition error: {0}")]
-    ArtifactAcquire(#[from] ArtifactAcquireError),
-    #[error("registry not found")]
-    RegistryNotFound,
-    #[error("secret decrypt: {0}")]
-    SecretDecrypt(#[from] crate::secrets::SecretError),
-    #[error("registry auth resolution: {0}")]
-    RegistryAuthResolution(crate::oci::OciError),
 }
 
 pub struct DeploymentCoordinator<R, H> {
@@ -351,15 +317,6 @@ where
     }
 }
 
-pub fn default_ingress_options() -> IngressRenderOptions {
-    IngressRenderOptions {
-        acme_resolver: String::new(),
-        control_domain: None,
-        control_tls: false,
-        control_backend_addr: String::new(),
-    }
-}
-
 fn deployment_request(service: &ServiceConfig, artifact: &ArtifactRecord) -> DeploymentRequest {
     match &artifact.source {
         ArtifactSource::ExternalRegistry { image } => {
@@ -373,40 +330,4 @@ fn deployment_request(service: &ServiceConfig, artifact: &ArtifactRecord) -> Dep
             git_ref: git_ref.clone(),
         },
     }
-}
-
-pub fn rerender_traefik(state: &crate::app::AppState) -> Result<(), DeployError> {
-    let services = state.store.list_services()?;
-    let mut routes_guard = state
-        .routes
-        .lock()
-        .map_err(|_| DeployError::BridgeLockPoisoned)?;
-    let existing = routes_guard.clone();
-    routes_guard.clear();
-    for svc in services {
-        let hostnames = state.store.list_verified_hostnames(svc.id)?;
-        if hostnames.is_empty() {
-            continue;
-        }
-        let Some(prev) = existing.get(&svc.name) else {
-            // Service has never been routed (no bridge_port known). Stays unrouted.
-            continue;
-        };
-        routes_guard.insert(
-            svc.name.clone(),
-            RouteSpec {
-                route_key: prev.route_key.clone(),
-                service_name: svc.name.clone(),
-                domains: hostnames,
-                bridge_port: prev.bridge_port,
-                tls: svc.tls_enabled,
-            },
-        );
-    }
-    let yaml = render_file_provider_config(
-        &routes_guard.values().cloned().collect::<Vec<_>>(),
-        &state.ingress_options,
-    )?;
-    std::fs::write(&state.config.traefik_dynamic_config_path, yaml)?;
-    Ok(())
 }
