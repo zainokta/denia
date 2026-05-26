@@ -1,4 +1,7 @@
+use std::io::Read;
 use std::path::Path;
+
+use sha2::{Digest, Sha256};
 
 use super::{LayerBlob, LayerCompression, OciError, PulledImage};
 
@@ -65,13 +68,12 @@ pub fn read_oci_layout(layout_dir: &Path) -> Result<PulledImage, OciError> {
             };
 
             let blob_path = layout_dir.join("blobs").join("sha256").join(layer_hex);
-            let data = std::fs::read(&blob_path)
-                .map_err(|e| OciError::Layout(format!("cannot read layer blob: {e}")))?;
+            verify_blob_digest(&blob_path, layer_digest)?;
 
             layers.push(LayerBlob {
                 digest: layer_digest.to_string(),
                 compression,
-                data,
+                path: blob_path,
             });
         }
     }
@@ -80,5 +82,28 @@ pub fn read_oci_layout(layout_dir: &Path) -> Result<PulledImage, OciError> {
         digest: digest.to_string(),
         config,
         layers,
+        _staging: None,
     })
+}
+
+fn verify_blob_digest(path: &Path, expected: &str) -> Result<(), OciError> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| OciError::Layout(format!("cannot read layer blob: {e}")))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(OciError::Io)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let actual = format!("sha256:{}", hex::encode(hasher.finalize()));
+    if actual != expected {
+        return Err(OciError::DigestMismatch {
+            expected: expected.to_string(),
+            actual,
+        });
+    }
+    Ok(())
 }

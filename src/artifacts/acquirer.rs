@@ -78,9 +78,10 @@ pub struct ArtifactAcquirer {
 
 impl ArtifactAcquirer {
     pub fn new(config: AppConfig) -> Self {
+        let staging_dir = config.artifact_dir.clone();
         Self {
             config,
-            puller: Arc::new(RegistryImagePuller::new()),
+            puller: Arc::new(RegistryImagePuller::new(staging_dir)),
             unpacker: Arc::new(TarRootfsUnpacker::new()),
         }
     }

@@ -39,14 +39,16 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
     const MAX_SINGLE_FILE_BYTES: u64 = 2u64 * 1024 * 1024 * 1024;
     const MAX_FILE_COUNT: u64 = 1_000_000;
 
+    let file = std::fs::File::open(&layer.path)?;
+    let buf = std::io::BufReader::new(file);
     let reader: Box<dyn Read> = match layer.compression {
-        LayerCompression::Gzip => Box::new(GzDecoder::new(&layer.data[..])),
+        LayerCompression::Gzip => Box::new(GzDecoder::new(buf)),
         LayerCompression::Zstd => {
-            let decoder = zstd::stream::read::Decoder::new(&layer.data[..])
+            let decoder = zstd::stream::read::Decoder::new(buf)
                 .map_err(|e| OciError::Io(std::io::Error::other(e)))?;
             Box::new(decoder)
         }
-        LayerCompression::None => Box::new(&layer.data[..]),
+        LayerCompression::None => Box::new(buf),
     };
 
     let mut archive = Archive::new(reader);
@@ -227,7 +229,7 @@ mod tests {
     use std::io::Write;
     use tar::Builder;
 
-    fn gz_layer(entries: &[(&str, &[u8])]) -> LayerBlob {
+    fn gz_layer(dir: &Path, name: &str, entries: &[(&str, &[u8])]) -> LayerBlob {
         let mut tar = Builder::new(Vec::new());
         for (path, data) in entries {
             let mut h = tar::Header::new_gnu();
@@ -239,10 +241,12 @@ mod tests {
         let raw = tar.into_inner().unwrap();
         let mut enc = GzEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(&raw).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, enc.finish().unwrap()).unwrap();
         LayerBlob {
             digest: "sha256:test".into(),
             compression: LayerCompression::Gzip,
-            data: enc.finish().unwrap(),
+            path,
         }
     }
 
@@ -250,7 +254,7 @@ mod tests {
     fn single_gzip_layer_extracts() {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs");
-        let layer = gz_layer(&[("hello.txt", b"world")]);
+        let layer = gz_layer(dir.path(), "l0.tar.gz", &[("hello.txt", b"world")]);
         let unpacker = TarRootfsUnpacker::new();
         unpacker.unpack(&[layer], &rootfs).unwrap();
         let content = fs::read_to_string(rootfs.join("hello.txt")).unwrap();
@@ -261,8 +265,8 @@ mod tests {
     fn second_layer_overwrites() {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs");
-        let l1 = gz_layer(&[("a.txt", b"v1")]);
-        let l2 = gz_layer(&[("a.txt", b"v2")]);
+        let l1 = gz_layer(dir.path(), "l1.tar.gz", &[("a.txt", b"v1")]);
+        let l2 = gz_layer(dir.path(), "l2.tar.gz", &[("a.txt", b"v2")]);
         TarRootfsUnpacker::new().unpack(&[l1, l2], &rootfs).unwrap();
         assert_eq!(fs::read_to_string(rootfs.join("a.txt")).unwrap(), "v2");
     }
@@ -271,8 +275,8 @@ mod tests {
     fn whiteout_deletes_file() {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs");
-        let l1 = gz_layer(&[("foo", b"x")]);
-        let l2 = gz_layer(&[(".wh.foo", b"")]);
+        let l1 = gz_layer(dir.path(), "l1.tar.gz", &[("foo", b"x")]);
+        let l2 = gz_layer(dir.path(), "l2.tar.gz", &[(".wh.foo", b"")]);
         TarRootfsUnpacker::new().unpack(&[l1, l2], &rootfs).unwrap();
         assert!(!rootfs.join("foo").exists());
     }
@@ -281,8 +285,12 @@ mod tests {
     fn opaque_dir_clears_prior() {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs");
-        let l1 = gz_layer(&[("d/old.txt", b"x")]);
-        let l2 = gz_layer(&[("d/.wh..wh..opq", b""), ("d/new.txt", b"y")]);
+        let l1 = gz_layer(dir.path(), "l1.tar.gz", &[("d/old.txt", b"x")]);
+        let l2 = gz_layer(
+            dir.path(),
+            "l2.tar.gz",
+            &[("d/.wh..wh..opq", b""), ("d/new.txt", b"y")],
+        );
         TarRootfsUnpacker::new().unpack(&[l1, l2], &rootfs).unwrap();
         assert!(!rootfs.join("d/old.txt").exists());
         assert_eq!(fs::read_to_string(rootfs.join("d/new.txt")).unwrap(), "y");
