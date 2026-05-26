@@ -36,20 +36,21 @@ src/
   api/
     mod.rs                   // pub use sub-router fns
     error.rs                 // ApiError + IntoResponse + From<*Error> conversions
-    auth.rs                  // /v1/auth/* router + handlers
-    services.rs              // /v1/projects/:p/services/* router + handlers
-    deployments.rs           // /v1/projects/:p/deployments/*
-    workloads.rs             // /v1/projects/:p/workloads/*
-    projects.rs              // /v1/projects + /v1/projects/:p
-    members.rs               // /v1/projects/:p/members/*
-    jobs.rs                  // /v1/projects/:p/jobs/*
-    secrets.rs               // /v1/projects/:p/secrets/*
-    tokens.rs                // /v1/tokens/*
-    observability.rs         // /v1/node, /v1/projects/:p/access-log, /v1/projects/:p/logs/*
-    ingress.rs               // /v1/projects/:p/routes/* inspection
-    domains.rs               // /v1/projects/:p/service_domains/* (authed) + pub challenge_handler (ADR-013)
-    registries.rs            // /v1/projects/:p/registries/* (authed, admin RBAC, ADR-014)
-    health.rs                // /healthz (or keep in app.rs)
+    auth.rs                  // /auth/login (public_router) + /auth/logout, /me (router)
+    services.rs              // /services, /services/{id}/logs|metrics|{action}
+    deployments.rs           // /deployments, /services/{id}/deployments
+    credentials.rs           // /credentials/git, /credentials/registry (delivered; not a separate "secrets" file)
+    users.rs                 // /users, /users/{id}
+    projects.rs              // /projects, /projects/{id}
+    members.rs               // /projects/{id}/members/*
+    jobs.rs                  // /jobs, /jobs/{id}, /jobs/{id}/run, /jobs/{id}/runs
+    tokens.rs                // /api-tokens, /api-tokens/{id}
+    observability.rs         // /metrics/node, /workloads, /services/{id}/requests
+    ingress.rs               // /ingress/routes, /ingress/config
+    domains.rs               // /services/{id}/domains/* (authed) + pub challenge_handler (ADR-013)
+    registries.rs            // /projects/{id}/registries/* (authed, admin RBAC, ADR-014)
+    health.rs                // pub healthz (mounted at root by build_router)
+    // NOTE: no separate workloads.rs (folded into observability.rs) or secrets.rs (folded into credentials.rs) as delivered.
   domain/
     mod.rs                   // pub use service::*; pub use deployment::*; ...
     error.rs                 // DomainError

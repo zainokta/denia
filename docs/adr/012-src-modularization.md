@@ -1,7 +1,7 @@
 ## ADR-012: src/ Modularization and Per-Aggregate Repositories
 
-- **Status**: Proposed
-- **Date**: 2026-05-25
+- **Status**: Accepted
+- **Date**: 2026-05-25 (implemented 2026-05-27)
 
 ## Context
 
@@ -32,7 +32,7 @@ Folder-modules already exist for `artifacts/`, `oci/`, and `syscall/` — the pa
 5. Split `domain.rs` into `src/domain/{service,deployment,project,user,credential,job,error}.rs` with full `pub use` re-exports from `domain/mod.rs`.
 6. Split `runtime.rs` into `src/runtime/{runtime_trait,linux,fake,plan,validation,fs_helpers,error}.rs`.
 7. Group ingress (`traefik`, `bridge`, `socket_proxy`) under `src/ingress/`; observability (`metrics`, `node_metrics`, `access_log`, `logs`) under `src/observability/`.
-8. Centralize `ApiError` plus `From<RepoError | DomainError | RuntimeError | DeployError>` conversions in `src/api/error.rs`.
+8. Centralize `ApiError` plus its `From` conversions in `src/api/error.rs`. As delivered, the conversions are `From<AuthError | StateError | RepoError | DeployError | MetricsError | NodeMetricsError>` (handlers surface those error types; `DomainError`/`RuntimeError` never reach the HTTP boundary directly, so no conversions for them were needed).
 9. Preserve every previously-public symbol via `pub use` in `mod.rs` files. Zero call-site churn outside `app.rs` and the `AppState` rewire commit.
 10. The API surface (`/v1/*` paths and bodies), DB schema, SOPS layout, Traefik file-provider contract, and SPA embed (ADR-004) are unchanged.
 
