@@ -35,6 +35,7 @@ Guidelines for AI agents working on Denia, a Rust backend PaaS that runs workloa
 - Return typed errors at boundaries; avoid panics for expected failures.
 - Keep async I/O in API/runtime boundaries and isolate blocking filesystem or SQLite work.
 - Add tests before behavior changes.
+- All UUIDs MUST be UUIDv7. Generate with `uuid::Uuid::now_v7()`. Never call `Uuid::new_v4`, `Uuid::new_v1`, or any non-v7 constructor for IDs that are persisted, returned over the API, or used as keys. In `Cargo.toml`, the `uuid` crate must enable only the `v7` (plus `serde`) features — do not add `v4`/`v1`/`v3`/`v5`. Reason: time-ordered IDs preserve SQLite B-tree index locality and give deterministic ordering for deployments, artifacts, and events.
 
 ## Project Conventions
 
