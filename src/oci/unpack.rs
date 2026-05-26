@@ -18,6 +18,12 @@ impl TarRootfsUnpacker {
     }
 }
 
+impl Default for TarRootfsUnpacker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl super::OciRootfsUnpacker for TarRootfsUnpacker {
     fn unpack(&self, layers: &[LayerBlob], rootfs_dir: &Path) -> Result<(), OciError> {
         fs::create_dir_all(rootfs_dir)?;
@@ -54,17 +60,18 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
             .unwrap_or("");
 
         if file_name == ".wh..wh..opq" {
-            if let Some(parent) = safe_path.parent() {
-                if parent.starts_with(rootfs_dir) && parent.exists() {
-                    for child in fs::read_dir(parent)? {
-                        let child = child?;
-                        let child_path = child.path();
-                        if child_path != safe_path {
-                            if child_path.is_dir() {
-                                let _ = fs::remove_dir_all(&child_path);
-                            } else {
-                                let _ = fs::remove_file(&child_path);
-                            }
+            if let Some(parent) = safe_path.parent()
+                && parent.starts_with(rootfs_dir)
+                && parent.exists()
+            {
+                for child in fs::read_dir(parent)? {
+                    let child = child?;
+                    let child_path = child.path();
+                    if child_path != safe_path {
+                        if child_path.is_dir() {
+                            let _ = fs::remove_dir_all(&child_path);
+                        } else {
+                            let _ = fs::remove_file(&child_path);
                         }
                     }
                 }
