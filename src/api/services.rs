@@ -147,7 +147,7 @@ async fn service_logs_stream(
     tokio::spawn(async move {
         let mut tailer = LogTailer::new(&log_path);
 
-        if let Ok(lines) = tailer.backlog(200) {
+        if let Ok(lines) = tokio::task::block_in_place(|| tailer.backlog(200)) {
             for line in lines {
                 if tx.send(Ok(Event::default().data(line))).await.is_err() {
                     return;
@@ -158,7 +158,8 @@ async fn service_logs_stream(
         let mut interval = tokio::time::interval(Duration::from_millis(300));
         loop {
             interval.tick().await;
-            match tailer.poll() {
+            let result = tokio::task::block_in_place(|| tailer.poll());
+            match result {
                 Ok(lines) => {
                     for line in lines {
                         if tx.send(Ok(Event::default().data(line))).await.is_err() {
@@ -260,7 +261,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn log_stream_emits_backlog_then_live() {
         use crate::domain::{
             ExternalImageSource, HealthCheck, Project, ServiceConfig, ServiceSource,
