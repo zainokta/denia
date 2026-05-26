@@ -505,6 +505,339 @@ async fn deployment_endpoint_rejects_unknown_service() {
     assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
 }
 
+// --- deploy_external_image_source auth resolution tests ---
+
+#[derive(Default, Clone)]
+struct RecordingPuller {
+    auth: std::sync::Arc<std::sync::Mutex<Option<denia::oci::RegistryAuth>>>,
+    image: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+#[async_trait::async_trait]
+impl denia::oci::OciImagePuller for RecordingPuller {
+    async fn pull(
+        &self,
+        image: &str,
+        auth: denia::oci::RegistryAuth,
+    ) -> Result<denia::oci::PulledImage, denia::oci::OciError> {
+        *self.image.lock().unwrap() = Some(image.to_string());
+        *self.auth.lock().unwrap() = Some(auth);
+        Ok(denia::oci::PulledImage {
+            digest: "sha256:recorded".to_string(),
+            config: denia::oci::config::OciImageConfig {
+                config: Some(denia::oci::config::OciImageProcessConfig {
+                    entrypoint: Some(vec!["/app".to_string()]),
+                    cmd: None,
+                    env_vars: None,
+                    working_dir: None,
+                }),
+                rootfs: None,
+            },
+            layers: vec![],
+        })
+    }
+    async fn read_layout(
+        &self,
+        _dir: &std::path::Path,
+    ) -> Result<denia::oci::PulledImage, denia::oci::OciError> {
+        unreachable!()
+    }
+}
+
+struct NoopUnpacker;
+impl denia::oci::OciRootfsUnpacker for NoopUnpacker {
+    fn unpack(
+        &self,
+        _layers: &[denia::oci::LayerBlob],
+        rootfs: &std::path::Path,
+    ) -> Result<(), denia::oci::OciError> {
+        std::fs::create_dir_all(rootfs).map_err(denia::oci::OciError::Io)
+    }
+}
+
+fn deploy_test_coordinator(
+    store: SqliteStore,
+) -> denia::deploy::DeploymentCoordinator<
+    denia::runtime::FakeRuntime,
+    denia::health::FakeHealthChecker,
+> {
+    denia::deploy::DeploymentCoordinator::new(
+        store,
+        denia::runtime::FakeRuntime::default(),
+        denia::health::FakeHealthChecker::healthy(),
+    )
+}
+
+fn deploy_test_acquirer(
+    tmp: &std::path::Path,
+    puller: std::sync::Arc<RecordingPuller>,
+) -> (AppConfig, ArtifactAcquirer) {
+    let mut config = AppConfig::for_test("test-token");
+    config.artifact_dir = tmp.to_path_buf();
+    let acquirer =
+        ArtifactAcquirer::with_traits(config.clone(), puller, std::sync::Arc::new(NoopUnpacker));
+    (config, acquirer)
+}
+
+#[tokio::test]
+async fn deploy_external_image_resolves_registry_auth() {
+    use denia::domain::{Project, Registry, RegistryAuthKind};
+
+    let store = SqliteStore::open_in_memory().expect("sqlite");
+    store.migrate().expect("migrate");
+    let project = store
+        .put_project(Project::new("p", None).expect("project"))
+        .expect("stored project");
+    let cred_ref = SecretRef::new("ghcr-token");
+    let registry = Registry::new(
+        project.id,
+        "ghcr",
+        "ghcr.io",
+        RegistryAuthKind::Basic,
+        Some(cred_ref.clone()),
+    )
+    .expect("registry");
+    store.create_registry(&registry).expect("create registry");
+
+    let service = store
+        .put_service(
+            ServiceConfig::new(
+                project.id,
+                "web",
+                vec!["web.example.test".to_string()],
+                ServiceSource::ExternalImage(ExternalImageSource {
+                    image: String::new(),
+                    credential: None,
+                    registry_id: Some(registry.id),
+                    image_ref: Some("acme/web:1".to_string()),
+                }),
+                3000,
+                HealthCheck::new("/ready", 5),
+                Some(ResourceLimits::default()),
+                vec![],
+            )
+            .expect("service"),
+        )
+        .expect("stored service");
+
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let puller = std::sync::Arc::new(RecordingPuller::default());
+    let (config, acquirer) = deploy_test_acquirer(tmp.path(), puller.clone());
+    let runner = FakeCommandRunner::new(vec![CommandOutput {
+        status: 0,
+        stdout: "{\"value\":\"alice:pw\"}".to_string(),
+        stderr: String::new(),
+    }]);
+    let coordinator = deploy_test_coordinator(store);
+    let secret_store = SopsSecretStore::new(config.data_dir.clone());
+
+    coordinator
+        .deploy_external_image_source(
+            &service,
+            &acquirer,
+            &runner,
+            &secret_store,
+            config.sops_binary.as_path(),
+        )
+        .await
+        .expect("deployment");
+
+    let recorded_image = puller
+        .image
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("image recorded");
+    let recorded_auth = puller.auth.lock().unwrap().clone().expect("auth recorded");
+    assert_eq!(recorded_image, "ghcr.io/acme/web:1");
+    assert_eq!(
+        recorded_auth,
+        denia::oci::RegistryAuth::Basic("alice".to_string(), "pw".to_string())
+    );
+}
+
+#[tokio::test]
+async fn deploy_external_image_legacy_anonymous_fallback() {
+    use denia::domain::Project;
+
+    let store = SqliteStore::open_in_memory().expect("sqlite");
+    store.migrate().expect("migrate");
+    let project = store
+        .put_project(Project::new("p", None).expect("project"))
+        .expect("stored project");
+
+    let service = store
+        .put_service(
+            ServiceConfig::new(
+                project.id,
+                "web",
+                vec!["web.example.test".to_string()],
+                ServiceSource::ExternalImage(ExternalImageSource {
+                    image: "ghcr.io/acme/web:1".to_string(),
+                    credential: None,
+                    registry_id: None,
+                    image_ref: None,
+                }),
+                3000,
+                HealthCheck::new("/ready", 5),
+                Some(ResourceLimits::default()),
+                vec![],
+            )
+            .expect("service"),
+        )
+        .expect("stored service");
+
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let puller = std::sync::Arc::new(RecordingPuller::default());
+    let (config, acquirer) = deploy_test_acquirer(tmp.path(), puller.clone());
+    let runner = FakeCommandRunner::new(vec![]);
+    let coordinator = deploy_test_coordinator(store);
+    let secret_store = SopsSecretStore::new(config.data_dir.clone());
+
+    coordinator
+        .deploy_external_image_source(
+            &service,
+            &acquirer,
+            &runner,
+            &secret_store,
+            config.sops_binary.as_path(),
+        )
+        .await
+        .expect("deployment");
+
+    let recorded_image = puller
+        .image
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("image recorded");
+    let recorded_auth = puller.auth.lock().unwrap().clone().expect("auth recorded");
+    assert_eq!(recorded_image, "ghcr.io/acme/web:1");
+    assert_eq!(recorded_auth, denia::oci::RegistryAuth::Anonymous);
+}
+
+#[tokio::test]
+async fn deploy_external_image_legacy_basic_credential() {
+    use denia::domain::Project;
+
+    let store = SqliteStore::open_in_memory().expect("sqlite");
+    store.migrate().expect("migrate");
+    let project = store
+        .put_project(Project::new("p", None).expect("project"))
+        .expect("stored project");
+
+    let service = store
+        .put_service(
+            ServiceConfig::new(
+                project.id,
+                "web",
+                vec!["web.example.test".to_string()],
+                ServiceSource::ExternalImage(ExternalImageSource {
+                    image: "ghcr.io/acme/web:1".to_string(),
+                    credential: Some(SecretRef::new("legacy-cred")),
+                    registry_id: None,
+                    image_ref: None,
+                }),
+                3000,
+                HealthCheck::new("/ready", 5),
+                Some(ResourceLimits::default()),
+                vec![],
+            )
+            .expect("service"),
+        )
+        .expect("stored service");
+
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let puller = std::sync::Arc::new(RecordingPuller::default());
+    let (config, acquirer) = deploy_test_acquirer(tmp.path(), puller.clone());
+    let runner = FakeCommandRunner::new(vec![CommandOutput {
+        status: 0,
+        stdout: "{\"value\":\"u:p\"}".to_string(),
+        stderr: String::new(),
+    }]);
+    let coordinator = deploy_test_coordinator(store);
+    let secret_store = SopsSecretStore::new(config.data_dir.clone());
+
+    coordinator
+        .deploy_external_image_source(
+            &service,
+            &acquirer,
+            &runner,
+            &secret_store,
+            config.sops_binary.as_path(),
+        )
+        .await
+        .expect("deployment");
+
+    let recorded_image = puller
+        .image
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("image recorded");
+    let recorded_auth = puller.auth.lock().unwrap().clone().expect("auth recorded");
+    assert_eq!(recorded_image, "ghcr.io/acme/web:1");
+    assert_eq!(
+        recorded_auth,
+        denia::oci::RegistryAuth::Basic("u".to_string(), "p".to_string())
+    );
+}
+
+#[tokio::test]
+async fn deploy_external_image_unknown_registry_id_errors() {
+    use denia::domain::Project;
+
+    let store = SqliteStore::open_in_memory().expect("sqlite");
+    store.migrate().expect("migrate");
+    let project = store
+        .put_project(Project::new("p", None).expect("project"))
+        .expect("stored project");
+
+    let service = store
+        .put_service(
+            ServiceConfig::new(
+                project.id,
+                "web",
+                vec!["web.example.test".to_string()],
+                ServiceSource::ExternalImage(ExternalImageSource {
+                    image: String::new(),
+                    credential: None,
+                    registry_id: Some(Uuid::now_v7()),
+                    image_ref: Some("acme/web:1".to_string()),
+                }),
+                3000,
+                HealthCheck::new("/ready", 5),
+                Some(ResourceLimits::default()),
+                vec![],
+            )
+            .expect("service"),
+        )
+        .expect("stored service");
+
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let puller = std::sync::Arc::new(RecordingPuller::default());
+    let (config, acquirer) = deploy_test_acquirer(tmp.path(), puller.clone());
+    let runner = FakeCommandRunner::new(vec![]);
+    let coordinator = deploy_test_coordinator(store);
+    let secret_store = SopsSecretStore::new(config.data_dir.clone());
+
+    let err = coordinator
+        .deploy_external_image_source(
+            &service,
+            &acquirer,
+            &runner,
+            &secret_store,
+            config.sops_binary.as_path(),
+        )
+        .await
+        .expect_err("should fail with RegistryNotFound");
+
+    assert!(
+        matches!(err, denia::deploy::DeployError::RegistryNotFound),
+        "got: {err:?}"
+    );
+}
+
 #[test]
 fn migrate_is_idempotent_and_records_version() {
     let store = SqliteStore::open_in_memory().unwrap();
