@@ -66,3 +66,69 @@ async fn delete_project(
     state.projects.delete_project(project_id)?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::app::{AppState, build_router};
+    use crate::config::AppConfig;
+    use crate::domain::Project;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    const ADMIN_TOKEN: &str = "test-admin-token-0123456789abcdef";
+
+    fn test_state() -> AppState {
+        AppState::builder(AppConfig::for_test(ADMIN_TOKEN)).build()
+    }
+
+    #[tokio::test]
+    async fn create_then_get_project_roundtrips() {
+        let state = test_state();
+        let project = Project::new("team-a", None).unwrap();
+        let body = serde_json::to_vec(&project).unwrap();
+        let app = build_router(state);
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/projects")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::OK);
+
+        let get = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/projects/{}", project.id))
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_unknown_project_returns_404() {
+        let resp = build_router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/projects/{}", uuid::Uuid::now_v7()))
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}

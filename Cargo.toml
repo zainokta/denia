@@ -32,6 +32,7 @@ subtle = "2"
 
 [features]
 default = []
+test-support = []
 
 [dev-dependencies]
 http = "1"

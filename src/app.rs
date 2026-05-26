@@ -181,6 +181,163 @@ impl AppState {
     }
 }
 
+/// Test-support builder for `AppState`. Lets tests inject arbitrary
+/// `Arc<dyn ...Repo>` mocks plus a runtime, defaulting every other field to a
+/// fake/no-op implementation. Gated to `cfg(test)` and the `test-support`
+/// feature so it never reaches the release binary.
+#[cfg(any(test, feature = "test-support"))]
+pub struct AppStateBuilder {
+    config: AppConfig,
+    services: Option<Arc<dyn ServiceRepo>>,
+    domains: Option<Arc<dyn DomainRepo>>,
+    registries: Option<Arc<dyn RegistryRepo>>,
+    projects: Option<Arc<dyn ProjectRepo>>,
+    users: Option<Arc<dyn UserRepo>>,
+    deployments: Option<Arc<dyn DeploymentRepo>>,
+    jobs: Option<Arc<dyn JobRepo>>,
+    tokens: Option<Arc<dyn TokenRepo>>,
+    credentials: Option<Arc<dyn CredentialRepo>>,
+    runtime: Option<Arc<dyn Runtime>>,
+    domain_verifier: Option<Arc<dyn crate::verification::DomainVerifier>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl AppStateBuilder {
+    pub fn new(config: AppConfig) -> Self {
+        Self {
+            config,
+            services: None,
+            domains: None,
+            registries: None,
+            projects: None,
+            users: None,
+            deployments: None,
+            jobs: None,
+            tokens: None,
+            credentials: None,
+            runtime: None,
+            domain_verifier: None,
+        }
+    }
+
+    pub fn services(mut self, repo: Arc<dyn ServiceRepo>) -> Self {
+        self.services = Some(repo);
+        self
+    }
+    pub fn domains(mut self, repo: Arc<dyn DomainRepo>) -> Self {
+        self.domains = Some(repo);
+        self
+    }
+    pub fn registries(mut self, repo: Arc<dyn RegistryRepo>) -> Self {
+        self.registries = Some(repo);
+        self
+    }
+    pub fn projects(mut self, repo: Arc<dyn ProjectRepo>) -> Self {
+        self.projects = Some(repo);
+        self
+    }
+    pub fn users(mut self, repo: Arc<dyn UserRepo>) -> Self {
+        self.users = Some(repo);
+        self
+    }
+    pub fn deployments(mut self, repo: Arc<dyn DeploymentRepo>) -> Self {
+        self.deployments = Some(repo);
+        self
+    }
+    pub fn jobs(mut self, repo: Arc<dyn JobRepo>) -> Self {
+        self.jobs = Some(repo);
+        self
+    }
+    pub fn tokens(mut self, repo: Arc<dyn TokenRepo>) -> Self {
+        self.tokens = Some(repo);
+        self
+    }
+    pub fn credentials(mut self, repo: Arc<dyn CredentialRepo>) -> Self {
+        self.credentials = Some(repo);
+        self
+    }
+    pub fn runtime(mut self, runtime: Arc<dyn Runtime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+    pub fn domain_verifier(
+        mut self,
+        verifier: Arc<dyn crate::verification::DomainVerifier>,
+    ) -> Self {
+        self.domain_verifier = Some(verifier);
+        self
+    }
+
+    /// Populate all fields, defaulting any unset repo to its in-memory mock and
+    /// any unset infra dependency to a fake/no-op implementation.
+    pub fn build(self) -> AppState {
+        use crate::repo::mock::{
+            InMemoryCredentialRepo, InMemoryDeploymentRepo, InMemoryDomainRepo, InMemoryJobRepo,
+            InMemoryProjectRepo, InMemoryRegistryRepo, InMemoryServiceRepo, InMemoryTokenRepo,
+            InMemoryUserRepo,
+        };
+        let ingress_options = IngressRenderOptions {
+            acme_resolver: self.config.acme_resolver.clone(),
+            control_domain: self.config.control_domain.clone(),
+            control_tls: self.config.control_tls,
+            control_backend_addr: format!("http://{}", self.config.bind_addr),
+        };
+        let bridge_start_port = self.config.bridge_start_port;
+        AppState {
+            config: self.config,
+            services: self
+                .services
+                .unwrap_or_else(|| Arc::new(InMemoryServiceRepo::default())),
+            domains: self
+                .domains
+                .unwrap_or_else(|| Arc::new(InMemoryDomainRepo::default())),
+            registries: self
+                .registries
+                .unwrap_or_else(|| Arc::new(InMemoryRegistryRepo::default())),
+            projects: self
+                .projects
+                .unwrap_or_else(|| Arc::new(InMemoryProjectRepo::default())),
+            users: self
+                .users
+                .unwrap_or_else(|| Arc::new(InMemoryUserRepo::default())),
+            deployments: self
+                .deployments
+                .unwrap_or_else(|| Arc::new(InMemoryDeploymentRepo::default())),
+            jobs: self
+                .jobs
+                .unwrap_or_else(|| Arc::new(InMemoryJobRepo::default())),
+            tokens: self
+                .tokens
+                .unwrap_or_else(|| Arc::new(InMemoryTokenRepo::default())),
+            credentials: self
+                .credentials
+                .unwrap_or_else(|| Arc::new(InMemoryCredentialRepo::default())),
+            runtime: self
+                .runtime
+                .unwrap_or_else(|| Arc::new(crate::runtime::FakeRuntime::default())),
+            health: Arc::new(FakeHealthChecker::healthy()),
+            command_runner: Arc::new(TokioCommandRunner),
+            bridge_allocator: Arc::new(Mutex::new(BridgeAllocator::new(bridge_start_port))),
+            bridge_manager: Arc::new(crate::bridge::FakeBridgeManager::default()),
+            routes: Arc::new(Mutex::new(BTreeMap::new())),
+            ingress_options,
+            access_log: AccessLogStore::new(),
+            domain_verifier: self
+                .domain_verifier
+                .unwrap_or_else(|| Arc::new(crate::verification::HttpDomainVerifier::new())),
+            verifying_domains: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl AppState {
+    /// Entry point for the test-support builder.
+    pub fn builder(config: AppConfig) -> AppStateBuilder {
+        AppStateBuilder::new(config)
+    }
+}
+
 pub fn build_router(state: AppState) -> Router {
     let rate_limiter = LoginRateLimiter::default();
     let auth_public = api::auth::public_router().route_layer(middleware::from_fn_with_state(
