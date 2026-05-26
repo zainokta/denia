@@ -9,8 +9,8 @@ use crate::{
     artifacts::ArtifactRecord,
     domain::{
         ApiToken, Credential, CredentialKind, Deployment, DeploymentRequest, DeploymentStatus,
-        DomainStatus, Job, JobRun, JobRunStatus, Project, ProjectMembership, Role, ServiceConfig,
-        ServiceDomain, Session, User,
+        DomainStatus, Job, JobRun, JobRunStatus, Project, ProjectMembership, Registry, Role,
+        ServiceConfig, ServiceDomain, Session, User,
     },
     secrets::SecretRef,
 };
@@ -37,6 +37,10 @@ pub enum StateError {
     LastSuperAdmin,
     #[error("invalid status: {0}")]
     InvalidStatus(String),
+    #[error("registry not found")]
+    RegistryNotFound,
+    #[error("registry is referenced by one or more services")]
+    RegistryInUse,
 }
 
 #[derive(Clone)]
@@ -311,6 +315,23 @@ impl SqliteStore {
 
             connection.execute("DELETE FROM schema_version", [])?;
             connection.execute("INSERT INTO schema_version (version) VALUES (5)", [])?;
+        }
+
+        if current < 6 {
+            connection.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS registries (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    UNIQUE(project_id, name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_registries_project ON registries(project_id);
+                "#,
+            )?;
+            connection.execute("DELETE FROM schema_version", [])?;
+            connection.execute("INSERT INTO schema_version (version) VALUES (6)", [])?;
         }
 
         Ok(())
@@ -1036,6 +1057,89 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn create_registry(&self, registry: &Registry) -> Result<(), StateError> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT INTO registries (id, project_id, name, config_json) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                registry.id.to_string(),
+                registry.project_id.to_string(),
+                registry.name,
+                serde_json::to_string(registry)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_registry(&self, registry: &Registry) -> Result<(), StateError> {
+        let connection = self.connection()?;
+        let n = connection.execute(
+            "UPDATE registries SET name = ?2, config_json = ?3 WHERE id = ?1",
+            params![
+                registry.id.to_string(),
+                registry.name,
+                serde_json::to_string(registry)?,
+            ],
+        )?;
+        if n == 0 {
+            return Err(StateError::RegistryNotFound);
+        }
+        Ok(())
+    }
+
+    pub fn registry(&self, id: Uuid) -> Result<Option<Registry>, StateError> {
+        let connection = self.connection()?;
+        let json: Option<String> = connection
+            .query_row(
+                "SELECT config_json FROM registries WHERE id = ?1",
+                params![id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        json.map(|j| serde_json::from_str(&j))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    pub fn registries_for_project(&self, project_id: Uuid) -> Result<Vec<Registry>, StateError> {
+        let connection = self.connection()?;
+        let mut stmt = connection
+            .prepare("SELECT config_json FROM registries WHERE project_id = ?1 ORDER BY name")?;
+        let rows = stmt.query_map(params![project_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(serde_json::from_str(&row?)?);
+        }
+        Ok(out)
+    }
+
+    pub fn delete_registry(&self, id: Uuid) -> Result<(), StateError> {
+        let registry = self.registry(id)?.ok_or(StateError::RegistryNotFound)?;
+        let connection = self.connection()?;
+        let mut stmt =
+            connection.prepare("SELECT config_json FROM services WHERE project_id = ?1")?;
+        let rows = stmt.query_map(params![registry.project_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        for row in rows {
+            if let Ok(svc) = serde_json::from_str::<ServiceConfig>(&row?) {
+                if let crate::domain::ServiceSource::ExternalImage(src) = &svc.source {
+                    if src.registry_id == Some(id) {
+                        return Err(StateError::RegistryInUse);
+                    }
+                }
+            }
+        }
+        drop(stmt);
+        connection.execute(
+            "DELETE FROM registries WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn create_job_run(&self, job_id: Uuid) -> Result<JobRun, StateError> {
         let run = JobRun {
             id: Uuid::now_v7(),
@@ -1384,10 +1488,89 @@ mod tests {
     use crate::domain::ServiceSource;
 
     #[test]
-    fn migrate_advances_to_version_5() {
+    fn migrate_advances_to_version_6() {
         let store = SqliteStore::open_in_memory().unwrap();
         store.migrate().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), 6);
+    }
+
+    #[test]
+    fn registry_crud_roundtrip_and_unique_name() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        let project = store
+            .put_project(crate::domain::Project::new("p", None).unwrap())
+            .unwrap();
+        let cred = crate::secrets::SecretRef::parse("ghcr-cred").unwrap();
+        let reg = crate::domain::Registry::new(
+            project.id,
+            "ghcr",
+            "ghcr.io",
+            crate::domain::RegistryAuthKind::Basic,
+            Some(cred),
+        )
+        .unwrap();
+
+        store.create_registry(&reg).unwrap();
+        assert_eq!(
+            store.registry(reg.id).unwrap().unwrap().endpoint,
+            "ghcr.io"
+        );
+        assert_eq!(store.registries_for_project(project.id).unwrap().len(), 1);
+
+        // duplicate (project_id, name) rejected
+        let dup = crate::domain::Registry::new(
+            project.id,
+            "ghcr",
+            "other.io",
+            crate::domain::RegistryAuthKind::Anonymous,
+            None,
+        )
+        .unwrap();
+        assert!(store.create_registry(&dup).is_err());
+    }
+
+    #[test]
+    fn delete_registry_blocked_when_referenced() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        let project = store
+            .put_project(crate::domain::Project::new("p", None).unwrap())
+            .unwrap();
+        let reg = crate::domain::Registry::new(
+            project.id,
+            "ghcr",
+            "ghcr.io",
+            crate::domain::RegistryAuthKind::Anonymous,
+            None,
+        )
+        .unwrap();
+        store.create_registry(&reg).unwrap();
+
+        // build a service in the project referencing reg.id
+        use crate::domain::{ExternalImageSource, HealthCheck, ServiceConfig, ServiceSource};
+        let service = ServiceConfig::new(
+            project.id,
+            "svc",
+            vec!["example.com".into()],
+            ServiceSource::ExternalImage(ExternalImageSource {
+                image: String::new(),
+                credential: None,
+                registry_id: Some(reg.id),
+                image_ref: Some("acme/web:1".into()),
+            }),
+            3000,
+            HealthCheck::new("/health", 10),
+            None,
+            vec![],
+        )
+        .unwrap();
+        store.put_service(service).unwrap();
+
+        assert!(matches!(
+            store.delete_registry(reg.id).unwrap_err(),
+            crate::state::StateError::RegistryInUse
+        ));
     }
 
     #[test]
