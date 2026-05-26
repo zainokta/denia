@@ -211,6 +211,16 @@ pub fn build_router(state: AppState) -> Router {
             "/projects/{project_id}/members/{user_id}",
             delete(remove_project_member),
         )
+        .route(
+            "/projects/{project_id}/registries",
+            get(list_registries).post(create_registry),
+        )
+        .route(
+            "/projects/{project_id}/registries/{registry_id}",
+            get(get_registry)
+                .patch(update_registry_handler)
+                .delete(delete_registry_handler),
+        )
         .route("/ingress/routes", get(list_ingress_routes))
         .route("/ingress/config", get(get_ingress_config))
         .route("/metrics/node", get(get_node_metrics))
@@ -297,6 +307,19 @@ async fn put_service(
     Json(service): Json<ServiceConfig>,
 ) -> Result<Json<ServiceConfig>, ApiError> {
     ensure_role(&state, &principal, service.project_id, Role::Operator)?;
+    if let crate::domain::ServiceSource::ExternalImage(src) = &service.source {
+        src.validate()
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        if let Some(registry_id) = src.registry_id {
+            let registry = state
+                .store
+                .registry(registry_id)?
+                .ok_or_else(|| ApiError::NotFound("registry not found".into()))?;
+            if registry.project_id != service.project_id {
+                return Err(ApiError::NotFound("registry not found".into()));
+            }
+        }
+    }
     Ok(Json(state.store.put_service(service)?))
 }
 
@@ -575,6 +598,113 @@ async fn remove_project_member(
     ensure_role(&state, &principal, project_id, Role::Admin)?;
     state.store.remove_membership(user_id, project_id)?;
     Ok(Json(serde_json::json!({"removed": true})))
+}
+
+#[derive(Debug, Deserialize)]
+struct RegistryInput {
+    name: String,
+    endpoint: String,
+    auth_kind: crate::domain::RegistryAuthKind,
+    #[serde(default)]
+    secret_ref: Option<String>,
+}
+
+async fn list_registries(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(project_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<Vec<crate::domain::Registry>>, ApiError> {
+    ensure_role(&state, &principal, project_id, Role::Admin)?;
+    Ok(Json(state.store.registries_for_project(project_id)?))
+}
+
+async fn create_registry(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(project_id): axum::extract::Path<uuid::Uuid>,
+    Json(input): Json<RegistryInput>,
+) -> Result<(StatusCode, Json<crate::domain::Registry>), ApiError> {
+    ensure_role(&state, &principal, project_id, Role::Admin)?;
+    let credential_ref = input
+        .secret_ref
+        .map(SecretRef::parse)
+        .transpose()
+        .map_err(ApiError::InvalidSecretRef)?;
+    let registry = crate::domain::Registry::new(
+        project_id,
+        input.name,
+        input.endpoint,
+        input.auth_kind,
+        credential_ref,
+    )
+    .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    state.store.create_registry(&registry)?;
+    Ok((StatusCode::CREATED, Json(registry)))
+}
+
+async fn get_registry(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path((project_id, registry_id)): axum::extract::Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Result<Json<crate::domain::Registry>, ApiError> {
+    ensure_role(&state, &principal, project_id, Role::Admin)?;
+    let registry = state
+        .store
+        .registry(registry_id)?
+        .ok_or_else(|| ApiError::NotFound("registry not found".into()))?;
+    if registry.project_id != project_id {
+        return Err(ApiError::NotFound("registry not found".into()));
+    }
+    Ok(Json(registry))
+}
+
+async fn update_registry_handler(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path((project_id, registry_id)): axum::extract::Path<(uuid::Uuid, uuid::Uuid)>,
+    Json(input): Json<RegistryInput>,
+) -> Result<Json<crate::domain::Registry>, ApiError> {
+    ensure_role(&state, &principal, project_id, Role::Admin)?;
+    let existing = state
+        .store
+        .registry(registry_id)?
+        .ok_or_else(|| ApiError::NotFound("registry not found".into()))?;
+    if existing.project_id != project_id {
+        return Err(ApiError::NotFound("registry not found".into()));
+    }
+    let credential_ref = input
+        .secret_ref
+        .map(SecretRef::parse)
+        .transpose()
+        .map_err(ApiError::InvalidSecretRef)?;
+    let mut updated = crate::domain::Registry::new(
+        project_id,
+        input.name,
+        input.endpoint,
+        input.auth_kind,
+        credential_ref,
+    )
+    .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    updated.id = registry_id;
+    state.store.update_registry(&updated)?;
+    Ok(Json(updated))
+}
+
+async fn delete_registry_handler(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path((project_id, registry_id)): axum::extract::Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    ensure_role(&state, &principal, project_id, Role::Admin)?;
+    let registry = state
+        .store
+        .registry(registry_id)?
+        .ok_or_else(|| ApiError::NotFound("registry not found".into()))?;
+    if registry.project_id != project_id {
+        return Err(ApiError::NotFound("registry not found".into()));
+    }
+    state.store.delete_registry(registry_id)?;
+    Ok(Json(serde_json::json!({"deleted": true})))
 }
 
 async fn put_credential(
@@ -1174,6 +1304,12 @@ impl IntoResponse for ApiError {
                 }
                 crate::state::StateError::UnknownProject => {
                     (StatusCode::NOT_FOUND, error.to_string())
+                }
+                crate::state::StateError::RegistryNotFound => {
+                    (StatusCode::NOT_FOUND, error.to_string())
+                }
+                crate::state::StateError::RegistryInUse => {
+                    (StatusCode::CONFLICT, error.to_string())
                 }
                 crate::state::StateError::InvalidCredentials => {
                     (StatusCode::UNAUTHORIZED, error.to_string())
