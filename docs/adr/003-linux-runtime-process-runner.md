@@ -35,7 +35,7 @@ The runner must keep host root as the trust boundary, place workloads into Denia
 - Denia supervises a per-service loopback bridge task on promotion, replaces it when the same service is promoted again, and deactivates it when the service is stopped.
 - `LinuxRuntime` owns the workload Unix socket contract by injecting `DENIA_SERVICE_SOCKET=/run/denia/service.sock` into the child environment.
 - The host-visible bridge target for that socket is `<rootfs>/run/denia/service.sock`, which corresponds to `/run/denia/service.sock` after the workload is launched with `--root <rootfs>`.
-- `LinuxRuntime` injects the Denia binary into the rootfs as `/.denia/socket-proxy` and uses it as the namespace stage-1 process.
+- `LinuxRuntime` injects the configured Denia socket-proxy binary into the rootfs as `/.denia/socket-proxy` and uses it as the namespace stage-1 process. The default is the current Denia executable, and production hosts may override it with `DENIA_SOCKET_PROXY_BINARY`.
 - The stage-1 socket proxy brings the namespace loopback interface up, binds `/run/denia/service.sock`, starts the hardened workload command as its child, and forwards each accepted Unix-socket stream to `127.0.0.1:<internal_port>` inside the workload network namespace.
 - Runtime socket directory preparation rejects a symlinked `<rootfs>/run` path before creating `<rootfs>/run/denia`.
 - Service names used in runtime paths are restricted to ASCII alphanumeric, `-`, and `_`.
@@ -47,11 +47,14 @@ The runner must keep host root as the trust boundary, place workloads into Denia
 - CPU and memory limits must be non-zero before cgroup files are written.
 - CPU limits are written to cgroup v2 `cpu.max` with a `100000` microsecond period.
 - Memory limits are written to cgroup v2 `memory.max`.
-- Runtime `setpriv` injection rejects symlinked `/.denia` directories and symlinked `/.denia/setpriv` targets before writing into the rootfs.
-- Runtime process launch starts Denia in `__denia_cgroup_launcher` mode first. The launcher writes its own host PID to `cgroup.procs`, writes a ready marker for `Runtime::start`, then `exec`s `unshare`.
-- Namespace launch then uses `unshare --user --map-users=0,<base>,<size> --map-groups=0,<base>,<size> --fork --pid --net --mount --propagation private --uts --ipc --mount-proc --root <rootfs> --wd <workdir> -- /.denia/socket-proxy --listen /run/denia/service.sock --connect 127.0.0.1:<internal_port> -- /.denia/setpriv --no-new-privs --bounding-set -all -- <argv...>`.
+- Runtime helper injection rejects symlinked `/.denia` directories and symlinked `/.denia/socket-proxy` or `/.denia/workload-launcher` targets before writing into the rootfs.
+- Runtime process launch uses Denia's native fork/unshare/exec adapter in `src/syscall/ns.rs`. The parent writes uid/gid maps and attaches the child to `cgroup.procs`; the child then chroots, mounts proc, applies hardening, and execs the injected stage-1 helper.
+- `src/syscall/ns.rs` owns the in-process namespace setup contract and direct runner syscall adapter. It now validates user namespace id-map and cgroup path requirements, builds the Linux clone flags, records the target `cgroup.procs` path, materializes C-compatible argv/env/rootfs/workdir payloads before fork, writes the `setgroups`, `/proc/<pid>/uid_map`, and `/proc/<pid>/gid_map` setup files, attaches the child to cgroup v2, then performs fork/unshare/chroot/proc-mount/no-new-privs/capability-drop/exec in the syscall boundary.
+- `LinuxRuntimePlan` carries the native `NamespaceConfig`, so service launch has one authoritative rootfs/workdir/env/cgroup/argv payload for the syscall runner.
+- Service namespace launch executes `/.denia/socket-proxy --listen /run/denia/service.sock --connect 127.0.0.1:<internal_port> -- <argv...>` through the native adapter.
+- Job namespace launch applies the same namespace and cgroup setup, then executes `/.denia/workload-launcher -- <argv...>` instead of the socket proxy because jobs do not expose ingress.
 - If launch fails after preparation, Denia removes the prepared deployment directory and cgroup directory.
-- If cgroup placement fails before `unshare` is executed, Denia observes that the cgroup launcher exited without the ready marker and removes the prepared deployment and cgroup directories.
+- If cgroup placement fails before the namespace launcher is executed, `spawn` returns an error and Denia removes the prepared deployment and cgroup directories.
 - If a service is started again while Denia still tracks an older child for the same service, Denia stops the older child after the replacement child is tracked.
 - When Denia stops a tracked service child, it writes `1` to `cgroup.kill` when the cgroup v2 kill file is available, falls back to killing the tracked launcher process, then removes the tracked deployment runtime directory and cgroup directory.
 - When Denia replaces a tracked service child, it uses the same cgroup-wide termination path before removing the replaced child deployment runtime directory and cgroup directory.
@@ -67,7 +70,7 @@ The normal test suite verifies planning, path safety, and cgroup file preparatio
 - Runtime file paths are deterministic and reject traversal through unsafe service names.
 - Bundle and process-manifest validation catches common unsafe inputs before cgroup or process work starts.
 - Rootfs symlink rejection prevents a malicious or malformed bundle from making Denia mutate host paths during launch preparation.
-- `setpriv` injection refuses symlink targets inside the untrusted rootfs instead of copying through them as host root.
+- Denia runtime helper injection refuses symlink targets inside the untrusted rootfs instead of copying through them as host root.
 - Host process environment variables are not inherited by workloads; only the image-derived manifest environment is passed through.
 - Workloads receive their own network namespace and private mount propagation instead of sharing host networking or mount propagation state.
 - Runtime stdout/stderr now flows into the same per-service logs returned by the management API.
@@ -83,21 +86,23 @@ The normal test suite verifies planning, path safety, and cgroup file preparatio
 - The TCP-to-Unix bridge data path is implemented, supervised by Denia during promotion and stop, and covered by ignored live network tests for environments that allow loopback TCP and AF_UNIX sockets.
 - TCP-only workloads can continue binding their configured internal loopback port while Denia exposes the service through the owned Unix socket and Traefik bridge path.
 - The stage-1 socket proxy configures loopback without requiring an `ip` binary inside the rootfs.
+- The stage-1 socket proxy and workload launcher apply `no_new_privs` and drop the capability bounding set through Denia's rustix syscall module, so `setpriv` is not a runtime dependency.
 - Socket directory preparation avoids following a rootfs-controlled `run` symlink while Denia is preparing paths as host root.
 - The cgroup contract is testable without requiring root in the normal test suite.
 - Failed launches do not leave prepared per-deployment runtime or cgroup directories behind in the normal failure path.
-- Failed cgroup placement no longer allows `unshare --fork` or the workload to start outside Denia's target cgroup.
+- Failed cgroup placement no longer allows the namespace launcher or workload to start outside Denia's target cgroup.
+- The native namespace setup and launch payload contract is unit-tested without requiring root; services and one-shot jobs are wired through the adapter, and the actual privileged fork/unshare/exec behavior remains gated behind ignored runtime tests.
 - Replacement deployment starts no longer leak the previous tracked workload child for the same service.
 - Runtime stop and replacement no longer leave stale per-deployment runtime or cgroup directories for tracked children.
-- Runtime stop and replacement terminate the workload cgroup as a unit when `cgroup.kill` is available, avoiding orphaned descendants from `unshare --fork`.
+- Runtime stop and replacement terminate the workload cgroup as a unit when `cgroup.kill` is available, avoiding orphaned descendants.
 - Exited children are reaped during later lifecycle operations so dead tracked processes do not linger indefinitely.
 - The privileged launch path remains explicit and opt-in.
 
 ### Negative
 
-- `unshare` is currently used as the namespace launcher binary, so hosts must provide util-linux.
+- The compatibility `unshare` plan payload is still present in tests and config while callers migrate, but runtime launch no longer depends on util-linux `unshare`.
 - External image acquisition and unpacking are now in-process (`oci-client` + `TarRootfsUnpacker`); `skopeo` and `umoci` are no longer host dependencies (ADR-011 amendment).
-- Runtime launch now depends on the Denia binary being callable in host-side `__denia_cgroup_launcher` mode before entering `unshare`.
+- Runtime launch no longer depends on a host-side cgroup launcher trampoline; cgroup placement is performed by Denia around the native fork/unshare flow, with raw Linux calls isolated in `src/syscall/ns.rs` instead of `src/runtime.rs`.
 - The injected `/.denia/socket-proxy` must be usable inside the target rootfs. A fully static Denia release binary is the expected production packaging shape for scratch/distroless images.
 - Broader network device setup, veth links, and DNS policy inside the workload network namespace are not yet complete.
 - The live bridge tests are ignored in this sandbox because loopback TCP and AF_UNIX socket binding return `EPERM`; they are intended for environments with local socket permissions.
@@ -105,7 +110,7 @@ The normal test suite verifies planning, path safety, and cgroup file preparatio
 ## Alternatives Considered
 
 - **Use Docker/containerd/runc**: Rejected by ADR-001 and the product requirement to avoid Docker-compatible runtimes for service execution.
-- **Direct `clone3` stage-1 supervisor now**: Deferred because it needs a separate privileged implementation and audit surface. The current `unshare` runner makes the contract visible first.
+- **Direct `clone3` stage-1 supervisor now**: Deferred in favor of a smaller fork/unshare syscall adapter first. The adapter gives Denia-owned runtime semantics without introducing the additional `clone3` ABI and pidfd supervision surface yet.
 - **Run OCI images directly**: Deferred because Denia needs a rootfs bundle and process manifest boundary before parsing full OCI image config safely.
 - **Use `skopeo dir:` as rootfs**: Rejected because `dir:` materializes image transport data, not the unpacked filesystem tree that `LinuxRuntime` needs.
 
