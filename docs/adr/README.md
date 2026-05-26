@@ -31,6 +31,7 @@ Each ADR should include:
 | [011](011-inprocess-oci-acquisition.md) | In-Process OCI Image Acquisition | Proposed | 2026-05-25 |
 | [012](012-src-modularization.md) | src/ Modularization and Per-Aggregate Repositories | Proposed | 2026-05-25 |
 | [013](013-domain-verification.md) | Domain Support With HTTP File Verification | Accepted | 2026-05-25 |
+| [014](014-per-service-registry.md) | Per-Service OCI Registry Configuration | Proposed | 2026-05-26 |
 
 ## Contributing
 
