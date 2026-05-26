@@ -100,6 +100,8 @@ async fn coordinator_promotes_only_after_health_check_passes() {
                 ServiceSource::ExternalImage(ExternalImageSource {
                     image: "ghcr.io/acme/web:latest".to_string(),
                     credential: None,
+                    registry_id: None,
+                    image_ref: None,
                 }),
                 3000,
                 HealthCheck::new("/ready", 5),
@@ -167,6 +169,8 @@ async fn coordinator_writes_traefik_config_on_promotion() {
                 ServiceSource::ExternalImage(ExternalImageSource {
                     image: "ghcr.io/acme/web:latest".to_string(),
                     credential: None,
+                    registry_id: None,
+                    image_ref: None,
                 }),
                 3000,
                 HealthCheck::new("/ready", 5),
