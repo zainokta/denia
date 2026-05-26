@@ -798,20 +798,23 @@ impl SqliteStore {
     }
 
     pub fn user_for_session(&self, token_hash: &str) -> Result<Option<User>, StateError> {
-        let connection = self.connection()?;
-        let result: Option<(String, String)> = connection
-            .query_row(
-                "SELECT user_id, expires_at FROM sessions WHERE token_hash = ?1",
-                params![token_hash],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        let (user_id_str, expires_at_str) = match result {
+        let row = {
+            let connection = self.connection()?;
+            connection
+                .query_row(
+                    "SELECT user_id, expires_at FROM sessions WHERE token_hash = ?1",
+                    params![token_hash],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?
+        };
+        let (user_id_str, expires_at_str) = match row {
             Some(r) => r,
             None => return Ok(None),
         };
         let expires_at: chrono::DateTime<Utc> = expires_at_str.parse()?;
         if Utc::now() > expires_at {
+            let connection = self.connection()?;
             connection.execute(
                 "DELETE FROM sessions WHERE token_hash = ?1",
                 params![token_hash],
@@ -855,15 +858,17 @@ impl SqliteStore {
     }
 
     pub fn user_for_api_token(&self, token_hash: &str) -> Result<Option<User>, StateError> {
-        let connection = self.connection()?;
-        let result: Option<String> = connection
-            .query_row(
-                "SELECT user_id FROM api_tokens WHERE token_hash = ?1",
-                params![token_hash],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let user_id_str = match result {
+        let user_id_str = {
+            let connection = self.connection()?;
+            connection
+                .query_row(
+                    "SELECT user_id FROM api_tokens WHERE token_hash = ?1",
+                    params![token_hash],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+        };
+        let user_id_str = match user_id_str {
             Some(id) => id,
             None => return Ok(None),
         };
