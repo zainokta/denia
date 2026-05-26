@@ -14,6 +14,7 @@ use crate::{
     domain::ServiceSource,
     domain::{Deployment, DeploymentRequest, DeploymentStatus, RuntimeStartRequest, ServiceConfig},
     health::{HealthChecker, HealthError},
+    oci::RegistryAuth,
     runtime::{Runtime, RuntimeError},
     state::{SqliteStore, StateError},
     traefik::{IngressRenderOptions, RouteSpec, TraefikError, render_file_provider_config},
@@ -184,6 +185,7 @@ where
                 ArtifactAcquireRequest::ExternalImage {
                     image: source.image.clone(),
                 },
+                RegistryAuth::Anonymous,
             )
             .await?;
 
@@ -212,6 +214,7 @@ where
                     dockerfile_path: source.dockerfile_path.clone(),
                     context_path: source.context_path.clone(),
                 },
+                RegistryAuth::Anonymous,
             )
             .await?;
 

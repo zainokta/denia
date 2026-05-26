@@ -1,42 +1,38 @@
 use std::path::Path;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use oci_client::Reference;
 use oci_client::client::Client;
+use oci_client::secrets::RegistryAuth;
 use sha2::{Digest, Sha256};
 
-use super::{
-    LayerBlob, LayerCompression, OciError, OciImagePuller, PulledImage,
-    credentials::RegistryCredentialProvider,
-};
+use super::{LayerBlob, LayerCompression, OciError, OciImagePuller, PulledImage};
 
 pub struct RegistryImagePuller {
     client: Client,
-    credential_provider: Arc<dyn RegistryCredentialProvider>,
 }
 
 impl RegistryImagePuller {
-    pub fn new(credential_provider: Arc<dyn RegistryCredentialProvider>) -> Self {
+    pub fn new() -> Self {
         let config = oci_client::client::ClientConfig::default();
         Self {
             client: Client::new(config),
-            credential_provider,
         }
+    }
+}
+
+impl Default for RegistryImagePuller {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait]
 impl OciImagePuller for RegistryImagePuller {
-    async fn pull(&self, image: &str) -> Result<PulledImage, OciError> {
+    async fn pull(&self, image: &str, auth: RegistryAuth) -> Result<PulledImage, OciError> {
         let reference: Reference = image
             .parse()
             .map_err(|e| OciError::Pull(format!("invalid image reference '{image}': {e}")))?;
-
-        let auth = self
-            .credential_provider
-            .auth_for(reference.registry())
-            .await?;
 
         let accepted: Vec<&str> = vec![
             "application/vnd.oci.image.manifest.v1+json",
@@ -50,7 +46,7 @@ impl OciImagePuller for RegistryImagePuller {
             .map_err(|e| OciError::Pull(format!("pull failed: {e}")))?;
 
         let config: super::config::OciImageConfig =
-            serde_json::from_slice(&image_data.config.data).map_err(|e| OciError::Json(e))?;
+            serde_json::from_slice(&image_data.config.data).map_err(OciError::Json)?;
 
         let mut layers = Vec::new();
         for layer in &image_data.layers {

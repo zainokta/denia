@@ -8,8 +8,8 @@ use crate::{
     command::{CommandError, CommandRunner},
     config::AppConfig,
     oci::{
-        OciError, OciImagePuller, OciRootfsUnpacker, credentials::StaticCredentialProvider,
-        registry::RegistryImagePuller, unpack::TarRootfsUnpacker,
+        OciError, OciImagePuller, OciRootfsUnpacker, RegistryAuth, registry::RegistryImagePuller,
+        unpack::TarRootfsUnpacker,
     },
     syscall,
 };
@@ -78,10 +78,9 @@ pub struct ArtifactAcquirer {
 
 impl ArtifactAcquirer {
     pub fn new(config: AppConfig) -> Self {
-        let credentials = Arc::new(StaticCredentialProvider::new());
         Self {
             config,
-            puller: Arc::new(RegistryImagePuller::new(credentials)),
+            puller: Arc::new(RegistryImagePuller::new()),
             unpacker: Arc::new(TarRootfsUnpacker::new()),
         }
     }
@@ -121,7 +120,9 @@ impl ArtifactAcquirer {
             }
             ArtifactAcquireRequest::ExternalImage { image } => {
                 let source = ArtifactSource::ExternalRegistry { image };
-                let digest = self.acquire_external_image(runner, &source).await?;
+                let digest = self
+                    .acquire_external_image(runner, &source, RegistryAuth::Anonymous)
+                    .await?;
                 Ok(ArtifactRecord::new(digest, ArtifactKind::OciImage, source)?)
             }
         }
@@ -150,19 +151,26 @@ impl ArtifactAcquirer {
         .map_err(ArtifactAcquireError::Artifact)
     }
 
+    /// Materializes a rootfs bundle for the given acquisition request.
+    ///
+    /// `auth` is only consumed on the `ExternalImage` arm; the `Git` arm builds
+    /// via BuildKit and reads back from the local OCI layout, so it ignores
+    /// `auth` entirely.
     pub async fn acquire_rootfs_bundle_from_image_config(
         &self,
         runner: &dyn CommandRunner,
         request: ArtifactAcquireRequest,
+        auth: RegistryAuth,
     ) -> Result<ArtifactRecord, ArtifactAcquireError> {
         match &request {
             ArtifactAcquireRequest::ExternalImage { image } => {
                 let source = ArtifactSource::ExternalRegistry {
                     image: image.clone(),
                 };
-                self.pull_and_unpack_external(&source).await
+                self.pull_and_unpack_external(&source, auth).await
             }
             ArtifactAcquireRequest::Git { .. } => {
+                let _ = auth;
                 let image_artifact = self.acquire(runner, request).await?;
                 let _bundle_dir = self
                     .materialize_rootfs_bundle_inprocess(&image_artifact)
@@ -180,11 +188,12 @@ impl ArtifactAcquirer {
     async fn pull_and_unpack_external(
         &self,
         source: &ArtifactSource,
+        auth: RegistryAuth,
     ) -> Result<ArtifactRecord, ArtifactAcquireError> {
         let ArtifactSource::ExternalRegistry { image } = source else {
             unreachable!();
         };
-        let pulled = self.puller.pull(image).await?;
+        let pulled = self.puller.pull(image, auth).await?;
         let digest = if pulled.digest.is_empty() {
             short_digest(image)
         } else {
@@ -276,11 +285,12 @@ impl ArtifactAcquirer {
         &self,
         _runner: &dyn CommandRunner,
         source: &ArtifactSource,
+        auth: RegistryAuth,
     ) -> Result<String, ArtifactAcquireError> {
         let ArtifactSource::ExternalRegistry { image } = source else {
             unreachable!("external image acquisition requires a registry source");
         };
-        let pulled = self.puller.pull(image).await?;
+        let pulled = self.puller.pull(image, auth).await?;
         if pulled.digest.is_empty() {
             Ok(short_digest(image))
         } else {

@@ -1,9 +1,5 @@
 pub mod config;
 pub mod credentials;
-#[cfg(feature = "ecr")]
-pub mod ecr;
-#[cfg(feature = "gar")]
-pub mod gar;
 pub mod layout;
 pub mod registry;
 pub mod unpack;
@@ -13,6 +9,7 @@ use std::path::Path;
 use thiserror::Error;
 
 pub use config::OciImageConfig;
+pub use oci_client::secrets::RegistryAuth;
 
 #[derive(Debug, Clone)]
 pub enum LayerCompression {
@@ -53,7 +50,7 @@ pub enum OciError {
 
 #[async_trait]
 pub trait OciImagePuller: Send + Sync {
-    async fn pull(&self, image: &str) -> Result<PulledImage, OciError>;
+    async fn pull(&self, image: &str, auth: RegistryAuth) -> Result<PulledImage, OciError>;
     async fn read_layout(&self, layout_dir: &Path) -> Result<PulledImage, OciError>;
 }
 

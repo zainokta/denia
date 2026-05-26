@@ -32,8 +32,6 @@ subtle = "2"
 
 [features]
 default = []
-ecr = []
-gar = []
 
 [dev-dependencies]
 http = "1"

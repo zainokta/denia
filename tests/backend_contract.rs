@@ -168,7 +168,7 @@ async fn artifact_acquirer_builds_git_source_with_buildkit() {
 async fn artifact_acquirer_pulls_external_image() {
     use async_trait::async_trait;
     use denia::oci::{
-        LayerBlob, OciError, OciImagePuller, OciRootfsUnpacker, PulledImage,
+        LayerBlob, OciError, OciImagePuller, OciRootfsUnpacker, PulledImage, RegistryAuth,
         config::OciImageConfig as OciCfg, config::OciImageProcessConfig,
     };
     use std::sync::Arc;
@@ -176,7 +176,7 @@ async fn artifact_acquirer_pulls_external_image() {
     struct FakePuller;
     #[async_trait]
     impl OciImagePuller for FakePuller {
-        async fn pull(&self, _image: &str) -> Result<PulledImage, OciError> {
+        async fn pull(&self, _image: &str, _auth: RegistryAuth) -> Result<PulledImage, OciError> {
             Ok(PulledImage {
                 digest: "sha256:pull123".to_string(),
                 config: OciCfg {
@@ -215,6 +215,7 @@ async fn artifact_acquirer_pulls_external_image() {
             ArtifactAcquireRequest::ExternalImage {
                 image: "ghcr.io/acme/web:latest".to_string(),
             },
+            RegistryAuth::Anonymous,
         )
         .await
         .expect("artifact");
