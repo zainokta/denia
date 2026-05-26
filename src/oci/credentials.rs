@@ -62,6 +62,18 @@ mod tests {
     }
 
     #[test]
+    fn basic_preserves_colon_in_password() {
+        let p = SecretPayload::new("alice:pass:with:colons");
+        match resolve_registry_auth(RegistryAuthKind::Basic, Some(&p)).unwrap() {
+            RegistryAuth::Basic(u, pw) => {
+                assert_eq!(u, "alice");
+                assert_eq!(pw, "pass:with:colons");
+            }
+            _ => panic!("expected basic"),
+        }
+    }
+
+    #[test]
     fn basic_rejects_malformed_payload() {
         let p = SecretPayload::new("no-colon");
         assert!(resolve_registry_auth(RegistryAuthKind::Basic, Some(&p)).is_err());

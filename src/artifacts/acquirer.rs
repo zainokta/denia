@@ -97,6 +97,13 @@ impl ArtifactAcquirer {
         }
     }
 
+    /// Acquire an artifact for the requested source.
+    ///
+    /// NOTE: the `ExternalImage` arm calls `puller.pull` with `RegistryAuth::Anonymous`.
+    /// This entrypoint is not the deploy path for private registries —
+    /// `deploy_external_image_source` uses `acquire_rootfs_bundle_from_image_config`
+    /// (which threads explicit auth). If a future caller needs private-registry support
+    /// via `acquire`, thread auth in instead of using this anonymous placeholder.
     pub async fn acquire(
         &self,
         runner: &dyn CommandRunner,
