@@ -1,6 +1,7 @@
 use super::credentials::AuthError;
 use super::principal::Principal;
-use crate::app::{ApiError, AppState};
+use crate::api::ApiError;
+use crate::app::AppState;
 use crate::domain::Role;
 
 pub(crate) fn ensure_role(

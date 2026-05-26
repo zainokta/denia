@@ -2,7 +2,8 @@ use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 
 use crate::access_log::AccessEntry;
-use crate::app::{ApiError, AppState};
+use crate::api::ApiError;
+use crate::app::AppState;
 use crate::auth::{Principal, ensure_role, ensure_super_admin};
 use crate::domain::Role;
 use crate::metrics::CgroupMetricsReader;

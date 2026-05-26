@@ -6,7 +6,8 @@ use axum::{
     routing::get,
 };
 
-use crate::app::{ApiError, AppState};
+use crate::api::ApiError;
+use crate::app::AppState;
 use crate::auth::{Principal, ensure_super_admin};
 use crate::traefik::RouteSpec;
 

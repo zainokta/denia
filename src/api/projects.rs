@@ -1,6 +1,7 @@
 use axum::{Json, Router, extract::State, routing::get};
 
-use crate::app::{ApiError, AppState};
+use crate::api::ApiError;
+use crate::app::AppState;
 use crate::auth::{Principal, ensure_role, ensure_super_admin};
 use crate::domain::{Project, Role};
 

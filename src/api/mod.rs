@@ -2,6 +2,7 @@ pub mod auth;
 pub mod credentials;
 pub mod deployments;
 pub mod domains;
+pub mod error;
 pub mod health;
 pub mod ingress;
 pub mod jobs;
@@ -12,3 +13,5 @@ pub mod registries;
 pub mod services;
 pub mod tokens;
 pub mod users;
+
+pub use error::ApiError;
