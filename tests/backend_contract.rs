@@ -1015,9 +1015,78 @@ async fn registry_api_admin_can_crud_no_credential_leak() {
     );
 }
 
-// Non-admin RBAC enforcement is covered by `require_project_role` unit tests in src/auth.rs.
-// HTTP-level RBAC roundtrip via app.oneshot hangs under the single-thread tokio test
-// runtime here; the underlying logic is identical (ensure_role -> require_project_role).
+#[tokio::test]
+async fn registry_api_non_admin_forbidden() {
+    let (app, store) = registry_api_test_app();
+    let project = create_project_for_test(&store, "p1");
+    let user = store.create_user("operator1", "", false).expect("user");
+    store
+        .set_membership(user.id, project.id, denia::domain::Role::Operator)
+        .expect("membership");
+    let api_token = store
+        .create_api_token(user.id, "op-token")
+        .expect("api token");
+    let plaintext = api_token.token_hash;
+
+    let body = serde_json::json!({
+        "name": "ghcr",
+        "endpoint": "ghcr.io",
+        "auth_kind": "basic",
+        "secret_ref": "ghcr-token",
+    });
+    let response = app
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri(format!("/v1/projects/{}/registries", project.id))
+                .header(http::header::AUTHORIZATION, format!("Bearer {plaintext}"))
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn service_put_rejects_unknown_registry_id() {
+    let (app, store) = registry_api_test_app();
+    let project = create_project_for_test(&store, "p1");
+
+    let service = ServiceConfig::new(
+        project.id,
+        "web",
+        vec!["web.example.test".to_string()],
+        ServiceSource::ExternalImage(ExternalImageSource {
+            image: String::new(),
+            credential: None,
+            registry_id: Some(Uuid::now_v7()),
+            image_ref: Some("acme/web:1".to_string()),
+        }),
+        3000,
+        HealthCheck::new("/ready", 5),
+        Some(ResourceLimits::default()),
+        vec![],
+    )
+    .expect("service");
+
+    let response = app
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri("/v1/services")
+                .header(http::header::AUTHORIZATION, "Bearer test-token")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&service).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+}
 
 #[tokio::test]
 async fn registry_api_delete_blocked_if_referenced() {
