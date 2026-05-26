@@ -1,5 +1,31 @@
 use super::credentials::AuthError;
 use super::principal::Principal;
+use crate::app::{ApiError, AppState};
+use crate::domain::Role;
+
+pub(crate) fn ensure_role(
+    state: &AppState,
+    principal: &Principal,
+    project_id: uuid::Uuid,
+    min: Role,
+) -> Result<(), ApiError> {
+    if principal.is_super_admin {
+        return Ok(());
+    }
+    let user_id = principal
+        .user_id
+        .ok_or_else(|| ApiError::Forbidden("authenticated user required".to_string()))?;
+    let role = state.users.role_for(user_id, project_id)?;
+    require_project_role(principal, role, min).map_err(Into::into)
+}
+
+pub(crate) fn ensure_super_admin(principal: &Principal) -> Result<(), ApiError> {
+    if principal.is_super_admin {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden("super admin required".to_string()))
+    }
+}
 
 pub fn require_project_role(
     principal: &Principal,
