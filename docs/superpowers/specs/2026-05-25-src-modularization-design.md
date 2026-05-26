@@ -1,7 +1,7 @@
 # Design: src/ Modularization and Per-Aggregate Repositories
 
-- **Date**: 2026-05-25
-- **ADR**: [012-src-modularization](../../adr/012-src-modularization.md)
+- **Date**: 2026-05-25 (updated 2026-05-26 to fold in ADR-013 domain verification, ADR-014 per-service registry, and the in-process namespace launcher rename)
+- **ADR**: [012-src-modularization](../../adr/012-src-modularization.md) — also related: [013-domain-verification](../../adr/013-domain-verification.md), [014-per-service-registry](../../adr/014-per-service-registry.md), [003-linux-runtime-process-runner](../../adr/003-linux-runtime-process-runner.md) (amended)
 - **Status**: Approved by user, ready for implementation plan
 
 ## Goal
@@ -29,7 +29,7 @@ src/
   config.rs                  // unchanged
   command.rs                 // unchanged (CommandRunner trait + TokioCommandRunner)
   health.rs                  // unchanged (HealthChecker trait + FakeHealthChecker)
-  cgroup_launcher.rs         // unchanged (small, single concern)
+  workload_launcher.rs       // unchanged (replaces removed cgroup_launcher.rs, commit 37683a6)
   scheduler.rs               // unchanged for this refactor
   secrets.rs                 // unchanged (flat, single concern)
   web.rs                     // unchanged (ADR-004 SPA embed)
@@ -47,11 +47,15 @@ src/
     tokens.rs                // /v1/tokens/*
     observability.rs         // /v1/node, /v1/projects/:p/access-log, /v1/projects/:p/logs/*
     ingress.rs               // /v1/projects/:p/routes/* inspection
+    domains.rs               // /v1/projects/:p/service_domains/* (authed) + pub challenge_handler (ADR-013)
+    registries.rs            // /v1/projects/:p/registries/* (authed, admin RBAC, ADR-014)
     health.rs                // /healthz (or keep in app.rs)
   domain/
     mod.rs                   // pub use service::*; pub use deployment::*; ...
     error.rs                 // DomainError
     service.rs               // ResourceLimits, HealthCheck, ServiceSource, GitSource, ExternalImageSource, ServiceConfig
+    service_domain.rs        // ServiceDomain, DomainStatus (ADR-013)
+    registry.rs              // Registry, RegistryAuthKind (ADR-014)
     deployment.rs            // Deployment, DeploymentRequest, DeploymentStatus, RuntimeStartRequest, RuntimeStatus
     project.rs               // Project, ProjectMembership
     user.rs                  // User, Role, Session, ApiToken, Me, PrincipalView, LoginResult
@@ -61,6 +65,8 @@ src/
     mod.rs                   // pub use traits + RepoError; pub mod sqlite; #[cfg(...)] pub mod mock;
     error.rs                 // RepoError
     service_repo.rs          // trait ServiceRepo
+    domain_repo.rs           // trait DomainRepo (service_domains, ADR-013)
+    registry_repo.rs         // trait RegistryRepo (ADR-014)
     project_repo.rs
     user_repo.rs
     deployment_repo.rs
@@ -71,6 +77,8 @@ src/
       mod.rs                 // pub use each Sqlite* repo
       pool.rs                // init_pool(path), init_pool_memory(), run_migrations()
       services.rs            // SqliteServiceRepo
+      domains.rs             // SqliteDomainRepo (service_domain CRUD)
+      registries.rs          // SqliteRegistryRepo (v6 migration owner, in-use guard on delete)
       projects.rs
       users.rs
       deployments.rs
@@ -108,6 +116,12 @@ src/
     principal.rs             // Principal (axum extractor)
     guards.rs                // require_project_role, require_super_admin, ensure_role
     middleware.rs            // resolve_auth (axum middleware fn)
+  verification/              // was src/domains.rs (renamed to avoid domain.rs/domains.rs collision, ADR-013)
+    mod.rs                   // pub use error::*; pub use validation::*; pub use verifier::*; pub use http::*;
+    error.rs                 // HostnameError, DomainVerifyError
+    validation.rs            // validate_hostname, generate_token
+    verifier.rs              // trait DomainVerifier
+    http.rs                  // HttpDomainVerifier
   artifacts/                 // unchanged (already folder-module)
   oci/                       // unchanged (already folder-module)
   syscall/                   // unchanged (already folder-module)
@@ -168,6 +182,8 @@ Pool ctor + migrations in `repo/sqlite/pool.rs::init_pool(path) -> Result<Sqlite
 pub struct AppState {
     pub config: AppConfig,
     pub services:        Arc<dyn ServiceRepo>,
+    pub domains:         Arc<dyn DomainRepo>,        // ADR-013 service_domains
+    pub registries:      Arc<dyn RegistryRepo>,      // ADR-014 per-service registries
     pub projects:        Arc<dyn ProjectRepo>,
     pub users:           Arc<dyn UserRepo>,
     pub deployments:     Arc<dyn DeploymentRepo>,
@@ -181,6 +197,7 @@ pub struct AppState {
     pub node_metrics:    Arc<dyn NodeMetricsReader>,
     pub bridge_alloc:    Arc<dyn BridgeAllocator>,
     pub bridge_supervisor: Arc<dyn LoopbackBridgeSupervisor>,
+    pub domain_verifier: Arc<dyn DomainVerifier>,    // crate::verification::DomainVerifier
     pub access_log:      AccessLogStore,
     pub coordinator:     Arc<DeploymentCoordinator>,
 }
@@ -311,16 +328,18 @@ Final manual smoke (after step 14):
 
 | Before | After |
 |--------|-------|
-| `src/domain.rs` | `src/domain/{mod,error,service,deployment,project,user,credential,job}.rs` |
+| `src/domain.rs` | `src/domain/{mod,error,service,service_domain,registry,deployment,project,user,credential,job}.rs` |
 | `src/runtime.rs` | `src/runtime/{mod,error,runtime_trait,plan,validation,fs_helpers,linux,fake}.rs` |
-| `src/state.rs` | `src/repo/{error,service_repo,project_repo,user_repo,deployment_repo,job_repo,token_repo,credential_repo}.rs` + `src/repo/sqlite/{mod,pool,services,projects,users,deployments,jobs,tokens,credentials}.rs` |
-| `src/app.rs` (handlers) | `src/api/{auth,services,deployments,workloads,projects,members,jobs,secrets,tokens,observability,ingress,health,error}.rs` |
-| `src/app.rs` (AppState, build_router) | `src/app.rs` (shrunk) |
+| `src/state.rs` | `src/repo/{error,service_repo,domain_repo,registry_repo,project_repo,user_repo,deployment_repo,job_repo,token_repo,credential_repo}.rs` + `src/repo/sqlite/{mod,pool,services,domains,registries,projects,users,deployments,jobs,tokens,credentials}.rs` |
+| `src/app.rs` (handlers) | `src/api/{auth,services,deployments,workloads,projects,members,jobs,secrets,tokens,observability,ingress,domains,registries,health,error}.rs` |
+| `src/app.rs` (AppState, build_router) | `src/app.rs` (shrunk; keeps 3-tier `auth_public.merge(auth_routes).merge(protected)` under `/v1`; unauthenticated `/healthz` and `/.well-known/denia-challenge/{token}` at root) |
 | `src/auth.rs` | `src/auth/{mod,principal,guards,middleware}.rs` |
 | `src/deploy.rs` | `src/deploy/{mod,error,coordinator,routes}.rs` |
+| `src/domains.rs` | `src/verification/{mod,error,validation,verifier,http}.rs` (renamed to kill `domain.rs`/`domains.rs` collision) |
 | `src/traefik.rs`, `src/bridge.rs`, `src/socket_proxy.rs` | `src/ingress/{mod,traefik,bridge,socket_proxy}.rs` |
 | `src/metrics.rs`, `src/node_metrics.rs`, `src/access_log.rs`, `src/logs.rs` | `src/observability/{mod,metrics,node_metrics,access_log,logs}.rs` |
-| `src/main.rs`, `src/lib.rs`, `src/config.rs`, `src/command.rs`, `src/health.rs`, `src/cgroup_launcher.rs`, `src/scheduler.rs`, `src/secrets.rs`, `src/web.rs` | unchanged (or `lib.rs` mod declarations updated) |
+| `src/cgroup_launcher.rs` | removed in commit `37683a6`; replaced by `src/workload_launcher.rs` (flat-kept) |
+| `src/main.rs`, `src/lib.rs`, `src/config.rs`, `src/command.rs`, `src/health.rs`, `src/workload_launcher.rs`, `src/scheduler.rs`, `src/secrets.rs`, `src/web.rs` | unchanged (or `lib.rs` mod declarations updated) |
 | `src/artifacts/`, `src/oci/`, `src/syscall/` | unchanged |
 
 ## References

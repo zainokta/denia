@@ -36,6 +36,20 @@ A domain-verification feature landed after the spec/ADR were committed. This pla
 - **Consumers**: `deploy.rs` reads verified `service_domains` to drive Traefik routes; `traefik.rs` emits the global `denia-challenge` path router. These move with their parent modules (Task 4, Task 5) — no structural change, just verify they compile against the new `DomainRepo`.
 - **Existing tests**: `tests/domain_verification.rs` already covers the verifier + API. Keep it; it must stay green through every step.
 
+### Per-Service Registry Feature (ADR-014, added 2026-05-26)
+
+A per-service OCI registry feature also landed after the spec was written:
+
+- **New types** (`src/domain.rs`): `Registry`, `RegistryAuthKind` (lines ~271, ~280). → new `domain/registry.rs`.
+- **New aggregate** — `registries` persistence (`src/state.rs`, 5 methods at lines 1087, 1101, 1117, 1131, 1145: `create_registry`, `update_registry`, `registry`, `registries_for_project`, `delete_registry`). Schema migration v6. → new `RegistryRepo` trait + `SqliteRegistryRepo`.
+- **API** (`src/app.rs`): authed handlers `create_registry`, `get_registry`, `update_registry_handler`, `delete_registry_handler` (project-scoped, admin RBAC). → `api/registries.rs`.
+- **Consumers**: `deploy.rs` calls `resolve_registry_auth` against the registries repo to pick credentials for the right per-service registry before pull (commits `7ea4505`, `6488806`). `domain.rs::ExternalImageSource` is dual-field for registry resolution (commit `442f7c0`). Both move with their parent modules in Tasks 5 and 1 — no extra structural change, just trait-rewire in Task 10.
+- **Existing tests**: registry behavior is covered by current `tests/*.rs` (no dedicated `registries` test file). The migration v6 and CRUD must stay green through Tasks 7–10.
+
+### Runtime Launcher Rename (commit `37683a6`)
+
+`src/cgroup_launcher.rs` was removed and replaced by `src/workload_launcher.rs` (in-process namespace adapter, ADR-003 amended). Plan-side change: wherever the original plan listed `cgroup_launcher.rs` as a flat-kept file, substitute `workload_launcher.rs`. No new folder-module — it is a single-file concern and stays flat.
+
 ### Router Tiers (correction to Task 11)
 
 Current `app.rs::build_router` has **three** nested groups under `/v1`, not one flat merge:
@@ -58,10 +72,10 @@ Task 11 must preserve all three tiers and the root-level unauthenticated routes.
 Created folder-modules (each contains a `mod.rs` re-exporting public symbols of its children):
 
 ```
-src/api/        {mod, error, auth, services, deployments, workloads, projects, members, jobs, secrets, tokens, observability, ingress, domains, health}.rs
-src/domain/     {mod, error, service, service_domain, deployment, project, user, credential, job}.rs
-src/repo/       {mod, error, service_repo, domain_repo, project_repo, user_repo, deployment_repo, job_repo, token_repo, credential_repo, mock}.rs
-src/repo/sqlite/{mod, pool, services, domains, projects, users, deployments, jobs, tokens, credentials}.rs
+src/api/        {mod, error, auth, services, deployments, workloads, projects, members, jobs, secrets, tokens, observability, ingress, domains, registries, health}.rs
+src/domain/     {mod, error, service, service_domain, registry, deployment, project, user, credential, job}.rs
+src/repo/       {mod, error, service_repo, domain_repo, registry_repo, project_repo, user_repo, deployment_repo, job_repo, token_repo, credential_repo, mock}.rs
+src/repo/sqlite/{mod, pool, services, domains, registries, projects, users, deployments, jobs, tokens, credentials}.rs
 src/runtime/    {mod, error, runtime_trait, plan, validation, fs_helpers, linux, fake}.rs
 src/ingress/    {mod, traefik, bridge, socket_proxy}.rs
 src/observability/{mod, metrics, node_metrics, access_log, logs}.rs
@@ -70,7 +84,7 @@ src/auth/       {mod, principal, guards, middleware}.rs
 src/verification/{mod, error, validation, verifier, http}.rs   # was src/domains.rs (renamed to avoid domain.rs/domains.rs clash)
 ```
 
-Unchanged (flat) files: `main.rs`, `lib.rs` (updated mod list), `app.rs` (shrunk), `config.rs`, `command.rs`, `health.rs`, `cgroup_launcher.rs`, `scheduler.rs`, `secrets.rs`, `web.rs`. Unchanged folder-modules: `artifacts/`, `oci/`, `syscall/`.
+Unchanged (flat) files: `main.rs`, `lib.rs` (updated mod list), `app.rs` (shrunk), `config.rs`, `command.rs`, `health.rs`, `workload_launcher.rs` (replaces removed `cgroup_launcher.rs`), `scheduler.rs`, `secrets.rs`, `web.rs`. Unchanged folder-modules: `artifacts/`, `oci/`, `syscall/`.
 
 Removed files: `src/state.rs` (after Task 10), `src/domains.rs` (after Task 6b).
 
@@ -103,6 +117,7 @@ DENIA_RUN_PRIVILEGED_TESTS=1 cargo test --test linux_runtime_privileged -- --ign
 - Create: `src/domain/error.rs`
 - Create: `src/domain/service.rs`
 - Create: `src/domain/service_domain.rs`
+- Create: `src/domain/registry.rs`
 - Create: `src/domain/deployment.rs`
 - Create: `src/domain/project.rs`
 - Create: `src/domain/user.rs`
@@ -117,6 +132,7 @@ DENIA_RUN_PRIVILEGED_TESTS=1 cargo test --test linux_runtime_privileged -- --ign
 | `DomainError` enum (line ~11) | `domain/error.rs` | `pub enum DomainError` |
 | `ResourceLimits`, `HealthCheck`, `ServiceSource`, `GitSource`, `ExternalImageSource`, `ServiceConfig`, `impl ServiceConfig` | `domain/service.rs` | all `pub` |
 | `ServiceDomain`, `DomainStatus` (lines ~214, ~221) | `domain/service_domain.rs` | all `pub` |
+| `Registry`, `RegistryAuthKind` (lines ~271, ~280) | `domain/registry.rs` | all `pub` |
 | `Deployment`, `DeploymentRequest`, `DeploymentStatus`, `RuntimeStartRequest`, `RuntimeStatus`, `impl DeploymentRequest` | `domain/deployment.rs` | all `pub` |
 | `Project`, `ProjectMembership`, `impl Project` | `domain/project.rs` | all `pub` |
 | `User`, `Role`, `Session`, `ApiToken`, `Me`, `PrincipalView`, `LoginResult`, `impl User` | `domain/user.rs` | all `pub` |
@@ -165,6 +181,10 @@ Move `Job`, `JobRun`, `JobRunRequest`, `JobRunStatus`, `JobOutcome`, `impl Job`.
 
 Move `ServiceDomain` and `DomainStatus`. Imports: serde, chrono, uuid. If `ServiceDomain` references `ServiceConfig` or a service id, use `crate::domain::service::*` or plain `Uuid`.
 
+- [ ] **Step 1.7c: Create `domain/registry.rs`**
+
+Move `Registry` (line ~280) and `RegistryAuthKind` (line ~271). Imports: serde, uuid, `crate::secrets::SecretRef` (RegistryAuthKind references secrets for Basic/Token auth). Also any `impl Registry` block — check current `domain.rs` lines ~280–320 for the full struct + impl.
+
 - [ ] **Step 1.8: Create `domain/mod.rs` with `pub use`**
 
 ```rust
@@ -173,6 +193,7 @@ pub mod deployment;
 pub mod error;
 pub mod job;
 pub mod project;
+pub mod registry;
 pub mod service;
 pub mod service_domain;
 pub mod user;
@@ -181,6 +202,7 @@ pub use credential::*;
 pub use deployment::*;
 pub use error::*;
 pub use job::*;
+pub use registry::*;
 pub use project::*;
 pub use service::*;
 pub use service_domain::*;
@@ -596,6 +618,7 @@ git commit -m "refactor(verification): rename domains.rs to verification/ folder
 - Create: `src/repo/error.rs`
 - Create: `src/repo/service_repo.rs`
 - Create: `src/repo/domain_repo.rs`
+- Create: `src/repo/registry_repo.rs`
 - Create: `src/repo/project_repo.rs`
 - Create: `src/repo/user_repo.rs`
 - Create: `src/repo/deployment_repo.rs`
@@ -799,6 +822,25 @@ pub trait DomainRepo: Send + Sync + 'static {
 
 Open `state.rs:1232` for the exact `update_service_domain_status` argument list — do not guess (it may take extra fields like `verified_at` or an error string).
 
+- [ ] **Step 7.8c: Create `src/repo/registry_repo.rs`** (per-service registry aggregate, ADR-014)
+
+```rust
+use uuid::Uuid;
+use crate::domain::Registry;
+use crate::repo::error::RepoError;
+
+#[allow(dead_code)]
+pub trait RegistryRepo: Send + Sync + 'static {
+    fn create_registry(&self, registry: &Registry) -> Result<(), RepoError>;
+    fn update_registry(&self, registry: &Registry) -> Result<(), RepoError>;
+    fn registry(&self, id: Uuid) -> Result<Option<Registry>, RepoError>;
+    fn registries_for_project(&self, project_id: Uuid) -> Result<Vec<Registry>, RepoError>;
+    fn delete_registry(&self, id: Uuid) -> Result<(), RepoError>;
+}
+```
+
+Open `state.rs:1087–1145` to confirm exact signatures (and any `in_use` guard returned by `delete_registry` — commit `7793c00` mentions one; map it to `RepoError::Conflict` if so).
+
 - [ ] **Step 7.9: Create `src/repo/sqlite/pool.rs`**
 
 ```rust
@@ -856,6 +898,7 @@ pub mod domain_repo;
 pub mod error;
 pub mod job_repo;
 pub mod project_repo;
+pub mod registry_repo;
 pub mod service_repo;
 pub mod sqlite;
 pub mod token_repo;
@@ -867,6 +910,7 @@ pub use domain_repo::DomainRepo;
 pub use error::RepoError;
 pub use job_repo::JobRepo;
 pub use project_repo::ProjectRepo;
+pub use registry_repo::RegistryRepo;
 pub use service_repo::ServiceRepo;
 pub use token_repo::TokenRepo;
 pub use user_repo::UserRepo;
@@ -967,7 +1011,11 @@ Move `put_credential`.
 
 - [ ] **Step 8.9b: Create `repo/sqlite/domains.rs`**
 
-Move the 7 service-domain methods: `put_service_domain`, `get_service_domain`, `get_service_domain_by_token`, `list_service_domains_by_service`, `update_service_domain_status`, `delete_service_domain`, `list_all_service_domains` (state.rs:1175–1290). Plus any private row-parse helper used only by these.
+Move the 7 service-domain methods: `put_service_domain`, `get_service_domain`, `get_service_domain_by_token`, `list_service_domains_by_service`, `update_service_domain_status`, `delete_service_domain`, `list_all_service_domains` (state.rs:1175–1290 — line ranges shifted; re-check before splitting). Plus any private row-parse helper used only by these.
+
+- [ ] **Step 8.9c: Create `repo/sqlite/registries.rs`** (ADR-014 per-service registry)
+
+Move the 5 registry methods: `create_registry`, `update_registry`, `registry`, `registries_for_project`, `delete_registry` (state.rs:1087–1145). Includes the in-use guard inside `delete_registry` (commit `7793c00`). Schema migration v6 stays in `pool.rs::run_migrations` (handled in Task 8.2).
 
 - [ ] **Step 8.10: Update `repo/sqlite/mod.rs`**
 
@@ -978,6 +1026,7 @@ pub mod domains;
 pub mod jobs;
 pub mod pool;
 pub mod projects;
+pub mod registries;
 pub mod services;
 pub mod tokens;
 pub mod users;
@@ -1066,6 +1115,8 @@ If duplication makes you uneasy, the alternative is to extract a `pub(crate) fn 
 
 - [ ] **Step 9.7b: Add `SqliteDomainRepo`** in `repo/sqlite/domains.rs` implementing `DomainRepo`.
 
+- [ ] **Step 9.7c: Add `SqliteRegistryRepo`** in `repo/sqlite/registries.rs` implementing `RegistryRepo`. Map the `delete_registry` in-use guard to `RepoError::Conflict("registry in use")`.
+
 - [ ] **Step 9.8: Re-export from `repo/sqlite/mod.rs`**
 
 ```rust
@@ -1075,6 +1126,7 @@ pub use domains::SqliteDomainRepo;
 pub use jobs::SqliteJobRepo;
 pub use pool::{SqlitePool, run_migrations};
 pub use projects::SqliteProjectRepo;
+pub use registries::SqliteRegistryRepo;
 pub use services::SqliteServiceRepo;
 pub use tokens::SqliteTokenRepo;
 pub use users::SqliteUserRepo;
@@ -1132,7 +1184,8 @@ If at any sub-step `cargo build` fails, do NOT commit. Fix or revert.
 use std::sync::Arc;
 
 use crate::repo::{
-    CredentialRepo, DeploymentRepo, DomainRepo, JobRepo, ProjectRepo, ServiceRepo, TokenRepo, UserRepo,
+    CredentialRepo, DeploymentRepo, DomainRepo, JobRepo, ProjectRepo, RegistryRepo, ServiceRepo,
+    TokenRepo, UserRepo,
 };
 use crate::verification::DomainVerifier;
 
@@ -1141,6 +1194,7 @@ pub struct AppState {
     pub config: AppConfig,
     pub services:        Arc<dyn ServiceRepo>,
     pub domains:         Arc<dyn DomainRepo>,
+    pub registries:      Arc<dyn RegistryRepo>,
     pub projects:        Arc<dyn ProjectRepo>,
     pub users:           Arc<dyn UserRepo>,
     pub deployments:     Arc<dyn DeploymentRepo>,
@@ -1198,7 +1252,8 @@ impl AppState {
             .jobs(Arc::new(SqliteJobRepo::new(pool.clone())))
             .tokens(Arc::new(SqliteTokenRepo::new(pool.clone())))
             .credentials(Arc::new(SqliteCredentialRepo::new(pool.clone())))
-            .domains(Arc::new(SqliteDomainRepo::new(pool)))
+            .domains(Arc::new(SqliteDomainRepo::new(pool.clone())))
+            .registries(Arc::new(SqliteRegistryRepo::new(pool)))
             .runtime(/* default production runtime */)
             .domain_verifier(Arc::new(crate::verification::HttpDomainVerifier::new()))
             .access_log(/* ... */)
@@ -1223,8 +1278,11 @@ For each handler in `app.rs`, replace `state.store.<method>` with `state.<aggreg
 | `*_api_token*` | `state.tokens` |
 | `put_credential` | `state.credentials` |
 | `*_service_domain*`, `list_all_service_domains`, `get_service_domain_by_token` | `state.domains` |
+| `create_registry`, `update_registry`, `registry`, `registries_for_project`, `delete_registry` | `state.registries` |
 
 `challenge_handler` (the unauthenticated route) calls `state.store.get_service_domain_by_token` today → becomes `state.domains.get_service_domain_by_token`. Update it too.
+
+`deploy.rs::resolve_registry_auth` and the per-service registry pull path (commits `7ea4505`, `6488806`) call `state.store.registry(...)` and `registries_for_project(...)` — rewrite to `state.registries.*`.
 
 Mechanical sweep with grep + edit:
 
@@ -1272,7 +1330,7 @@ If any test fails, fix in this commit. Do not split into a fix-up commit on mast
 
 **Files:**
 - Create: `src/api/mod.rs`
-- Create: `src/api/auth.rs`, `services.rs`, `deployments.rs`, `workloads.rs`, `projects.rs`, `members.rs`, `jobs.rs`, `secrets.rs`, `tokens.rs`, `observability.rs`, `ingress.rs`, `domains.rs`, `health.rs`
+- Create: `src/api/auth.rs`, `services.rs`, `deployments.rs`, `workloads.rs`, `projects.rs`, `members.rs`, `jobs.rs`, `secrets.rs`, `tokens.rs`, `observability.rs`, `ingress.rs`, `domains.rs`, `registries.rs`, `health.rs`
 - Modify: `src/app.rs` — leave only `AppState`, `AppStateBuilder`, `build_router`, and the unauthenticated `challenge_handler` (or move `challenge_handler` into `api/domains.rs` and re-export)
 - Modify: `src/lib.rs` — add `pub mod api;`
 
@@ -1325,6 +1383,7 @@ pub mod jobs;
 pub mod members;
 pub mod observability;
 pub mod projects;
+pub mod registries;
 pub mod secrets;
 pub mod services;
 pub mod tokens;
@@ -1359,6 +1418,8 @@ pub mod workloads;
 
 - [ ] **Step 11.13b: Extract `api/domains.rs`** — authed service-domain handlers `create_service_domain`, `list_service_domains`, `verify_service_domain`, `delete_service_domain_handler` (their `/v1/...` routes). Also move `challenge_handler` here and expose it as `pub async fn challenge_handler(...)` so `build_router` can mount it at root, unauthenticated. The verify handler calls `state.domain_verifier` + `state.domains`; the others call `state.domains`. Note `verify_service_domain` is async and may await the verifier.
 
+- [ ] **Step 11.13c: Extract `api/registries.rs`** — authed per-service registry handlers (ADR-014): `create_registry`, `get_registry`, `update_registry_handler`, `delete_registry_handler` (app.rs:620–700). Project-scoped under `/v1/projects/{project_id}/registries`, admin RBAC. All call `state.registries.*`. Keep the exact route strings + methods from the current `app.rs::build_router` — copy them verbatim.
+
 - [ ] **Step 11.14: Extract `api/health.rs`** — `pub async fn healthz() -> Json<HealthResponse>`. Plus `HealthResponse` struct.
 
 - [ ] **Step 11.15: Rewrite `src/app.rs::build_router`** — preserve the **three nested tiers** under `/v1` and the **two unauthenticated root routes**. Current shape (do not collapse):
@@ -1382,6 +1443,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(api::observability::router())
         .merge(api::ingress::router())
         .merge(api::domains::router())                 // authed service-domain CRUD
+        .merge(api::registries::router())              // authed per-service registry CRUD (ADR-014)
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     Router::new()
@@ -1652,6 +1714,8 @@ Each gets:
 
 Includes `InMemoryDomainRepo` for `DomainRepo`. Its `get_service_domain_by_token` needs a secondary token→id lookup; back it with a second `HashMap<String, Uuid>` or scan the values map. Add a contract test asserting `put_service_domain` then `get_service_domain_by_token` round-trips — this path is exercised by the unauthenticated challenge route, so it matters.
 
+Includes `InMemoryRegistryRepo` for `RegistryRepo` (ADR-014). Contract tests: `create_registry` then `registry`/`registries_for_project` round-trip; `delete_registry` returns `RepoError::Conflict` when an in-use guard would fire (in-memory mock can stub the check by tracking refs from a fake services map, or simply skip — the in-use guard is exercised by the live SQLite contract test, not the mock).
+
 Keep mocks minimal — they exist for handler tests, not as a second prod backend.
 
 - [ ] **Step 13.7: Write the first handler oneshot test**
@@ -1668,6 +1732,7 @@ use denia::app::{AppState, build_router};
 use denia::repo::mock::{
     InMemoryServiceRepo, InMemoryProjectRepo, InMemoryUserRepo, InMemoryDeploymentRepo,
     InMemoryJobRepo, InMemoryTokenRepo, InMemoryCredentialRepo, InMemoryDomainRepo,
+    InMemoryRegistryRepo,
 };
 use denia::runtime::FakeRuntime;
 use denia::verification::HttpDomainVerifier;
@@ -1677,6 +1742,7 @@ fn test_state() -> AppState {
         .config(/* test AppConfig */)
         .services(Arc::new(InMemoryServiceRepo::default()))
         .domains(Arc::new(InMemoryDomainRepo::default()))
+        .registries(Arc::new(InMemoryRegistryRepo::default()))
         .projects(Arc::new(InMemoryProjectRepo::default()))
         .users(Arc::new(InMemoryUserRepo::default()))
         .deployments(Arc::new(InMemoryDeploymentRepo::default()))
