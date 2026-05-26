@@ -76,12 +76,10 @@ impl SqliteStore {
     }
 }
 
-#[allow(dead_code)]
 pub struct SqliteServiceRepo {
     pool: SqlitePool,
 }
 
-#[allow(dead_code)]
 impl SqliteServiceRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }

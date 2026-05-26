@@ -15,7 +15,6 @@ use uuid::Uuid;
 use crate::domain::{Project, ServiceConfig};
 use crate::repo::error::RepoError;
 
-#[allow(dead_code)]
 fn apply_sqlite_pragmas(connection: &Connection) -> Result<(), RepoError> {
     connection.execute_batch(
         r#"
@@ -28,13 +27,11 @@ fn apply_sqlite_pragmas(connection: &Connection) -> Result<(), RepoError> {
     Ok(())
 }
 
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct SqlitePool {
     pub(crate) inner: Arc<Mutex<Connection>>,
 }
 
-#[allow(dead_code)]
 impl SqlitePool {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RepoError> {
         let connection = Connection::open(path.as_ref())?;

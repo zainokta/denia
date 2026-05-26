@@ -128,12 +128,10 @@ impl SqliteStore {
     }
 }
 
-#[allow(dead_code)]
 pub struct SqliteTokenRepo {
     pool: SqlitePool,
 }
 
-#[allow(dead_code)]
 impl SqliteTokenRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }

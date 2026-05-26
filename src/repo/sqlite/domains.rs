@@ -259,12 +259,10 @@ fn row_to_service_domain(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServiceDom
     })
 }
 
-#[allow(dead_code)]
 pub struct SqliteDomainRepo {
     pool: SqlitePool,
 }
 
-#[allow(dead_code)]
 impl SqliteDomainRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }

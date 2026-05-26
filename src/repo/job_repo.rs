@@ -6,7 +6,6 @@ use uuid::Uuid;
 use crate::domain::{Job, JobRun, JobRunStatus};
 use crate::repo::error::RepoError;
 
-#[allow(dead_code)]
 pub trait JobRepo: Send + Sync + 'static {
     fn put_job(&self, job: Job) -> Result<Job, RepoError>;
     fn get_job(&self, job_id: Uuid) -> Result<Option<Job>, RepoError>;
