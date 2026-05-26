@@ -1,24 +1,23 @@
 pub mod app;
 pub mod artifacts;
 pub mod auth;
-pub mod bridge;
 pub mod command;
 pub mod config;
 pub mod deploy;
 pub mod domain;
 pub mod domains;
 pub mod health;
+pub mod ingress;
 pub mod observability;
 pub mod oci;
 pub mod rate_limit;
 pub mod runtime;
 pub mod scheduler;
 pub mod secrets;
-pub mod socket_proxy;
 pub mod state;
 pub mod syscall;
-pub mod traefik;
 pub mod web;
 pub mod workload_launcher;
 
+pub use ingress::{bridge, socket_proxy, traefik};
 pub use observability::{access_log, logs, metrics, node_metrics};
