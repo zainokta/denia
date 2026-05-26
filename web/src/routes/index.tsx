@@ -1,95 +1,260 @@
 import { createFileRoute } from '@tanstack/react-router'
+import { useQuery } from '@tanstack/react-query'
+import { Effect } from 'effect'
+import { useMemo } from 'react'
+import { ApiClient } from '#/effect/api-client'
+import { runQuery } from '#/effect/runtime'
+import { StatusSignal } from '#/components/StatusSignal'
+import { DeployPhase } from '#/components/DeployPhase'
 
-export const Route = createFileRoute('/')({ component: App })
+const getNodeMetrics = Effect.gen(function* () {
+  const api = yield* ApiClient
+  return yield* api.getNodeMetrics
+})
 
-const surfaces: Array<[string, string, string]> = [
-  ['services', 'deploy, inspect, restart workloads', 'steady'],
-  ['routes', 'Denia-owned sockets, Traefik bridge', 'steady'],
-  ['secrets', 'SOPS-referenced, never stored raw', 'steady'],
-  ['runtime', 'cgroup v2 + procfs metrics', 'steady'],
-]
+const listWorkloads = Effect.gen(function* () {
+  const api = yield* ApiClient
+  return yield* api.listWorkloads
+})
 
-function App() {
+const listServices = Effect.gen(function* () {
+  const api = yield* ApiClient
+  return yield* api.listServices
+})
+
+const getServiceDeployments = (id: number) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.getServiceDeployments(id)
+  })
+
+export const Route = createFileRoute('/')({ component: Dashboard })
+
+function CpuPercent(cpu: {
+  user_jiffies: number
+  nice_jiffies: number
+  system_jiffies: number
+  idle_jiffies: number
+  iowait_jiffies: number
+}): string {
+  const total =
+    cpu.user_jiffies +
+    cpu.nice_jiffies +
+    cpu.system_jiffies +
+    cpu.idle_jiffies +
+    cpu.iowait_jiffies
+  if (total === 0) return '0.0'
+  const busy =
+    cpu.user_jiffies + cpu.nice_jiffies + cpu.system_jiffies + cpu.iowait_jiffies
+  return ((busy / total) * 100).toFixed(1)
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1_073_741_824)
+    return `${(bytes / 1_073_741_824).toFixed(1)} GiB`
+  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MiB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${bytes} B`
+}
+
+function formatDisk(total: number, available: number): string {
+  const used = total - available
+  const pct = total > 0 ? ((used / total) * 100).toFixed(1) : '0.0'
+  return `${formatBytes(used)} / ${formatBytes(total)} (${pct}%)`
+}
+
+export function Dashboard() {
+  const { data: nodeMetrics } = useQuery({
+    queryKey: ['node', 'metrics'],
+    queryFn: () => runQuery(getNodeMetrics),
+    refetchInterval: 5000,
+    refetchIntervalInBackground: false,
+  })
+
+  const { data: workloads = [] } = useQuery({
+    queryKey: ['workloads'],
+    queryFn: () => runQuery(listWorkloads),
+    refetchInterval: 5000,
+    refetchIntervalInBackground: false,
+  })
+
+  const { data: services = [] } = useQuery({
+    queryKey: ['services'],
+    queryFn: () => runQuery(listServices),
+  })
+
+  const running = workloads.filter(
+    (w) => w.status && w.status !== 'Stopped',
+  )
+
+  const hasServices = services.length > 0
+
+  const serviceIds = useMemo(
+    () => services.map((s) => s.id),
+    [services],
+  )
+
   return (
     <main className="page-wrap px-4 pb-12 pt-12">
-      <section className="max-w-3xl">
-        <p className="kicker mb-3">single-node control plane</p>
-        <h1 className="mb-4 text-3xl font-semibold leading-tight tracking-tight text-[var(--fg)] sm:text-4xl">
-          Run workloads without Docker. Watch the machine directly.
-        </h1>
-        <p className="prose-sans mb-7 text-[var(--fg-muted)]">
-          Denia is a Docker-free PaaS with its own Linux runtime isolation. This
-          console exposes the control-plane API as a fast operator surface: no
-          magic, no hidden state, just what the node is doing.
+      {/* Node health summary — dense, mono, flat */}
+      {nodeMetrics ? (
+        <section className="mb-10">
+          <p className="kicker mb-3">node health</p>
+          <div className="flex flex-wrap gap-x-8 gap-y-2 text-sm">
+            <span className="tnum inline-flex items-baseline gap-2 text-[var(--fg)]">
+              <span className="text-xs text-[var(--fg-muted)]">cpu</span>
+              {CpuPercent(nodeMetrics.cpu)}%
+            </span>
+            <span className="tnum inline-flex items-baseline gap-2 text-[var(--fg)]">
+              <span className="text-xs text-[var(--fg-muted)]">mem</span>
+              {formatBytes(
+                nodeMetrics.memory_total_bytes -
+                  nodeMetrics.memory_available_bytes,
+              )}{' '}
+              / {formatBytes(nodeMetrics.memory_total_bytes)}
+            </span>
+            <span className="tnum inline-flex items-baseline gap-2 text-[var(--fg)]">
+              <span className="text-xs text-[var(--fg-muted)]">disk</span>
+              {formatDisk(
+                nodeMetrics.disk_total_bytes,
+                nodeMetrics.disk_available_bytes,
+              )}
+            </span>
+            <span className="tnum inline-flex items-baseline gap-2 text-[var(--fg)]">
+              <span className="text-xs text-[var(--fg-muted)]">load</span>
+              {nodeMetrics.load_1m.toFixed(2)} /{' '}
+              {nodeMetrics.load_5m.toFixed(2)} /{' '}
+              {nodeMetrics.load_15m.toFixed(2)}
+            </span>
+          </div>
+        </section>
+      ) : null}
+
+      {/* Running workloads */}
+      <section className="mb-10">
+        <p className="kicker mb-3">
+          workloads{' '}
+          <span className="text-[var(--fg-muted)]">
+            {running.length} running
+          </span>
         </p>
-        <div className="flex flex-wrap gap-3">
-          <a href="/demo/tanstack-query" className="btn btn-primary">
-            View live data
-          </a>
-          <a href="/about" className="btn">
-            About denia
-          </a>
-        </div>
+        {running.length === 0 ? (
+          <p className="text-sm text-[var(--fg-muted)]">
+            No running workloads.
+          </p>
+        ) : (
+          <div className="panel overflow-hidden">
+            <ul className="m-0 list-none">
+              {running.slice(0, 5).map((w, i) => (
+                <li
+                  key={`${w.service_id}-${w.deployment_id ?? i}`}
+                  className={`flex items-center gap-4 px-4 py-2.5 text-sm ${
+                    i > 0 ? 'border-t border-[var(--border)]' : ''
+                  }`}
+                >
+                  {w.status ? <StatusSignal status={w.status} /> : null}
+                  <span className="font-semibold text-[var(--fg)] min-w-0 truncate">
+                    {w.service_name}
+                  </span>
+                  {w.cpu_usage_usec !== null ? (
+                    <span className="tnum text-xs text-[var(--fg-muted)] ml-auto">
+                      {(w.cpu_usage_usec / 10000).toFixed(1)}%
+                    </span>
+                  ) : null}
+                  {w.memory_current_bytes !== null ? (
+                    <span className="tnum text-xs text-[var(--fg-muted)]">
+                      {formatBytes(w.memory_current_bytes)}
+                    </span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </section>
 
-      <section className="mt-12">
-        <p className="kicker mb-3">state legend</p>
-        <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-[var(--fg-muted)]">
-          <span className="inline-flex items-center gap-2">
-            <span className="signal signal-steady" /> Stagecraft &mdash; steady /
-            healthy
-          </span>
-          <span className="inline-flex items-center gap-2">
-            <span className="signal signal-fault" /> Breakdown &mdash; fault /
-            attention
-          </span>
-          <span className="inline-flex items-center gap-2">
-            <span className="signal signal-ok" /> ok
-          </span>
-          <span className="inline-flex items-center gap-2">
-            <span className="signal signal-warn" /> warn
-          </span>
-        </div>
+      {/* Recent deployments timeline — last 5 across all services */}
+      <section className="mb-10">
+        <p className="kicker mb-3">recent deployments</p>
+        {serviceIds.length === 0 ? (
+          <p className="text-sm text-[var(--fg-muted)]">
+            No services yet.
+          </p>
+        ) : (
+          <RecentDeployments serviceIds={serviceIds} />
+        )}
       </section>
 
-      <section className="panel mt-8 overflow-hidden">
-        <p className="kicker border-b border-[var(--border)] px-4 py-2.5">
-          control surfaces
-        </p>
-        <dl className="m-0">
-          {surfaces.map(([name, desc], i) => (
-            <div
-              key={name}
-              className={`flex items-baseline gap-4 px-4 py-3 ${
-                i > 0 ? 'border-t border-[var(--border)]' : ''
-              }`}
-            >
-              <dt className="flex w-32 flex-shrink-0 items-center gap-2 text-sm font-semibold text-[var(--fg)]">
-                <span className="signal signal-steady" />
-                {name}
-              </dt>
-              <dd className="m-0 text-sm text-[var(--fg-muted)]">{desc}</dd>
-            </div>
-          ))}
-        </dl>
-      </section>
-
-      <section className="mt-8">
-        <p className="kicker mb-2">quick start</p>
-        <ul className="m-0 list-none space-y-1.5 text-sm text-[var(--fg-muted)]">
-          <li>
-            edit <code>src/routes/index.tsx</code> for this overview
-          </li>
-          <li>
-            wire the control-plane API in a Query client under{' '}
-            <code>src/integrations/tanstack-query/</code>
-          </li>
-          <li>
-            visual tokens live in <code>src/styles.css</code>; design law in
-            repo-root <code>DESIGN.md</code>
-          </li>
-        </ul>
-      </section>
+      {/* Getting started when no services exist */}
+      {!hasServices ? (
+        <section className="panel p-6">
+          <p className="kicker mb-3">getting started</p>
+          <p className="mb-4 text-sm text-[var(--fg-muted)]">
+            Create a project, then deploy your first service.
+          </p>
+          <div className="flex flex-wrap gap-3">
+            <a href="/projects" className="btn btn-primary">
+              Projects
+            </a>
+            <a href="/services" className="btn">
+              Services
+            </a>
+          </div>
+        </section>
+      ) : null}
     </main>
+  )
+}
+
+function RecentDeployments({ serviceIds }: { serviceIds: number[] }) {
+  // Fetch deployments for each service — in a real app with many services
+  // we'd want a backend aggregate endpoint, but for solo-operator scale
+  // this is fine.
+  return (
+    <div className="panel overflow-hidden">
+      <DeploymentRows serviceIds={serviceIds} maxRows={5} />
+    </div>
+  )
+}
+
+function DeploymentRows({
+  serviceIds,
+  maxRows,
+}: {
+  serviceIds: number[]
+  maxRows: number
+}) {
+  // Fetch the first service's deployments to render something useful
+  // without excessive parallel queries. In practice, a single-node operator
+  // has few services. We render inline loading per service.
+  return (
+    <>
+      {serviceIds.slice(0, maxRows).map((id) => (
+        <ServiceDeploymentRow key={id} serviceId={id} />
+      ))}
+    </>
+  )
+}
+
+function ServiceDeploymentRow({ serviceId }: { serviceId: number }) {
+  const { data: deployments = [] } = useQuery({
+    queryKey: ['services', serviceId, 'deployments'],
+    queryFn: () => runQuery(getServiceDeployments(serviceId)),
+    refetchInterval: 5000,
+    refetchIntervalInBackground: false,
+  })
+
+  if (deployments.length === 0) return null
+
+  const newest = deployments.reduce((a, b) => (a.id > b.id ? a : b))
+
+  return (
+    <div className="flex items-center gap-4 px-4 py-2.5 text-sm border-t border-[var(--border)] first:border-t-0">
+      <StatusSignal status={newest.status} />
+      <DeployPhase status={newest.status} />
+      <span className="tnum text-xs text-[var(--fg-muted)] ml-auto">
+        {newest.created_at}
+      </span>
+    </div>
   )
 }

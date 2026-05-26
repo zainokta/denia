@@ -5,7 +5,7 @@ import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
 import { useAuth } from '#/hooks/useAuth'
-import type { Role } from '#/effect/schema'
+import type { RegistryInput, Role } from '#/effect/schema'
 
 const getProject = (id: string) =>
   Effect.gen(function* () {
@@ -35,6 +35,24 @@ const removeMember = (projectId: string, userId: string) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
     return yield* api.removeMember(projectId, userId)
+  })
+
+const listRegistries = (projectId: string) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.listRegistries(projectId)
+  })
+
+const createRegistry = (projectId: string, input: RegistryInput) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.createRegistry(projectId, input)
+  })
+
+const deleteRegistry = (projectId: string, registryId: string) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.deleteRegistry(projectId, registryId)
   })
 
 export const Route = createFileRoute('/projects/$projectId')({
@@ -95,6 +113,62 @@ export function ProjectDetail() {
       const msg =
         error instanceof Error ? error.message : 'Failed to delete'
       setDeleteError(msg)
+    },
+  })
+
+  const [regName, setRegName] = useState('')
+  const [regEndpoint, setRegEndpoint] = useState('')
+  const [regAuthKind, setRegAuthKind] = useState<string>('Anonymous')
+  const [regCredRef, setRegCredRef] = useState('')
+  const [regCreateError, setRegCreateError] = useState('')
+  const [regDeleteConfirm, setRegDeleteConfirm] = useState<string | null>(null)
+  const [regDeleteError, setRegDeleteError] = useState('')
+
+  const { data: registries = [] } = useQuery({
+    queryKey: ['projects', projectId, 'registries'],
+    queryFn: () => runQuery(listRegistries(projectId)),
+    enabled: projectId.length > 0 && canManage,
+  })
+
+  const createRegMutation = useMutation({
+    mutationFn: (input: RegistryInput) =>
+      runQuery(createRegistry(projectId, input)),
+    onSuccess: () => {
+      setRegName('')
+      setRegEndpoint('')
+      setRegAuthKind('Anonymous')
+      setRegCredRef('')
+      setRegCreateError('')
+      queryClient.invalidateQueries({
+        queryKey: ['projects', projectId, 'registries'],
+      })
+    },
+    onError: (error: unknown) => {
+      const msg =
+        error instanceof Error ? error.message : 'Failed to create registry'
+      setRegCreateError(msg)
+    },
+  })
+
+  const deleteRegMutation = useMutation({
+    mutationFn: (registryId: string) =>
+      runQuery(deleteRegistry(projectId, registryId)),
+    onSuccess: () => {
+      setRegDeleteConfirm(null)
+      setRegDeleteError('')
+      queryClient.invalidateQueries({
+        queryKey: ['projects', projectId, 'registries'],
+      })
+    },
+    onError: (error: unknown) => {
+      const msg =
+        error instanceof Error ? error.message : ''
+      setRegDeleteError(
+        msg.toLowerCase().includes('in use')
+          ? 'Registry is in use by one or more services.'
+          : msg,
+      )
+      setRegDeleteConfirm(null)
     },
   })
 
@@ -261,6 +335,151 @@ export function ProjectDetail() {
           </form>
         ) : null}
       </section>
+
+      {canManage ? (
+        <section className="panel mb-8 overflow-hidden">
+          <p className="kicker border-b border-[var(--border)] px-4 py-2.5">
+            registries
+          </p>
+
+          {regDeleteError ? (
+            <div className="px-4 py-2 text-xs text-[var(--violet)]">
+              <span className="signal signal-fault mr-2 inline-block align-middle" />
+              {regDeleteError}
+            </div>
+          ) : null}
+
+          {registries.length === 0 ? (
+            <p className="px-4 py-3 text-sm text-[var(--fg-muted)]">
+              No registries configured.
+            </p>
+          ) : (
+            <ul className="m-0 list-none">
+              {registries.map((r, i) => (
+                <li
+                  key={r.id}
+                  className={`flex items-center gap-4 px-4 py-2.5 text-sm ${
+                    i > 0 ? 'border-t border-[var(--border)]' : ''
+                  }`}
+                >
+                  <span className="font-semibold text-[var(--fg)]">
+                    {r.name}
+                  </span>
+                  <span className="tnum text-xs text-[var(--fg-muted)]">
+                    {r.endpoint}
+                  </span>
+                  <span className="kicker">{r.auth_kind}</span>
+                  {r.credential_ref ? (
+                    <span className="text-xs text-[var(--fg-muted)]">
+                      cred: {r.credential_ref}
+                    </span>
+                  ) : null}
+
+                  {regDeleteConfirm === r.id ? (
+                    <span className="inline-flex items-center gap-1 text-xs ml-auto">
+                      <span className="text-[var(--violet)]">remove?</span>
+                      <button
+                        type="button"
+                        className="btn text-xs"
+                        onClick={() => {
+                          deleteRegMutation.mutate(r.id)
+                        }}
+                        disabled={deleteRegMutation.isPending}
+                      >
+                        yes
+                      </button>
+                      <button
+                        type="button"
+                        className="btn text-xs"
+                        onClick={() => setRegDeleteConfirm(null)}
+                      >
+                        no
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn text-xs ml-auto"
+                      onClick={() => setRegDeleteConfirm(r.id)}
+                    >
+                      delete
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {regCreateError ? (
+            <div className="border-t border-[var(--border)] px-4 py-2 text-xs text-[var(--violet)]">
+              {regCreateError}
+            </div>
+          ) : null}
+
+          <form
+            className="flex flex-wrap items-end gap-2 border-t border-[var(--border)] px-4 py-3"
+            onSubmit={(e) => {
+              e.preventDefault()
+              const name = regName.trim()
+              const endpoint = regEndpoint.trim()
+              if (!name || !endpoint) return
+              createRegMutation.mutate({
+                name,
+                endpoint,
+                auth_kind: regAuthKind as RegistryInput['auth_kind'],
+                credential_ref:
+                  regCredRef.trim().length > 0
+                    ? regCredRef.trim()
+                    : null,
+              })
+            }}
+          >
+            <input
+              type="text"
+              placeholder="name"
+              value={regName}
+              onChange={(e) => setRegName(e.target.value)}
+              className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]"
+            />
+            <input
+              type="text"
+              placeholder="endpoint"
+              value={regEndpoint}
+              onChange={(e) => setRegEndpoint(e.target.value)}
+              className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]"
+            />
+            <select
+              value={regAuthKind}
+              onChange={(e) => setRegAuthKind(e.target.value)}
+              className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm text-[var(--fg)]"
+            >
+              <option value="Anonymous">Anonymous</option>
+              <option value="Basic">Basic</option>
+              <option value="Token">Token</option>
+              <option value="EcrToken">ECR Token</option>
+              <option value="GarToken">GAR Token</option>
+            </select>
+            <input
+              type="text"
+              placeholder="credential ref (optional)"
+              value={regCredRef}
+              onChange={(e) => setRegCredRef(e.target.value)}
+              className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]"
+            />
+            <button
+              type="submit"
+              className="btn btn-primary text-xs"
+              disabled={
+                createRegMutation.isPending ||
+                regName.trim().length === 0 ||
+                regEndpoint.trim().length === 0
+              }
+            >
+              {createRegMutation.isPending ? 'creating...' : 'add registry'}
+            </button>
+          </form>
+        </section>
+      ) : null}
 
       <section className="mb-8">
         {deleteError && (

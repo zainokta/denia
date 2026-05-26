@@ -1,5 +1,6 @@
 import { createFileRoute, useParams } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useState } from 'react'
 import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
@@ -7,6 +8,7 @@ import { StatusSignal } from '#/components/StatusSignal'
 import { DeployPhase } from '#/components/DeployPhase'
 import { TlsToggle } from '#/components/TlsToggle'
 import { SecurityBadge } from '#/components/SecurityBadge'
+import { useAuth, can } from '#/hooks/useAuth'
 import type { Deployment } from '#/effect/schema'
 
 const getDeployments = (id: number) =>
@@ -45,6 +47,30 @@ const getRequests = (id: string) =>
     return yield* api.listServiceRequests(id)
   })
 
+const listDomains = (serviceId: number) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.listDomains(serviceId)
+  })
+
+const addDomain = (serviceId: number, hostname: string) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.addDomain(serviceId, hostname)
+  })
+
+const verifyDomain = (serviceId: number, domainId: string) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.verifyDomain(serviceId, domainId)
+  })
+
+const deleteDomain = (serviceId: number, domainId: string) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.deleteDomain(serviceId, domainId)
+  })
+
 const listServices = Effect.gen(function* () {
   const api = yield* ApiClient
   return yield* api.listServices
@@ -58,6 +84,10 @@ export function ServiceDetail() {
   const params = useParams({ from: '/services/$serviceId' })
   const id = Number(params.serviceId)
   const queryClient = useQueryClient()
+  const { isSuperAdmin, roleForActiveProject } = useAuth()
+  const [domainHostname, setDomainHostname] = useState('')
+  const [domainDeleteConfirm, setDomainDeleteConfirm] = useState<string | null>(null)
+  const [domainDeleteError, setDomainDeleteError] = useState('')
 
   const isInProgress = (() => {
     const data = (queryClient.getQueryData([
@@ -112,6 +142,58 @@ export function ServiceDetail() {
   })
   const service = services.find((s) => s.id === id)
 
+  const canOperate = (() => {
+    if (isSuperAdmin) return true
+    if (!service) return false
+    const role = roleForActiveProject(String(service.project_id))
+    return role !== undefined && can('operator', role)
+  })()
+
+  const { data: domains = [] } = useQuery({
+    queryKey: ['services', id, 'domains'],
+    queryFn: () => runQuery(listDomains(id)),
+    enabled: canOperate,
+  })
+
+  const addDomainMutation = useMutation({
+    mutationFn: (hostname: string) =>
+      runQuery(addDomain(id, hostname)),
+    onSuccess: () => {
+      setDomainHostname('')
+      queryClient.invalidateQueries({
+        queryKey: ['services', id, 'domains'],
+      })
+    },
+  })
+
+  const verifyMutation = useMutation({
+    mutationFn: (domainId: string) =>
+      runQuery(verifyDomain(id, domainId)),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ['services', id, 'domains'],
+      })
+    },
+  })
+
+  const deleteDomainMutation = useMutation({
+    mutationFn: (domainId: string) =>
+      runQuery(deleteDomain(id, domainId)),
+    onSuccess: () => {
+      setDomainDeleteConfirm(null)
+      setDomainDeleteError('')
+      queryClient.invalidateQueries({
+        queryKey: ['services', id, 'domains'],
+      })
+    },
+    onError: (error: unknown) => {
+      const msg =
+        error instanceof Error ? error.message : 'Failed to delete'
+      setDomainDeleteError(msg)
+      setDomainDeleteConfirm(null)
+    },
+  })
+
   const deploy = useMutation({
     mutationFn: () => runQuery(createDeployment(id)),
     onSuccess: () => {
@@ -144,22 +226,26 @@ export function ServiceDetail() {
         <h1 className="text-2xl font-semibold tracking-tight text-[var(--fg)]">
           #{id}
         </h1>
-        <button
-          className="btn btn-primary text-xs"
-          type="button"
-          onClick={() => deploy.mutate()}
-          disabled={deploy.isPending}
-        >
-          {deploy.isPending ? 'deploying...' : 'deploy'}
-        </button>
-        <button
-          className="btn text-xs"
-          type="button"
-          onClick={() => stop.mutate()}
-          disabled={stop.isPending}
-        >
-          stop
-        </button>
+        {canOperate ? (
+          <>
+            <button
+              className="btn btn-primary text-xs"
+              type="button"
+              onClick={() => deploy.mutate()}
+              disabled={deploy.isPending}
+            >
+              {deploy.isPending ? 'deploying...' : 'deploy'}
+            </button>
+            <button
+              className="btn text-xs"
+              type="button"
+              onClick={() => stop.mutate()}
+              disabled={stop.isPending}
+            >
+              stop
+            </button>
+          </>
+        ) : null}
         <SecurityBadge security={service?.security} />
         {service ? <TlsToggle service={service} /> : null}
       </div>
@@ -395,7 +481,188 @@ export function ServiceDetail() {
           </div>
         )}
       </section>
+
+      {canOperate ? <DomainsSection
+        domains={domains}
+        hostname={domainHostname}
+        onHostnameChange={setDomainHostname}
+        onAdd={(h) => addDomainMutation.mutate(h)}
+        onVerify={(d) => verifyMutation.mutate(d)}
+        onDelete={(d) => deleteDomainMutation.mutate(d)}
+        addPending={addDomainMutation.isPending}
+        verifyPending={verifyMutation.isPending}
+        deletePending={deleteDomainMutation.isPending}
+        deleteConfirm={domainDeleteConfirm}
+        onDeleteConfirm={setDomainDeleteConfirm}
+        deleteError={domainDeleteError}
+      /> : null}
     </main>
+  )
+}
+
+function domainSignalClass(
+  status: string,
+): string {
+  switch (status) {
+    case 'verified':
+      return 'signal signal-steady'
+    case 'pending':
+      return 'signal signal-warn'
+    case 'failed':
+      return 'signal signal-fault'
+    default:
+      return 'signal'
+  }
+}
+
+interface DomainsSectionProps {
+  domains: ReadonlyArray<{
+    id: string
+    hostname: string
+    status: string
+    last_error: string | null
+  }>
+  hostname: string
+  onHostnameChange: (v: string) => void
+  onAdd: (hostname: string) => void
+  onVerify: (domainId: string) => void
+  onDelete: (domainId: string) => void
+  addPending: boolean
+  verifyPending: boolean
+  deletePending: boolean
+  deleteConfirm: string | null
+  onDeleteConfirm: (id: string | null) => void
+  deleteError: string
+}
+
+function DomainsSection({
+  domains,
+  hostname,
+  onHostnameChange,
+  onAdd,
+  onVerify,
+  onDelete,
+  addPending,
+  verifyPending,
+  deletePending,
+  deleteConfirm,
+  onDeleteConfirm,
+  deleteError,
+}: DomainsSectionProps) {
+  return (
+    <section className="mb-8">
+      <p className="kicker mb-2">
+        domains{' '}
+        <span className="text-[var(--fg-muted)]">{domains.length}</span>
+      </p>
+
+      {deleteError ? (
+        <div className="panel mb-3 p-3 text-xs text-[var(--fg)]">
+          <span className="signal signal-fault mr-2 inline-block align-middle" />
+          {deleteError}
+        </div>
+      ) : null}
+
+      {domains.length === 0 ? (
+        <p className="mb-3 text-sm text-[var(--fg-muted)]">
+          No domains configured.
+        </p>
+      ) : (
+        <div className="panel mb-3 overflow-hidden">
+          <ul className="m-0 list-none">
+            {domains.map((d, i) => (
+              <li
+                key={d.id}
+                className={`flex items-center gap-4 px-4 py-2.5 text-sm ${
+                  i > 0 ? 'border-t border-[var(--border)]' : ''
+                }`}
+              >
+                <span
+                  className={domainSignalClass(d.status)}
+                  aria-hidden="true"
+                />
+                <span className="font-semibold text-[var(--fg)]">
+                  {d.hostname}
+                </span>
+                <span className="kicker">{d.status}</span>
+                {d.last_error ? (
+                  <span className="text-xs text-[var(--violet)] ml-auto truncate max-w-60">
+                    {d.last_error}
+                  </span>
+                ) : null}
+
+                {d.status === 'pending' || d.status === 'failed' ? (
+                  <button
+                    type="button"
+                    className="btn text-xs ml-auto"
+                    onClick={() => onVerify(d.id)}
+                    disabled={verifyPending}
+                  >
+                    {verifyPending ? 'verifying...' : 'verify'}
+                  </button>
+                ) : null}
+
+                {deleteConfirm === d.id ? (
+                  <span className="inline-flex items-center gap-1 text-xs">
+                    <span className="text-[var(--violet)]">remove?</span>
+                    <button
+                      type="button"
+                      className="btn text-xs"
+                      onClick={() => {
+                        onDelete(d.id)
+                      }}
+                      disabled={deletePending}
+                    >
+                      yes
+                    </button>
+                    <button
+                      type="button"
+                      className="btn text-xs"
+                      onClick={() => onDeleteConfirm(null)}
+                    >
+                      no
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn text-xs ml-auto"
+                    onClick={() => onDeleteConfirm(d.id)}
+                  >
+                    delete
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={(e) => {
+          e.preventDefault()
+          const trimmed = hostname.trim()
+          if (!trimmed) return
+          onAdd(trimmed)
+        }}
+      >
+        <input
+          type="text"
+          placeholder="hostname"
+          value={hostname}
+          onChange={(e) => onHostnameChange(e.target.value)}
+          className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]"
+        />
+        <button
+          type="submit"
+          className="btn btn-primary text-xs"
+          disabled={addPending || hostname.trim().length === 0}
+        >
+          {addPending ? 'adding...' : 'add domain'}
+        </button>
+      </form>
+    </section>
   )
 }
 

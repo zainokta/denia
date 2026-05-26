@@ -95,13 +95,6 @@ export default function Header() {
           >
             Projects
           </Link>
-          <Link
-            to="/about"
-            className="nav-link"
-            activeProps={{ className: 'nav-link is-active' }}
-          >
-            About
-          </Link>
           <a
             href="/demo/tanstack-query"
             className="nav-link"

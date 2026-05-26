@@ -313,13 +313,20 @@ const mockApi = (success = true) =>
     getNodeMetrics: emptyApi() as never,
     listWorkloads: emptyApi() as never,
     listServiceRequests: ((_id: string) => emptyApi()) as never,
+    listDomains: ((_id: number) => emptyApi()) as never,
+    addDomain: ((_id: number, _hostname: string) => emptyApi()) as never,
+    verifyDomain: ((_id: number, _did: string) => emptyApi()) as never,
+    deleteDomain: ((_id: number, _did: string) => Effect.void) as never,
+    listRegistries: ((_pid: string) => emptyApi()) as never,
+    createRegistry: ((_pid: string, _input: never) => emptyApi()) as never,
+    deleteRegistry: ((_pid: string, _rid: string) => Effect.void) as never,
   })
 
 const FIXTURE_JOB = {
   id: '018f1100-0000-7000-0000-000000000010',
   project_id: '018f1100-0000-7000-0000-000000000001',
   name: 'daily-backup',
-  source: { type: 'external_image', image: 'alpine:latest', credential: null },
+  source: { type: 'external_image', image: 'alpine:latest', credential: null, registry_id: null, image_ref: null },
   command: ['/bin/sh', '-c', 'echo hello'],
   env: [['KEY', 'val']],
   schedule: null,
@@ -444,6 +451,13 @@ describe('ApiClient jobs', () => {
     getNodeMetrics: emptyApi() as never,
     listWorkloads: emptyApi() as never,
     listServiceRequests: ((_id: string) => emptyApi()) as never,
+    listDomains: ((_id: number) => emptyApi()) as never,
+    addDomain: ((_id: number, _hostname: string) => emptyApi()) as never,
+    verifyDomain: ((_id: number, _did: string) => emptyApi()) as never,
+    deleteDomain: ((_id: number, _did: string) => Effect.void) as never,
+    listRegistries: ((_pid: string) => emptyApi()) as never,
+    createRegistry: ((_pid: string, _input: never) => emptyApi()) as never,
+    deleteRegistry: ((_pid: string, _rid: string) => Effect.void) as never,
   })
 
   it.effect('jobs methods exist on ApiClient', () =>
@@ -738,6 +752,13 @@ const mockIngressApi = () =>
     getNodeMetrics: emptyApi() as never,
     listWorkloads: emptyApi() as never,
     listServiceRequests: ((_id: string) => emptyApi()) as never,
+    listDomains: ((_id: number) => emptyApi()) as never,
+    addDomain: ((_id: number, _hostname: string) => emptyApi()) as never,
+    verifyDomain: ((_id: number, _did: string) => emptyApi()) as never,
+    deleteDomain: ((_id: number, _did: string) => Effect.void) as never,
+    listRegistries: ((_pid: string) => emptyApi()) as never,
+    createRegistry: ((_pid: string, _input: never) => emptyApi()) as never,
+    deleteRegistry: ((_pid: string, _rid: string) => Effect.void) as never,
   })
 
 describe('Ingress ApiClient methods', () => {
@@ -819,6 +840,13 @@ describe('putService', () => {
           getNodeMetrics: emptyApi() as never,
           listWorkloads: emptyApi() as never,
           listServiceRequests: ((_id: string) => emptyApi()) as never,
+          listDomains: ((_id: number) => emptyApi()) as never,
+          addDomain: ((_id: number, _hostname: string) => emptyApi()) as never,
+          verifyDomain: ((_id: number, _did: string) => emptyApi()) as never,
+          deleteDomain: ((_id: number, _did: string) => Effect.void) as never,
+          listRegistries: ((_pid: string) => emptyApi()) as never,
+          createRegistry: ((_pid: string, _input: never) => emptyApi()) as never,
+          deleteRegistry: ((_pid: string, _rid: string) => Effect.void) as never,
         }),
       ),
     ),
