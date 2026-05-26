@@ -47,7 +47,7 @@ pub struct AppState {
     pub routes: SharedRoutes,
     pub ingress_options: IngressRenderOptions,
     pub access_log: AccessLogStore,
-    pub domain_verifier: Arc<dyn crate::domains::DomainVerifier>,
+    pub domain_verifier: Arc<dyn crate::verification::DomainVerifier>,
     pub verifying_domains: Arc<Mutex<std::collections::HashSet<uuid::Uuid>>>,
 }
 
@@ -141,14 +141,14 @@ impl AppState {
             routes: Arc::new(Mutex::new(BTreeMap::new())),
             ingress_options,
             access_log,
-            domain_verifier: Arc::new(crate::domains::HttpDomainVerifier::new()),
+            domain_verifier: Arc::new(crate::verification::HttpDomainVerifier::new()),
             verifying_domains: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
     pub fn with_domain_verifier(
         mut self,
-        verifier: Arc<dyn crate::domains::DomainVerifier>,
+        verifier: Arc<dyn crate::verification::DomainVerifier>,
     ) -> Self {
         self.domain_verifier = verifier;
         self
@@ -754,10 +754,10 @@ async fn create_service_domain(
         .ok_or_else(|| ApiError::NotFound("service not found".into()))?;
     ensure_role(&state, &principal, svc.project_id, Role::Operator)?;
 
-    let hostname = crate::domains::validate_hostname(&body.hostname)
+    let hostname = crate::verification::validate_hostname(&body.hostname)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-    let token = crate::domains::generate_token();
+    let token = crate::verification::generate_token();
     let now = chrono::Utc::now();
     let d = ServiceDomain {
         id: uuid::Uuid::now_v7(),

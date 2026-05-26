@@ -320,7 +320,7 @@ impl SqliteStore {
             for (service_id, config_json) in rows {
                 if let Ok(svc) = serde_json::from_str::<ServiceConfig>(&config_json) {
                     for hostname in &svc.domains {
-                        let token = crate::domains::generate_token();
+                        let token = crate::verification::generate_token();
                         let id = Uuid::now_v7().to_string();
                         connection.execute(
                             r#"

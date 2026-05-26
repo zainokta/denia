@@ -4,9 +4,9 @@ use denia::{
     app::{AppState, build_router},
     config::AppConfig,
     domain::{ExternalImageSource, HealthCheck, ResourceLimits, ServiceConfig, ServiceSource},
-    domains::{DomainVerifier, DomainVerifyError},
     state::SqliteStore,
     traefik::RouteSpec,
+    verification::{DomainVerifier, DomainVerifyError},
 };
 use tower::util::ServiceExt;
 use uuid::Uuid;

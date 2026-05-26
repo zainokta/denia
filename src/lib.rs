@@ -5,7 +5,6 @@ pub mod command;
 pub mod config;
 pub mod deploy;
 pub mod domain;
-pub mod domains;
 pub mod health;
 pub mod ingress;
 pub mod observability;
@@ -16,6 +15,7 @@ pub mod scheduler;
 pub mod secrets;
 pub mod state;
 pub mod syscall;
+pub mod verification;
 pub mod web;
 pub mod workload_launcher;
 
