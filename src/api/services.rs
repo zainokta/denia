@@ -140,3 +140,113 @@ async fn service_metrics(
         deployment_id,
     )?]))
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::app::{AppState, build_router};
+    use crate::config::AppConfig;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    const ADMIN_TOKEN: &str = "test-admin-token-0123456789abcdef";
+
+    fn test_state() -> AppState {
+        AppState::builder(AppConfig::for_test(ADMIN_TOKEN)).build()
+    }
+
+    async fn body_string(resp: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn list_services_empty_returns_200() {
+        let resp = build_router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_string(resp).await, "[]");
+    }
+
+    #[tokio::test]
+    async fn list_services_unauthenticated_returns_401() {
+        let resp = build_router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/services")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn create_then_list_service_roundtrips() {
+        use crate::domain::{
+            ExternalImageSource, HealthCheck, Project, ServiceConfig, ServiceSource,
+        };
+        let state = test_state();
+        let project = Project::new("team-a", None).unwrap();
+        state.projects.put_project(project.clone()).unwrap();
+        let svc = ServiceConfig::new(
+            project.id,
+            "web",
+            vec!["example.com".into()],
+            ServiceSource::ExternalImage(ExternalImageSource {
+                image: "nginx".into(),
+                credential: None,
+                registry_id: None,
+                image_ref: None,
+            }),
+            80,
+            HealthCheck::new("/health", 5),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        let body = serde_json::to_vec(&svc).unwrap();
+
+        let app = build_router(state);
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::OK);
+
+        let list = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let listed: Vec<ServiceConfig> = serde_json::from_str(&body_string(list).await).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "web");
+    }
+}

@@ -191,3 +191,34 @@ async fn delete_service_domain_handler(
     }
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::app::{AppState, build_router};
+    use crate::config::AppConfig;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    const ADMIN_TOKEN: &str = "test-admin-token-0123456789abcdef";
+
+    fn test_state() -> AppState {
+        AppState::builder(AppConfig::for_test(ADMIN_TOKEN)).build()
+    }
+
+    /// Proves the root-level unauthenticated challenge mount + token lookup:
+    /// an unknown token returns 404 without any bearer credential.
+    #[tokio::test]
+    async fn challenge_unknown_token_returns_404() {
+        let resp = build_router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/denia-challenge/does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}

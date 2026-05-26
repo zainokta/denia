@@ -10,6 +10,8 @@ pub mod deployment_repo;
 pub mod domain_repo;
 pub mod error;
 pub mod job_repo;
+#[cfg(any(test, feature = "test-support"))]
+pub mod mock;
 pub mod project_repo;
 pub mod registry_repo;
 pub mod service_repo;
