@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub data_dir: PathBuf,
     pub buildkit_binary: PathBuf,
     pub sops_binary: PathBuf,
+    pub unshare_binary: PathBuf,
+    pub socket_proxy_binary: PathBuf,
     pub runtime_dir: PathBuf,
     pub cgroup_root: PathBuf,
     pub artifact_dir: PathBuf,
@@ -50,6 +52,12 @@ impl AppConfig {
         );
         let sops_binary =
             PathBuf::from(env::var("DENIA_SOPS_BINARY").unwrap_or_else(|_| "sops".to_string()));
+        let unshare_binary = PathBuf::from(
+            env::var("DENIA_UNSHARE_BINARY").unwrap_or_else(|_| "unshare".to_string()),
+        );
+        let socket_proxy_binary = env::var("DENIA_SOCKET_PROXY_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::current_exe().unwrap_or_else(|_| "denia".into()));
         let runtime_dir = data_dir.join("runtime");
         let cgroup_root = env::var("DENIA_CGROUP_ROOT")
             .map(PathBuf::from)
@@ -87,6 +95,8 @@ impl AppConfig {
             data_dir,
             buildkit_binary,
             sops_binary,
+            unshare_binary,
+            socket_proxy_binary,
             runtime_dir,
             cgroup_root,
             artifact_dir,
@@ -111,6 +121,8 @@ impl AppConfig {
             data_dir: data_dir.clone(),
             buildkit_binary: PathBuf::from("buildctl"),
             sops_binary: PathBuf::from("sops"),
+            unshare_binary: PathBuf::from("unshare"),
+            socket_proxy_binary: PathBuf::from("denia"),
             runtime_dir: data_dir.join("runtime"),
             cgroup_root: data_dir.join("cgroup"),
             artifact_dir: data_dir.join("artifacts"),

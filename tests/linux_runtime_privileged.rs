@@ -2,6 +2,7 @@ use denia::{
     artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource},
     domain::RuntimeStartRequest,
     runtime::{LinuxRuntime, LinuxRuntimeProcessSpec, Runtime},
+    syscall,
 };
 use std::{
     os::unix::fs::{PermissionsExt, symlink},
@@ -41,8 +42,8 @@ fn privileged_runtime_tests_are_explicitly_gated() {
 }
 
 #[tokio::test]
-#[ignore = "requires root, cgroup v2, Linux namespace permissions, setpriv, and DENIA_PRIVILEGED_BUSYBOX_STATIC"]
-async fn linux_runtime_start_uses_unshare_and_cgroup_gate() {
+#[ignore = "requires root, cgroup v2, Linux namespace permissions, and DENIA_PRIVILEGED_BUSYBOX_STATIC"]
+async fn linux_runtime_start_uses_native_namespace_and_cgroup_gate() {
     assert_eq!(
         std::env::var("DENIA_RUN_PRIVILEGED_TESTS").as_deref(),
         Ok("1")
@@ -122,7 +123,7 @@ async fn linux_runtime_start_uses_unshare_and_cgroup_gate() {
 }
 
 #[tokio::test]
-#[ignore = "requires root, cgroup v2, Linux namespace permissions, setpriv, and DENIA_PRIVILEGED_BUSYBOX_STATIC"]
+#[ignore = "requires root, cgroup v2, Linux namespace permissions, and DENIA_PRIVILEGED_BUSYBOX_STATIC"]
 async fn hardened_workload_has_no_new_privs_and_cleared_cap_bnd() {
     assert_eq!(
         std::env::var("DENIA_RUN_PRIVILEGED_TESTS").as_deref(),
@@ -136,14 +137,6 @@ async fn hardened_workload_has_no_new_privs_and_cleared_cap_bnd() {
         "privileged runtime tests must run as root"
     );
     assert!(
-        std::process::Command::new("which")
-            .arg("setpriv")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false),
-        "setpriv must be available on PATH for this test"
-    );
-    assert!(
         static_busybox().exists(),
         "DENIA_PRIVILEGED_BUSYBOX_STATIC must exist"
     );
@@ -155,8 +148,7 @@ async fn hardened_workload_has_no_new_privs_and_cleared_cap_bnd() {
     let test_userns_base = 100000u32;
     let runtime =
         LinuxRuntime::new_with_paths(runtime_dir.path(), artifact_dir.path(), cgroup_root.path())
-            .with_userns(test_userns_base, 65536)
-            .with_setpriv("setpriv");
+            .with_userns(test_userns_base, 65536);
 
     let artifact = ArtifactRecord::new(
         "sha256:hardened",
@@ -171,12 +163,7 @@ async fn hardened_workload_has_no_new_privs_and_cleared_cap_bnd() {
     write_busybox_rootfs(&rootfs);
     let output_dir = rootfs.join("denia-output");
     std::fs::create_dir_all(&output_dir).expect("output dir");
-    std::process::Command::new("chown")
-        .args([
-            format!("{test_userns_base}:{test_userns_base}"),
-            output_dir.to_string_lossy().into_owned(),
-        ])
-        .status()
+    syscall::chown::recursive_lchown(&output_dir, test_userns_base, test_userns_base)
         .expect("chown output dir");
     let status_file = output_dir.join("self-status");
     std::fs::write(

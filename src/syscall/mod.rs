@@ -17,6 +17,11 @@ pub enum SyscallError {
         path: std::path::PathBuf,
         reason: String,
     },
+    #[error("namespace setup failed at {path}: {reason}")]
+    NamespaceSetup {
+        path: std::path::PathBuf,
+        reason: String,
+    },
     #[error("signal delivery failed for pid {pid}: {reason}")]
     Signal { pid: u32, reason: String },
 }
