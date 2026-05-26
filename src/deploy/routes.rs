@@ -18,7 +18,7 @@ pub fn default_ingress_options() -> IngressRenderOptions {
 }
 
 pub fn rerender_traefik(state: &crate::app::AppState) -> Result<(), DeployError> {
-    let services = state.store.list_services()?;
+    let services = state.services.list_services()?;
     let mut routes_guard = state
         .routes
         .lock()
@@ -26,7 +26,7 @@ pub fn rerender_traefik(state: &crate::app::AppState) -> Result<(), DeployError>
     let existing = routes_guard.clone();
     routes_guard.clear();
     for svc in services {
-        let hostnames = state.store.list_verified_hostnames(svc.id)?;
+        let hostnames = state.domains.list_verified_hostnames(svc.id)?;
         if hostnames.is_empty() {
             continue;
         }

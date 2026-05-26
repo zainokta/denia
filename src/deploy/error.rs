@@ -2,13 +2,15 @@ use thiserror::Error;
 
 use crate::{
     artifacts::acquirer::ArtifactAcquireError, bridge::BridgeError, health::HealthError,
-    runtime::RuntimeError, state::StateError, traefik::TraefikError,
+    repo::RepoError, runtime::RuntimeError, state::StateError, traefik::TraefikError,
 };
 
 #[derive(Debug, Error)]
 pub enum DeployError {
     #[error("state error: {0}")]
     State(#[from] StateError),
+    #[error("repo error: {0}")]
+    Repo(#[from] RepoError),
     #[error("runtime error: {0}")]
     Runtime(#[from] RuntimeError),
     #[error("health error: {0}")]

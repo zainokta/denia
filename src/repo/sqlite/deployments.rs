@@ -3,8 +3,6 @@
 //! Shared SQL lives in `*_q` free functions; both `SqliteStore` and
 //! `SqliteDeploymentRepo` delegate.
 
-use std::sync::Arc;
-
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
@@ -235,15 +233,6 @@ pub struct SqliteDeploymentRepo {
 impl SqliteDeploymentRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
-    }
-
-    /// Adapter used during Task 10 wiring; deleted after step 10.6.
-    pub fn from_store(store: &SqliteStore) -> Self {
-        Self {
-            pool: SqlitePool {
-                inner: Arc::clone(&store.connection),
-            },
-        }
     }
 }
 

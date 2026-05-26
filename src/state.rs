@@ -112,6 +112,14 @@ impl SqliteStore {
     pub(crate) fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StateError> {
         self.connection.lock().map_err(|_| StateError::LockPoisoned)
     }
+
+    /// Returns a `SqlitePool` sharing the same underlying connection as this
+    /// store. Used by callers wiring per-aggregate `Sqlite*Repo` instances.
+    pub fn pool(&self) -> crate::repo::sqlite::SqlitePool {
+        crate::repo::sqlite::SqlitePool {
+            inner: Arc::clone(&self.connection),
+        }
+    }
 }
 
 #[cfg(test)]

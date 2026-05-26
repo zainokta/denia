@@ -368,7 +368,7 @@ fn test_config_defines_runtime_paths_and_tool_binaries() {
 async fn axum_router_exposes_health_and_requires_admin_token_for_v1() {
     let store = SqliteStore::open_in_memory().expect("open sqlite");
     store.migrate().expect("migrate");
-    let app = build_router(AppState::new(AppConfig::for_test("test-token"), store));
+    let app = build_router(AppState::new(AppConfig::for_test("test-token"), &store));
 
     let health = app
         .clone()
@@ -399,7 +399,7 @@ async fn axum_router_exposes_health_and_requires_admin_token_for_v1() {
 async fn axum_router_accepts_service_creation_with_admin_token() {
     let store = SqliteStore::open_in_memory().expect("open sqlite");
     store.migrate().expect("migrate");
-    let app = build_router(AppState::new(AppConfig::for_test("test-token"), store));
+    let app = build_router(AppState::new(AppConfig::for_test("test-token"), &store));
     let service = ServiceConfig::new(
         DEFAULT_PROJECT_ID,
         "web",
@@ -439,7 +439,7 @@ async fn axum_router_accepts_service_creation_with_admin_token() {
 async fn axum_router_accepts_credentials_and_lifecycle_commands_with_admin_token() {
     let store = SqliteStore::open_in_memory().expect("open sqlite");
     store.migrate().expect("migrate");
-    let app = build_router(AppState::new(AppConfig::for_test("test-token"), store));
+    let app = build_router(AppState::new(AppConfig::for_test("test-token"), &store));
 
     let credential = serde_json::json!({
         "name": "git-main",
@@ -482,7 +482,7 @@ async fn axum_router_accepts_credentials_and_lifecycle_commands_with_admin_token
 async fn deployment_endpoint_rejects_unknown_service() {
     let store = SqliteStore::open_in_memory().expect("open sqlite");
     store.migrate().expect("migrate");
-    let app = build_router(AppState::new(AppConfig::for_test("test-token"), store));
+    let app = build_router(AppState::new(AppConfig::for_test("test-token"), &store));
 
     let request =
         DeploymentRequest::external_image(uuid::Uuid::now_v7(), "ghcr.io/acme/web:latest");
@@ -556,13 +556,23 @@ impl denia::oci::OciRootfsUnpacker for NoopUnpacker {
 }
 
 fn deploy_test_coordinator(
-    store: SqliteStore,
+    store: &SqliteStore,
 ) -> denia::deploy::DeploymentCoordinator<
     denia::runtime::FakeRuntime,
     denia::health::FakeHealthChecker,
 > {
+    use denia::repo::sqlite::{
+        SqliteDeploymentRepo, SqliteDomainRepo, SqliteProjectRepo, SqliteRegistryRepo,
+    };
+    let pool = store.pool();
+    let repos = denia::deploy::DeploymentRepos {
+        deployments: std::sync::Arc::new(SqliteDeploymentRepo::new(pool.clone())),
+        projects: std::sync::Arc::new(SqliteProjectRepo::new(pool.clone())),
+        registries: std::sync::Arc::new(SqliteRegistryRepo::new(pool.clone())),
+        domains: std::sync::Arc::new(SqliteDomainRepo::new(pool)),
+    };
     denia::deploy::DeploymentCoordinator::new(
-        store,
+        repos,
         denia::runtime::FakeRuntime::default(),
         denia::health::FakeHealthChecker::healthy(),
     )
@@ -628,7 +638,7 @@ async fn deploy_external_image_resolves_registry_auth() {
         stdout: "{\"value\":\"alice:pw\"}".to_string(),
         stderr: String::new(),
     }]);
-    let coordinator = deploy_test_coordinator(store);
+    let coordinator = deploy_test_coordinator(&store);
     let secret_store = SopsSecretStore::new(config.data_dir.clone());
 
     coordinator
@@ -691,7 +701,7 @@ async fn deploy_external_image_legacy_anonymous_fallback() {
     let puller = std::sync::Arc::new(RecordingPuller::default());
     let (config, acquirer) = deploy_test_acquirer(tmp.path(), puller.clone());
     let runner = FakeCommandRunner::new(vec![]);
-    let coordinator = deploy_test_coordinator(store);
+    let coordinator = deploy_test_coordinator(&store);
     let secret_store = SopsSecretStore::new(config.data_dir.clone());
 
     coordinator
@@ -755,7 +765,7 @@ async fn deploy_external_image_legacy_basic_credential() {
         stdout: "{\"value\":\"u:p\"}".to_string(),
         stderr: String::new(),
     }]);
-    let coordinator = deploy_test_coordinator(store);
+    let coordinator = deploy_test_coordinator(&store);
     let secret_store = SopsSecretStore::new(config.data_dir.clone());
 
     coordinator
@@ -818,7 +828,7 @@ async fn deploy_external_image_unknown_registry_id_errors() {
     let puller = std::sync::Arc::new(RecordingPuller::default());
     let (config, acquirer) = deploy_test_acquirer(tmp.path(), puller.clone());
     let runner = FakeCommandRunner::new(vec![]);
-    let coordinator = deploy_test_coordinator(store);
+    let coordinator = deploy_test_coordinator(&store);
     let secret_store = SopsSecretStore::new(config.data_dir.clone());
 
     let err = coordinator
@@ -865,10 +875,7 @@ fn migration_seeds_default_project_and_backfills_services() {
 fn registry_api_test_app() -> (axum::Router, SqliteStore) {
     let store = SqliteStore::open_in_memory().expect("open sqlite");
     store.migrate().expect("migrate");
-    let app = build_router(AppState::new(
-        AppConfig::for_test("test-token"),
-        store.clone(),
-    ));
+    let app = build_router(AppState::new(AppConfig::for_test("test-token"), &store));
     (app, store)
 }
 
@@ -1139,6 +1146,6 @@ async fn registry_api_delete_blocked_if_referenced() {
 }
 
 // Unknown-registry-id rejection in put_service is exercised at the unit level:
-// `state.store.registry(unknown_id)` returns `None` (see state::tests::registry_*),
+// `state.registries.registry(unknown_id)` returns `None` (see state::tests::registry_*),
 // and `ExternalImageSource::validate` rejects partial registry fields
 // (see domain::tests::external_image_source_resolution_matrix).

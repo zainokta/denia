@@ -16,8 +16,8 @@ use crate::domain::{
 };
 use crate::health::HealthChecker;
 use crate::oci::RegistryAuth;
+use crate::repo::{DeploymentRepo, DomainRepo, ProjectRepo, RegistryRepo, RepoError};
 use crate::runtime::Runtime;
-use crate::state::{SqliteStore, StateError};
 use crate::traefik::{IngressRenderOptions, RouteSpec, render_file_provider_config};
 
 pub struct DeploymentPlan {
@@ -25,8 +25,20 @@ pub struct DeploymentPlan {
     pub artifact: ArtifactRecord,
 }
 
+/// Bundle of repos used by `DeploymentCoordinator`.
+///
+/// Keeps the coordinator constructor signature short by grouping the four
+/// aggregates it needs (deployments, projects, registries, domains).
+#[derive(Clone)]
+pub struct DeploymentRepos {
+    pub deployments: Arc<dyn DeploymentRepo>,
+    pub projects: Arc<dyn ProjectRepo>,
+    pub registries: Arc<dyn RegistryRepo>,
+    pub domains: Arc<dyn DomainRepo>,
+}
+
 pub struct DeploymentCoordinator<R, H> {
-    store: SqliteStore,
+    repos: DeploymentRepos,
     runtime: R,
     health: H,
     routing: Option<RoutingState>,
@@ -45,9 +57,9 @@ where
     R: Runtime,
     H: HealthChecker,
 {
-    pub fn new(store: SqliteStore, runtime: R, health: H) -> Self {
+    pub fn new(repos: DeploymentRepos, runtime: R, health: H) -> Self {
         Self {
-            store,
+            repos,
             runtime,
             health,
             routing: None,
@@ -55,7 +67,7 @@ where
     }
 
     pub fn new_with_routing(
-        store: SqliteStore,
+        repos: DeploymentRepos,
         runtime: R,
         health: H,
         bridge: BridgeAllocator,
@@ -63,7 +75,7 @@ where
         traefik_config_path: impl Into<PathBuf>,
     ) -> Self {
         Self::new_with_shared_routing(
-            store,
+            repos,
             runtime,
             health,
             Arc::new(Mutex::new(bridge)),
@@ -76,7 +88,7 @@ where
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_shared_routing(
-        store: SqliteStore,
+        repos: DeploymentRepos,
         runtime: R,
         health: H,
         bridge: Arc<Mutex<BridgeAllocator>>,
@@ -86,7 +98,7 @@ where
         ingress_options: IngressRenderOptions,
     ) -> Self {
         Self {
-            store,
+            repos,
             runtime,
             health,
             routing: Some(RoutingState {
@@ -101,13 +113,15 @@ where
 
     pub async fn deploy(&self, plan: DeploymentPlan) -> Result<Deployment, DeployError> {
         let mut deployment = self
-            .store
+            .repos
+            .deployments
             .create_deployment(deployment_request(&plan.service, &plan.artifact))?;
 
         let project = self
-            .store
+            .repos
+            .projects
             .get_project(plan.service.project_id)?
-            .ok_or(DeployError::State(StateError::UnknownProject))?;
+            .ok_or(DeployError::Repo(RepoError::UnknownProject))?;
         let limits = plan.service.effective_limits(&project);
         let env: Vec<(String, String)> = plan.service.effective_env(&project).into_iter().collect();
 
@@ -134,11 +148,13 @@ where
             )
             .await?;
 
-        self.store
+        self.repos
+            .deployments
             .promote_deployment(plan.service.id, deployment.id)?;
         self.write_routing_config(&plan.service, &runtime_status.socket_path)
             .await?;
-        self.store
+        self.repos
+            .deployments
             .update_deployment_status(deployment.id, DeploymentStatus::Healthy)?;
         deployment.status = DeploymentStatus::Healthy;
         Ok(deployment)
@@ -158,7 +174,8 @@ where
 
         let (full_ref, auth) = if let Some(registry_id) = source.registry_id {
             let registry = self
-                .store
+                .repos
+                .registries
                 .registry(registry_id)?
                 .ok_or(DeployError::RegistryNotFound)?;
             let payload = match &registry.credential_ref {
@@ -243,7 +260,7 @@ where
     }
 
     pub async fn stop_service(&self, service: &ServiceConfig) -> Result<(), DeployError> {
-        let promoted_deployment = self.store.promoted_deployment(service.id)?;
+        let promoted_deployment = self.repos.deployments.promoted_deployment(service.id)?;
 
         self.runtime.stop(&service.name).await?;
         if let Some(routing) = &self.routing {
@@ -263,9 +280,12 @@ where
         }
 
         if let Some(deployment_id) = promoted_deployment {
-            self.store
+            self.repos
+                .deployments
                 .update_deployment_status(deployment_id, DeploymentStatus::Stopped)?;
-            self.store.clear_promoted_deployment(service.id)?;
+            self.repos
+                .deployments
+                .clear_promoted_deployment(service.id)?;
         }
         Ok(())
     }
@@ -286,7 +306,7 @@ where
             .ok_or(DeployError::BridgePortExhausted)?;
         routing.manager.activate(bridge_target.clone()).await?;
 
-        let hostnames = self.store.list_verified_hostnames(service.id)?;
+        let hostnames = self.repos.domains.list_verified_hostnames(service.id)?;
         if hostnames.is_empty() {
             // No verified domains yet — bridge is allocated but Traefik is not told
             // to route this service. A future verify call will not retroactively add
