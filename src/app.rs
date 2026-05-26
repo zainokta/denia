@@ -1201,7 +1201,10 @@ impl IntoResponse for ApiError {
             Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
             Self::Forbidden(message) => (StatusCode::FORBIDDEN, message),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
-            Self::Deploy(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+            Self::Deploy(error) => match &error {
+                DeployError::RegistryNotFound => (StatusCode::NOT_FOUND, error.to_string()),
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+            },
             Self::Log(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
             Self::Metrics(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
             Self::NodeMetrics(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),

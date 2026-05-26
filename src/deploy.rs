@@ -53,8 +53,8 @@ pub enum DeployError {
     RegistryNotFound,
     #[error("secret decrypt: {0}")]
     SecretDecrypt(#[from] crate::secrets::SecretError),
-    #[error("oci error: {0}")]
-    Oci(#[from] crate::oci::OciError),
+    #[error("registry auth resolution: {0}")]
+    RegistryAuthResolution(crate::oci::OciError),
 }
 
 pub struct DeploymentCoordinator<R, H> {
@@ -204,7 +204,8 @@ where
             let auth = crate::oci::credentials::resolve_registry_auth(
                 registry.auth_kind,
                 payload.as_ref(),
-            )?;
+            )
+            .map_err(DeployError::RegistryAuthResolution)?;
             let (full_ref, _) = source
                 .resolve_ref(&registry.endpoint)
                 .map_err(|_| DeployError::UnsupportedServiceSource)?;
@@ -221,7 +222,8 @@ where
                     crate::oci::credentials::resolve_registry_auth(
                         crate::domain::RegistryAuthKind::Basic,
                         Some(&payload),
-                    )?
+                    )
+                    .map_err(DeployError::RegistryAuthResolution)?
                 }
                 None => RegistryAuth::Anonymous,
             };
