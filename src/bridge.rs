@@ -32,19 +32,23 @@ impl BridgeAllocator {
         }
     }
 
-    pub fn assign(&mut self, service_name: &str, socket_path: PathBuf) -> BridgeTarget {
+    pub fn assign(&mut self, service_name: &str, socket_path: PathBuf) -> Option<BridgeTarget> {
         if let Some(existing) = self.targets.get(service_name) {
-            return existing.clone();
+            return Some(existing.clone());
+        }
+        let port = self.next_port;
+        if port == 65535 {
+            return None;
         }
         let target = BridgeTarget {
             service_name: service_name.to_string(),
-            port: self.next_port,
+            port,
             socket_path,
         };
-        self.next_port += 1;
+        self.next_port = port.wrapping_add(1);
         self.targets
             .insert(service_name.to_string(), target.clone());
-        target
+        Some(target)
     }
 }
 

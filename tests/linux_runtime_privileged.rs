@@ -2,9 +2,13 @@ use denia::{
     artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource},
     domain::RuntimeStartRequest,
     runtime::{LinuxRuntime, LinuxRuntimeProcessSpec, Runtime},
-    syscall,
+    syscall::{
+        self,
+        ns::{NamespaceConfig, spawn_namespaced_process},
+    },
 };
 use std::{
+    fs,
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
 };
@@ -12,7 +16,35 @@ use std::{
 fn static_busybox() -> PathBuf {
     std::env::var_os("DENIA_PRIVILEGED_BUSYBOX_STATIC")
         .map(PathBuf::from)
+        .or_else(|| {
+            ["/usr/lib/nix/busybox"]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|path| path.exists())
+        })
         .expect("DENIA_PRIVILEGED_BUSYBOX_STATIC must point to a static busybox binary")
+}
+
+fn socket_proxy_helper(build_dir: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("DENIA_PRIVILEGED_DENIA_HELPER_STATIC").map(PathBuf::from)
+    {
+        return path;
+    }
+
+    let source = build_dir.join("denia-test-socket-proxy.c");
+    let binary = build_dir.join("denia-test-socket-proxy");
+    std::fs::write(&source, TEST_SOCKET_PROXY_C).expect("write test socket proxy source");
+    let status = std::process::Command::new("cc")
+        .args(["-static", "-O2", "-o"])
+        .arg(&binary)
+        .arg(&source)
+        .status()
+        .expect("run cc for static test socket proxy");
+    assert!(
+        status.success(),
+        "cc -static must build the fallback socket-proxy test helper, got {status}"
+    );
+    binary
 }
 
 fn write_busybox_rootfs(rootfs: &Path) {
@@ -31,6 +63,262 @@ fn write_busybox_rootfs(rootfs: &Path) {
     std::fs::create_dir_all(rootfs.join("proc")).expect("proc dir");
     std::fs::create_dir_all(rootfs.join("tmp")).expect("tmp dir");
 }
+
+struct CgroupTestRoot {
+    path: PathBuf,
+}
+
+impl CgroupTestRoot {
+    fn new() -> Self {
+        let parent = std::env::var_os("DENIA_PRIVILEGED_CGROUP_PARENT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup"));
+        assert!(
+            parent.join("cgroup.controllers").exists(),
+            "{} must be a cgroup v2 directory; set DENIA_PRIVILEGED_CGROUP_PARENT to a writable cgroup v2 parent",
+            parent.display()
+        );
+        enable_cgroup_controllers(&parent).unwrap_or_else(|error| {
+            panic!(
+                "enable cpu/memory controllers under {}: {error}; set DENIA_PRIVILEGED_CGROUP_PARENT to a delegated empty cgroup v2 parent",
+                parent.display()
+            )
+        });
+
+        let path = parent.join(format!(
+            "denia-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir(&path).unwrap_or_else(|error| {
+            panic!(
+                "create privileged cgroup test root {}: {error}; run as root with a writable cgroup v2 parent",
+                path.display()
+            )
+        });
+        enable_cgroup_controllers(&path).unwrap_or_else(|error| {
+            panic!(
+                "enable cpu/memory controllers under {}: {error}; set DENIA_PRIVILEGED_CGROUP_PARENT to a delegated empty cgroup v2 parent",
+                path.display()
+            )
+        });
+        let root = Self { path };
+        root.assert_writable_leaf("probe");
+        root
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn create_leaf(&self, name: &str) -> PathBuf {
+        let path = self.path.join(format!("{name}-{}", uuid::Uuid::now_v7()));
+        fs::create_dir(&path).unwrap_or_else(|error| {
+            panic!(
+                "create privileged cgroup leaf {}: {error}; set DENIA_PRIVILEGED_CGROUP_PARENT to a delegated empty cgroup v2 parent",
+                path.display()
+            )
+        });
+        assert_cgroup_limit_writable(&path, "cpu.max", "10000 100000\n");
+        assert_cgroup_limit_writable(&path, "memory.max", "67108864\n");
+        path
+    }
+
+    fn assert_writable_leaf(&self, name: &str) {
+        let path = self.create_leaf(name);
+        let mut child = std::process::Command::new("sleep")
+            .arg("1")
+            .spawn()
+            .expect("spawn cgroup probe child");
+        fs::write(path.join("cgroup.procs"), format!("{}\n", child.id())).unwrap_or_else(|error| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "attach probe pid to {}: {error}; set DENIA_PRIVILEGED_CGROUP_PARENT to a delegated empty cgroup v2 parent with cpu and memory controllers",
+                path.display()
+            )
+        });
+        let _ = child.kill();
+        let _ = child.wait();
+        remove_cgroup_dir(&path).unwrap_or_else(|error| {
+            panic!("remove privileged cgroup probe {}: {error}", path.display())
+        });
+    }
+}
+
+impl Drop for CgroupTestRoot {
+    fn drop(&mut self) {
+        let _ = fs::write(self.path.join("cgroup.kill"), "1\n");
+        let _ = remove_cgroup_dir(&self.path);
+    }
+}
+
+fn remove_cgroup_dir(path: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            remove_cgroup_dir(&entry.path())?;
+        }
+    }
+    fs::remove_dir(path)
+}
+
+fn enable_cgroup_controllers(path: &Path) -> std::io::Result<()> {
+    let controllers_path = path.join("cgroup.controllers");
+    let subtree_control_path = path.join("cgroup.subtree_control");
+    if !controllers_path.exists() || !subtree_control_path.exists() {
+        return Ok(());
+    }
+
+    let available = fs::read_to_string(&controllers_path)?;
+    let requested = ["cpu", "memory"]
+        .into_iter()
+        .filter(|controller| {
+            available
+                .split_whitespace()
+                .any(|available| available == *controller)
+        })
+        .map(|controller| format!("+{controller}"))
+        .collect::<Vec<_>>();
+    if requested.is_empty() {
+        return Ok(());
+    }
+
+    fs::write(subtree_control_path, format!("{}\n", requested.join(" ")))
+}
+
+fn assert_cgroup_limit_writable(path: &Path, file_name: &str, value: &str) {
+    fs::write(path.join(file_name), value).unwrap_or_else(|error| {
+        panic!(
+            "write {} under {}: {error}; set DENIA_PRIVILEGED_CGROUP_PARENT to a delegated empty cgroup v2 parent with cpu and memory controllers",
+            file_name,
+            path.display()
+        )
+    });
+}
+
+fn wait_for_path(path: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
+const TEST_SOCKET_PROXY_C: &str = r#"
+#include <errno.h>
+#include <signal.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static void mkdirs(char *path) {
+    for (char *p = path + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(path, 0777) < 0 && errno != EEXIST) {
+                perror("mkdir");
+                exit(111);
+            }
+            *p = '/';
+        }
+    }
+}
+
+int main(int argc, char **argv) {
+    const char *listen_path = NULL;
+    int child_index = -1;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--listen") == 0 && i + 1 < argc) {
+            listen_path = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "--connect") == 0 && i + 1 < argc) {
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "--") == 0) {
+            child_index = i + 1;
+            break;
+        }
+    }
+
+    if (!listen_path || child_index < 0 || child_index >= argc) {
+        fprintf(stderr, "invalid test socket proxy args\n");
+        return 112;
+    }
+
+    char parent[108];
+    if (strlen(listen_path) >= sizeof(parent)) {
+        fprintf(stderr, "listen path too long\n");
+        return 113;
+    }
+    strcpy(parent, listen_path);
+    char *slash = strrchr(parent, '/');
+    if (slash && slash != parent) {
+        *slash = '\0';
+        mkdirs(parent);
+        if (mkdir(parent, 0777) < 0 && errno != EEXIST) {
+            perror("mkdir parent");
+            return 114;
+        }
+    }
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        perror("socket");
+        return 115;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, listen_path, sizeof(addr.sun_path) - 1);
+    unlink(listen_path);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        return 116;
+    }
+    if (listen(fd, 16) < 0) {
+        perror("listen");
+        return 117;
+    }
+
+    pid_t child = fork();
+    if (child < 0) {
+        perror("fork");
+        return 118;
+    }
+    if (child == 0) {
+        execv(argv[child_index], &argv[child_index]);
+        perror("execv");
+        _exit(119);
+    }
+
+    int status = 0;
+    if (waitpid(child, &status, 0) < 0) {
+        perror("waitpid");
+        return 120;
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+    return 121;
+}
+"#;
 
 #[test]
 #[ignore = "requires root, cgroup v2, and Linux namespace permissions"]
@@ -57,14 +345,21 @@ async fn linux_runtime_start_uses_native_namespace_and_cgroup_gate() {
     );
     assert!(
         static_busybox().exists(),
-        "DENIA_PRIVILEGED_BUSYBOX_STATIC must exist"
+        "static busybox must exist through DENIA_PRIVILEGED_BUSYBOX_STATIC or /usr/lib/nix/busybox"
     );
-
     let runtime_dir = tempfile::tempdir().expect("runtime dir");
     let artifact_dir = tempfile::tempdir().expect("artifact dir");
-    let cgroup_root = tempfile::tempdir().expect("cgroup dir");
+    let helper_dir = tempfile::tempdir().expect("helper dir");
+    let cgroup_root = CgroupTestRoot::new();
+    let socket_proxy = socket_proxy_helper(helper_dir.path());
+    assert!(
+        socket_proxy.exists(),
+        "socket proxy helper must exist at {}",
+        socket_proxy.display()
+    );
     let runtime =
-        LinuxRuntime::new_with_paths(runtime_dir.path(), artifact_dir.path(), cgroup_root.path());
+        LinuxRuntime::new_with_paths(runtime_dir.path(), artifact_dir.path(), cgroup_root.path())
+            .with_socket_proxy(socket_proxy);
     let artifact = ArtifactRecord::new(
         "sha256:true",
         ArtifactKind::RootfsBundle,
@@ -105,26 +400,30 @@ async fn linux_runtime_start_uses_native_namespace_and_cgroup_gate() {
 
     assert_eq!(status.state, "running");
     assert!(status.pid.is_some());
+    assert!(status.cgroup_path.starts_with(cgroup_root.path()));
+    assert_eq!(
+        fs::read_to_string(status.cgroup_path.join("cpu.max")).expect("cpu.max"),
+        "10000 100000\n"
+    );
+    assert_eq!(
+        fs::read_to_string(status.cgroup_path.join("memory.max")).expect("memory.max"),
+        "67108864\n"
+    );
+    wait_for_path(&status.socket_path);
     runtime
         .stop("true-service")
         .await
         .expect("stop runtime process");
-    assert_eq!(
-        std::fs::read_to_string(
-            cgroup_root
-                .path()
-                .join("true-service")
-                .join(deployment_id.to_string())
-                .join("cpu.max")
-        )
-        .expect("cpu.max"),
-        "10000 100000\n"
+    assert!(
+        !status.cgroup_path.exists(),
+        "runtime stop should remove deployment cgroup {}",
+        status.cgroup_path.display()
     );
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires root, cgroup v2, Linux namespace permissions, and DENIA_PRIVILEGED_BUSYBOX_STATIC"]
-async fn hardened_workload_has_no_new_privs_and_cleared_cap_bnd() {
+fn hardened_workload_has_no_new_privs_and_cleared_cap_bnd() {
     assert_eq!(
         std::env::var("DENIA_RUN_PRIVILEGED_TESTS").as_deref(),
         Ok("1")
@@ -138,76 +437,50 @@ async fn hardened_workload_has_no_new_privs_and_cleared_cap_bnd() {
     );
     assert!(
         static_busybox().exists(),
-        "DENIA_PRIVILEGED_BUSYBOX_STATIC must exist"
+        "static busybox must exist through DENIA_PRIVILEGED_BUSYBOX_STATIC or /usr/lib/nix/busybox"
     );
 
-    let runtime_dir = tempfile::tempdir().expect("runtime dir");
     let artifact_dir = tempfile::tempdir().expect("artifact dir");
-    let cgroup_root = tempfile::tempdir().expect("cgroup dir");
+    let cgroup_root = CgroupTestRoot::new();
 
     let test_userns_base = 100000u32;
-    let runtime =
-        LinuxRuntime::new_with_paths(runtime_dir.path(), artifact_dir.path(), cgroup_root.path())
-            .with_userns(test_userns_base, 65536);
-
-    let artifact = ArtifactRecord::new(
-        "sha256:hardened",
-        ArtifactKind::RootfsBundle,
-        ArtifactSource::ExternalRegistry {
-            image: "local/rootfs:hardened".to_string(),
-        },
-    )
-    .expect("artifact");
     let bundle_dir = artifact_dir.path().join("sha256-hardened");
     let rootfs = bundle_dir.join("rootfs");
     write_busybox_rootfs(&rootfs);
-    let output_dir = rootfs.join("denia-output");
-    std::fs::create_dir_all(&output_dir).expect("output dir");
-    syscall::chown::recursive_lchown(&output_dir, test_userns_base, test_userns_base)
-        .expect("chown output dir");
-    let status_file = output_dir.join("self-status");
-    std::fs::write(
-        bundle_dir.join("process.json"),
-        serde_json::to_vec(&LinuxRuntimeProcessSpec {
-            argv: vec![
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                "cat /proc/self/status > /denia-output/self-status".to_string(),
-            ],
-            env: Vec::new(),
-            workdir: "/".to_string(),
-        })
-        .expect("manifest json"),
+    let status_file = artifact_dir.path().join("self-status");
+    let stderr_file = artifact_dir.path().join("self-status.err");
+
+    let cgroup_path = cgroup_root.create_leaf("hardened-svc");
+    let namespace = NamespaceConfig::new(
+        rootfs.clone(),
+        vec!["/bin/cat".to_string(), "/proc/self/status".to_string()],
     )
-    .expect("manifest");
-
-    let deployment_id = uuid::Uuid::now_v7();
-    let status = runtime
-        .start(RuntimeStartRequest {
-            service_name: "hardened-svc".to_string(),
-            service_id: uuid::Uuid::now_v7(),
-            deployment_id,
-            artifact,
-            internal_port: 3001,
-            socket_path: runtime_dir.path().join("hardened-svc/current.sock"),
-            cpu_millis: 100,
-            memory_bytes: 67108864,
-            env: Vec::new(),
-        })
-        .await
-        .expect("runtime start");
-
-    assert_eq!(status.state, "running");
-    assert!(status.pid.is_some());
-
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    runtime
-        .stop("hardened-svc")
-        .await
-        .expect("stop hardened runtime process");
+    .with_uid_map(test_userns_base, 65536)
+    .with_cgroup_path(cgroup_path)
+    .with_stdio_paths(&status_file, &stderr_file);
+    let pid = spawn_namespaced_process(&namespace).expect("spawn namespaced process");
+    let status = syscall::signal::wait(pid).expect("wait namespaced process");
+    assert_eq!(
+        status,
+        syscall::signal::ProcessStatus::Exited(0),
+        "expected hardened workload to exit successfully"
+    );
 
     let proc_status =
         std::fs::read_to_string(&status_file).expect("workload /proc/self/status output");
+
+    let nspid = proc_status
+        .lines()
+        .find(|line| line.starts_with("NSpid:"))
+        .expect("NSpid field");
+    let namespace_pid = nspid
+        .split_whitespace()
+        .last()
+        .expect("NSpid namespace pid");
+    assert_eq!(
+        namespace_pid, "1",
+        "expected direct workload process to run as pid 1 in the new PID namespace, got: {nspid}"
+    );
 
     let no_new_privs = proc_status
         .lines()

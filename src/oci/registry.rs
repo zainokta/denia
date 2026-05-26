@@ -49,7 +49,13 @@ impl OciImagePuller for RegistryImagePuller {
             serde_json::from_slice(&image_data.config.data).map_err(OciError::Json)?;
 
         let mut layers = Vec::new();
-        for layer in &image_data.layers {
+        for (index, layer) in image_data.layers.iter().enumerate() {
+            let advertised_digest = image_data
+                .manifest
+                .as_ref()
+                .and_then(|manifest| manifest.layers.get(index))
+                .map(|descriptor| descriptor.digest.as_str())
+                .unwrap_or_default();
             let compression = match layer.media_type.as_str() {
                 t if t.contains("gzip") || t.contains("+gzip") => LayerCompression::Gzip,
                 t if t.contains("zstd") || t.contains("+zstd") => LayerCompression::Zstd,
@@ -61,6 +67,12 @@ impl OciImagePuller for RegistryImagePuller {
             let mut hasher = Sha256::new();
             hasher.update(&data);
             let layer_digest = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+            if !advertised_digest.is_empty() && layer_digest != advertised_digest {
+                return Err(OciError::Pull(format!(
+                    "layer digest mismatch: computed {layer_digest}, advertised {advertised_digest}"
+                )));
+            }
 
             layers.push(LayerBlob {
                 digest: layer_digest,

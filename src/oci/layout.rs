@@ -14,7 +14,9 @@ pub fn read_oci_layout(layout_dir: &Path) -> Result<PulledImage, OciError> {
         .as_array()
         .ok_or_else(|| OciError::Layout("no manifests in index.json".to_string()))?;
 
-    let manifest_desc = &manifests[0];
+    let manifest_desc = manifests
+        .first()
+        .ok_or_else(|| OciError::Layout("empty manifests array in index.json".to_string()))?;
     let digest = manifest_desc["digest"]
         .as_str()
         .ok_or_else(|| OciError::Layout("manifest missing digest".to_string()))?;

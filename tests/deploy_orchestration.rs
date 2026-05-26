@@ -33,8 +33,12 @@ fn seed_verified_domain(store: &SqliteStore, service_id: Uuid, hostname: &str) {
 fn bridge_allocator_assigns_stable_loopback_ports() {
     let mut allocator = BridgeAllocator::new(19000);
 
-    let first = allocator.assign("web", "/var/lib/denia/runtime/web/current.sock".into());
-    let second = allocator.assign("web", "/var/lib/denia/runtime/web/current.sock".into());
+    let first = allocator
+        .assign("web", "/var/lib/denia/runtime/web/current.sock".into())
+        .expect("first assign");
+    let second = allocator
+        .assign("web", "/var/lib/denia/runtime/web/current.sock".into())
+        .expect("second assign");
 
     assert_eq!(first.port, 19000);
     assert_eq!(second.port, 19000);

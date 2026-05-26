@@ -1,13 +1,22 @@
+use argon2::{
+    Argon2, ParamsBuilder, PasswordHash, PasswordHasher, PasswordVerifier,
+    password_hash::SaltString,
+};
 use axum::{
     extract::FromRequestParts,
     http::{StatusCode, request::Parts},
 };
 use rand::RngExt;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::state::{SqliteStore, StateError};
+
+const ARGON2_MEMORY: u32 = 19456;
+const ARGON2_ITERATIONS: u32 = 2;
+const ARGON2_PARALLELISM: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum AuthError {
@@ -21,32 +30,58 @@ pub enum AuthError {
     State(#[from] StateError),
 }
 
+fn argon2_hasher() -> Argon2<'static> {
+    let params = ParamsBuilder::new()
+        .m_cost(ARGON2_MEMORY)
+        .t_cost(ARGON2_ITERATIONS)
+        .p_cost(ARGON2_PARALLELISM)
+        .build()
+        .expect("valid argon2 params");
+    Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+}
+
 pub fn hash_password(password: &str) -> Result<String, AuthError> {
-    let salt = random_hex(16);
-    let hash = bcrypt_hash(&salt, password);
-    Ok(format!("bcrypt:{}:{}", salt, hash))
+    let mut salt_bytes = [0u8; 16];
+    rand::rng().fill(&mut salt_bytes);
+    let salt = SaltString::encode_b64(&salt_bytes).map_err(|_| AuthError::InvalidCredentials)?;
+    let hasher = argon2_hasher();
+    let hash = hasher
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|_| AuthError::InvalidCredentials)?
+        .to_string();
+    Ok(format!("argon2id:{}", hash))
 }
 
 pub fn verify_password(hash: &str, password: &str) -> bool {
-    if let Some(rest) = hash.strip_prefix("bcrypt:") {
+    if let Some(rest) = hash.strip_prefix("argon2id:") {
+        let parsed = PasswordHash::new(rest);
+        match parsed {
+            Ok(parsed_hash) => argon2_hasher()
+                .verify_password(password.as_bytes(), &parsed_hash)
+                .is_ok(),
+            Err(_) => false,
+        }
+    } else if let Some(rest) = hash.strip_prefix("bcrypt:") {
         let parts: Vec<&str> = rest.splitn(2, ':').collect();
         if parts.len() == 2 {
             let salt = parts[0];
             let expected = parts[1];
-            let computed = bcrypt_hash(salt, password);
-            return expected == computed;
+            let computed = legacy_sha256_hash(salt, password);
+            if expected.as_bytes().ct_eq(computed.as_bytes()).unwrap_u8() == 1 {
+                return true;
+            }
         }
+        false
+    } else {
+        false
     }
-    false
 }
 
-fn random_hex(len: usize) -> String {
-    let mut bytes = vec![0u8; len];
-    rand::rng().fill(bytes.as_mut_slice());
-    hex::encode(&bytes)
+pub fn needs_password_rehash(hash: &str) -> bool {
+    hash.starts_with("bcrypt:")
 }
 
-fn bcrypt_hash(salt: &str, password: &str) -> String {
+fn legacy_sha256_hash(salt: &str, password: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(salt.as_bytes());
     hasher.update(password.as_bytes());
@@ -108,7 +143,9 @@ where
 }
 
 pub fn resolve_auth(store: &SqliteStore, token: &str, admin_token: &str) -> Option<Principal> {
-    if token == admin_token {
+    if token.as_bytes().len() == admin_token.as_bytes().len()
+        && token.as_bytes().ct_eq(admin_token.as_bytes()).unwrap_u8() == 1
+    {
         return Some(Principal::super_admin());
     }
     let token_hash = hash_token(token);
@@ -146,6 +183,20 @@ mod tests {
         let hash = hash_password("secret123").unwrap();
         assert!(verify_password(&hash, "secret123"));
         assert!(!verify_password(&hash, "wrong"));
+    }
+
+    #[test]
+    fn legacy_bcrypt_prefix_is_still_verifiable() {
+        let legacy = legacy_sha256_hash("abcdefabcdefabcd", "secret123");
+        let stored = format!("bcrypt:{}:{}", "abcdefabcdefabcd", legacy);
+        assert!(verify_password(&stored, "secret123"));
+        assert!(!verify_password(&stored, "wrong"));
+    }
+
+    #[test]
+    fn needs_rehash_detects_legacy_prefix() {
+        assert!(needs_password_rehash("bcrypt:salt:hash"));
+        assert!(!needs_password_rehash("argon2id:$argon2id$v=19$..."));
     }
 
     #[test]

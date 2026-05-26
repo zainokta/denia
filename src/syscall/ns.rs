@@ -4,20 +4,23 @@ use std::{
     os::fd::RawFd,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
-use crate::syscall::SyscallError;
+use rustix::process::Signal;
+
+use crate::syscall::{SyscallError, caps, signal};
 
 /// Configuration for a namespaced one-shot or long-running process launch.
 ///
-/// `NamespaceConfig` is the in-process counterpart to the `unshare` CLI flags.
-/// Building this struct describes *what* to unshare and *how* to map uids; the
-/// actual fork + unshare + uid_map write happens in `spawn_namespaced_process`.
+/// `NamespaceConfig` describes the Linux namespaces, id maps, rootfs, cgroup,
+/// stdio, and exec payload used by Denia's native process runner.
 ///
 /// The struct is intentionally a builder around concrete fields so its public
 /// surface is testable without needing root privileges. Privileged execution
-/// is gated to `spawn_namespaced_process` which returns
-/// `SyscallError::Capability` on non-root callers.
+/// is gated to `spawn_namespaced_process`; callers must run that path only in
+/// the privileged runtime context because namespace, cgroup, mount, and chroot
+/// setup require host-root capabilities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceConfig {
     pub rootfs: PathBuf,
@@ -162,6 +165,12 @@ impl NamespaceConfig {
     ) -> Self {
         self.stdout_path = Some(stdout_path.into());
         self.stderr_path = Some(stderr_path.into());
+        self
+    }
+
+    pub fn with_deferred_hardening(mut self) -> Self {
+        self.no_new_privs = false;
+        self.drop_bounding_caps = false;
         self
     }
 
@@ -332,6 +341,8 @@ fn env_cstring(key: &str, value: &str) -> Result<CString, SyscallError> {
 /// capabilities.
 pub fn spawn_namespaced_process(config: &NamespaceConfig) -> Result<u32, SyscallError> {
     let plan = config.native_launch_plan()?;
+    let argv_ptrs = null_terminated_ptrs(&plan.argv);
+    let env_ptrs = null_terminated_ptrs(&plan.env);
     let pipes = SyncPipes::new()?;
 
     let pid = unsafe { libc::fork() };
@@ -343,11 +354,20 @@ pub fn spawn_namespaced_process(config: &NamespaceConfig) -> Result<u32, Syscall
 
     if pid == 0 {
         unsafe {
-            child_stage1(&plan, &pipes);
+            child_stage1(&plan, &pipes, &argv_ptrs, &env_ptrs);
         }
     }
 
     parent_finish_launch(pid as u32, &plan.setup, pipes)
+}
+
+fn null_terminated_ptrs(strings: &[CString]) -> Vec<*const libc::c_char> {
+    let mut ptrs = strings
+        .iter()
+        .map(|value| value.as_ptr())
+        .collect::<Vec<_>>();
+    ptrs.push(std::ptr::null());
+    ptrs
 }
 
 fn parent_finish_launch(
@@ -356,22 +376,46 @@ fn parent_finish_launch(
     pipes: SyncPipes,
 ) -> Result<u32, SyscallError> {
     pipes.close_child_ends();
-    let ready = pipes.read_child_ready();
-    if let Err(error) = ready {
-        pipes.close_parent_ends();
-        return Err(SyscallError::Io(error));
+    if let Err(error) = pipes.read_child_ready("initial child ready") {
+        return abort_launch(pid, pipes, error);
     }
 
-    let setup_result = setup
-        .write_id_maps_for_pid(pid)
-        .and_then(|()| attach_pid_to_cgroup(pid, &setup.cgroup_procs_path));
-    let release_byte = if setup_result.is_ok() { b'1' } else { b'0' };
+    let cgroup_result = attach_pid_to_cgroup(pid, &setup.cgroup_procs_path);
+    let release_byte = if cgroup_result.is_ok() { b'1' } else { b'0' };
     let release_result = pipes.write_parent_release(release_byte);
-    pipes.close_parent_ends();
+    if let Err(error) = cgroup_result {
+        return abort_launch(pid, pipes, error);
+    }
+    if let Err(error) = release_result {
+        return abort_launch(pid, pipes, SyscallError::Io(error));
+    }
 
-    setup_result?;
-    release_result.map_err(SyscallError::Io)?;
+    if let Err(error) = pipes.read_child_ready("post-unshare child ready") {
+        return abort_launch(pid, pipes, error);
+    }
+
+    let id_map_result = setup.write_id_maps_for_pid(pid);
+    let release_byte = if id_map_result.is_ok() { b'1' } else { b'0' };
+    let release_result = pipes.write_parent_release(release_byte);
+    if let Err(error) = release_result {
+        return abort_launch(pid, pipes, SyscallError::Io(error));
+    }
+    let child_setup_status = pipes.read_child_setup_status();
+    if let Err(error) = id_map_result {
+        return abort_launch(pid, pipes, error);
+    }
+    if let Err(error) = child_setup_status {
+        return abort_launch(pid, pipes, error);
+    }
+    pipes.close_parent_ends();
     Ok(pid)
+}
+
+fn abort_launch(pid: u32, pipes: SyncPipes, error: SyscallError) -> Result<u32, SyscallError> {
+    pipes.close_parent_ends();
+    let _ = signal::kill(pid, Signal::KILL);
+    let _ = signal::wait(pid);
+    Err(error)
 }
 
 fn attach_pid_to_cgroup(pid: u32, cgroup_procs_path: &Path) -> Result<(), SyscallError> {
@@ -393,28 +437,35 @@ struct SyncPipes {
     child_ready_write: RawFd,
     parent_release_read: RawFd,
     parent_release_write: RawFd,
+    child_error_read: RawFd,
+    child_error_write: RawFd,
 }
 
 impl SyncPipes {
     fn new() -> Result<Self, SyscallError> {
         let child_ready = pipe_cloexec()?;
         let parent_release = pipe_cloexec()?;
+        let child_error = pipe_cloexec()?;
         Ok(Self {
             child_ready_read: child_ready[0],
             child_ready_write: child_ready[1],
             parent_release_read: parent_release[0],
             parent_release_write: parent_release[1],
+            child_error_read: child_error[0],
+            child_error_write: child_error[1],
         })
     }
 
     fn close_child_ends(&self) {
         close_fd(self.child_ready_write);
         close_fd(self.parent_release_read);
+        close_fd(self.child_error_write);
     }
 
     fn close_parent_ends(&self) {
         close_fd(self.child_ready_read);
         close_fd(self.parent_release_write);
+        close_fd(self.child_error_read);
     }
 
     fn close_all(&self) {
@@ -422,14 +473,37 @@ impl SyncPipes {
         close_fd(self.child_ready_write);
         close_fd(self.parent_release_read);
         close_fd(self.parent_release_write);
+        close_fd(self.child_error_read);
+        close_fd(self.child_error_write);
     }
 
-    fn read_child_ready(&self) -> std::io::Result<()> {
-        read_exact_byte(self.child_ready_read).map(|_| ())
+    fn read_child_ready(&self, stage: &'static str) -> Result<(), SyscallError> {
+        match read_exact_byte_timeout(self.child_ready_read, CHILD_SETUP_TIMEOUT) {
+            TimedByte::Byte(_) => Ok(()),
+            TimedByte::Eof => Err(SyscallError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "sync pipe closed",
+            ))),
+            TimedByte::Timeout => Err(SyscallError::ChildSetupTimeout { stage }),
+            TimedByte::Error(error) => Err(SyscallError::Io(error)),
+        }
     }
 
     fn write_parent_release(&self, byte: u8) -> std::io::Result<()> {
         write_byte(self.parent_release_write, byte)
+    }
+
+    fn read_child_setup_status(&self) -> Result<(), SyscallError> {
+        match read_optional_byte_timeout(self.child_error_read, CHILD_SETUP_TIMEOUT) {
+            TimedByte::Byte(stage) => Err(SyscallError::ChildSetup {
+                stage: child_setup_stage(stage),
+            }),
+            TimedByte::Eof => Ok(()),
+            TimedByte::Timeout => Err(SyscallError::ChildSetupTimeout {
+                stage: "child setup status",
+            }),
+            TimedByte::Error(error) => Err(SyscallError::Io(error)),
+        }
     }
 }
 
@@ -448,24 +522,75 @@ fn close_fd(fd: RawFd) {
     }
 }
 
-fn read_exact_byte(fd: RawFd) -> std::io::Result<u8> {
-    let mut byte = 0_u8;
+enum TimedByte {
+    Byte(u8),
+    Eof,
+    Timeout,
+    Error(std::io::Error),
+}
+
+fn read_exact_byte_timeout(fd: RawFd, timeout: Duration) -> TimedByte {
+    match wait_fd_readable(fd, timeout) {
+        Ok(true) => read_byte_now(fd),
+        Ok(false) => TimedByte::Timeout,
+        Err(error) => TimedByte::Error(error),
+    }
+}
+
+fn read_optional_byte_timeout(fd: RawFd, timeout: Duration) -> TimedByte {
+    read_exact_byte_timeout(fd, timeout)
+}
+
+fn wait_fd_readable(fd: RawFd, timeout: Duration) -> std::io::Result<bool> {
+    let timeout_ms = timeout.as_millis().try_into().unwrap_or(i32::MAX);
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+        revents: 0,
+    };
     loop {
-        let result = unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) };
-        if result == 1 {
-            return Ok(byte);
+        let result = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+        if result > 0 {
+            return Ok(true);
         }
         if result == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "sync pipe closed",
-            ));
+            return Ok(false);
         }
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::EINTR) {
             continue;
         }
         return Err(error);
+    }
+}
+
+fn read_byte_now(fd: RawFd) -> TimedByte {
+    let mut byte = 0_u8;
+    loop {
+        let result = unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) };
+        if result == 1 {
+            return TimedByte::Byte(byte);
+        }
+        if result == 0 {
+            return TimedByte::Eof;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return TimedByte::Error(error);
+    }
+}
+
+fn read_exact_byte(fd: RawFd) -> std::io::Result<u8> {
+    match read_byte_now(fd) {
+        TimedByte::Byte(byte) => Ok(byte),
+        TimedByte::Eof => Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "sync pipe closed",
+        )),
+        TimedByte::Timeout => unreachable!("read_byte_now never returns timeout"),
+        TimedByte::Error(error) => Err(error),
     }
 }
 
@@ -483,18 +608,56 @@ fn write_byte(fd: RawFd, byte: u8) -> std::io::Result<()> {
     }
 }
 
-unsafe fn child_stage1(plan: &NativeLaunchPlan, pipes: &SyncPipes) -> ! {
+fn child_setup_stage(stage: u8) -> &'static str {
+    match stage {
+        b'C' => "cgroup release",
+        b'U' => "unshare",
+        b'M' => "id-map release",
+        b'F' => "pid namespace fork",
+        b'P' => "make mount propagation private",
+        b'O' => "open stdio",
+        b'R' => "chroot",
+        b'W' => "chdir workdir",
+        b'p' => "mount proc",
+        b'N' => "set no_new_privs",
+        b'B' => "drop capability bounding set",
+        b'E' => "execve",
+        _ => "unknown setup stage",
+    }
+}
+
+unsafe fn child_setup_fail(pipes: &SyncPipes, stage: u8) -> ! {
+    let _ = write_byte(pipes.child_error_write, stage);
+    unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
+}
+
+unsafe fn child_stage1(
+    plan: &NativeLaunchPlan,
+    pipes: &SyncPipes,
+    argv: &[*const libc::c_char],
+    env: &[*const libc::c_char],
+) -> ! {
     pipes.close_parent_ends();
 
-    if unsafe { libc::unshare(plan.setup.clone_flags) } < 0 {
+    let stdio = unsafe { open_child_stdio(plan, pipes) };
+
+    if write_byte(pipes.child_ready_write, b'C').is_err() {
         unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
+    }
+    match read_exact_byte(pipes.parent_release_read) {
+        Ok(b'1') => {}
+        _ => unsafe { child_setup_fail(pipes, b'C') },
+    }
+
+    if unsafe { libc::unshare(plan.setup.clone_flags) } < 0 {
+        unsafe { child_setup_fail(pipes, b'U') };
     }
     if write_byte(pipes.child_ready_write, b'R').is_err() {
         unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
     }
     match read_exact_byte(pipes.parent_release_read) {
         Ok(b'1') => {}
-        _ => unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) },
+        _ => unsafe { child_setup_fail(pipes, b'M') },
     }
     close_fd(pipes.child_ready_write);
     close_fd(pipes.parent_release_read);
@@ -502,14 +665,15 @@ unsafe fn child_stage1(plan: &NativeLaunchPlan, pipes: &SyncPipes) -> ! {
     if plan.setup.clone_flags & libc::CLONE_NEWPID != 0 {
         let pid = unsafe { libc::fork() };
         if pid < 0 {
-            unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
+            unsafe { child_setup_fail(pipes, b'F') };
         }
         if pid > 0 {
+            close_fd(pipes.child_error_write);
             unsafe { wait_for_stage2(pid) };
         }
     }
 
-    unsafe { child_exec(plan) };
+    unsafe { child_exec(plan, pipes, argv, env, &stdio) };
 }
 
 unsafe fn wait_for_stage2(pid: libc::pid_t) -> ! {
@@ -533,7 +697,13 @@ unsafe fn wait_for_stage2(pid: libc::pid_t) -> ! {
     }
 }
 
-unsafe fn child_exec(plan: &NativeLaunchPlan) -> ! {
+unsafe fn child_exec(
+    plan: &NativeLaunchPlan,
+    pipes: &SyncPipes,
+    argv: &[*const libc::c_char],
+    env: &[*const libc::c_char],
+    stdio: &ChildStdio,
+) -> ! {
     if plan.setup.clone_flags & libc::CLONE_NEWNS != 0 {
         let propagation = libc::MS_PRIVATE | libc::MS_REC;
         if unsafe {
@@ -546,22 +716,65 @@ unsafe fn child_exec(plan: &NativeLaunchPlan) -> ! {
             )
         } < 0
         {
-            unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
+            unsafe { child_setup_fail(pipes, b'P') };
         }
     }
 
-    if let Some(stdout_path) = &plan.stdout_path {
-        unsafe { redirect_stdio(stdout_path, libc::STDOUT_FILENO) };
+    if let Some(stdout_fd) = stdio.stdout_fd {
+        unsafe { redirect_stdio_fd(pipes, stdout_fd, libc::STDOUT_FILENO) };
     }
-    if let Some(stderr_path) = &plan.stderr_path {
-        unsafe { redirect_stdio(stderr_path, libc::STDERR_FILENO) };
+    if let Some(stderr_fd) = stdio.stderr_fd {
+        unsafe { redirect_stdio_fd(pipes, stderr_fd, libc::STDERR_FILENO) };
     }
 
-    if unsafe { libc::chroot(plan.rootfs.as_ptr()) } < 0 {
-        unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
+    if unsafe {
+        libc::mount(
+            plan.rootfs.as_ptr(),
+            plan.rootfs.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND | libc::MS_REC,
+            std::ptr::null(),
+        )
+    } < 0
+    {
+        unsafe { child_setup_fail(pipes, b'R') };
     }
+
+    let old_root = plan.rootfs.to_bytes_with_nul();
+    let old_root_path = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(&old_root) };
+    let mut old_root_buf = old_root_path.to_bytes().to_vec();
+    old_root_buf.extend_from_slice(b"/.old_root\0");
+    let old_root_target = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(&old_root_buf) };
+
+    if unsafe { libc::mkdir(old_root_target.as_ptr(), 0o755) } < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EEXIST) {
+            unsafe { child_setup_fail(pipes, b'R') };
+        }
+    }
+
+    if unsafe {
+        libc::syscall(
+            libc::SYS_pivot_root,
+            plan.rootfs.as_ptr(),
+            old_root_target.as_ptr(),
+        )
+    } < 0
+    {
+        unsafe { child_setup_fail(pipes, b'R') };
+    }
+
+    if unsafe { libc::chdir(c"/".as_ptr()) } < 0 {
+        unsafe { child_setup_fail(pipes, b'W') };
+    }
+
+    if unsafe { libc::umount2(c"/.old_root".as_ptr(), libc::MNT_DETACH) } < 0 {
+        unsafe { child_setup_fail(pipes, b'R') };
+    }
+    let _ = unsafe { libc::rmdir(c"/.old_root".as_ptr()) };
+
     if unsafe { libc::chdir(plan.workdir.as_ptr()) } < 0 {
-        unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
+        unsafe { child_setup_fail(pipes, b'W') };
     }
 
     if plan.setup.mount_proc
@@ -575,54 +788,62 @@ unsafe fn child_exec(plan: &NativeLaunchPlan) -> ! {
             )
         } < 0
     {
-        unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
+        unsafe { child_setup_fail(pipes, b'p') };
     }
 
-    if plan.setup.no_new_privs && unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } < 0
-    {
-        unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
+    if plan.setup.no_new_privs && !caps::try_set_no_new_privs() {
+        unsafe { child_setup_fail(pipes, b'N') };
     }
-    if plan.setup.drop_bounding_caps {
-        for capability in 0..=CAP_LAST_CAP {
-            if unsafe { libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) } < 0 {
-                unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
-            }
-        }
+    if plan.setup.drop_bounding_caps && !caps::try_drop_bounding_caps() {
+        unsafe { child_setup_fail(pipes, b'B') };
     }
-
-    let mut argv = plan.argv.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
-    argv.push(std::ptr::null());
-    let mut env = plan
-        .env
-        .iter()
-        .map(|entry| entry.as_ptr())
-        .collect::<Vec<_>>();
-    env.push(std::ptr::null());
 
     unsafe { libc::execve(plan.program.as_ptr(), argv.as_ptr(), env.as_ptr()) };
-    unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
+    unsafe { child_setup_fail(pipes, b'E') };
 }
 
-unsafe fn redirect_stdio(path: &std::ffi::CStr, target_fd: libc::c_int) {
+struct ChildStdio {
+    stdout_fd: Option<RawFd>,
+    stderr_fd: Option<RawFd>,
+}
+
+unsafe fn open_child_stdio(plan: &NativeLaunchPlan, pipes: &SyncPipes) -> ChildStdio {
+    ChildStdio {
+        stdout_fd: plan
+            .stdout_path
+            .as_deref()
+            .map(|path| unsafe { open_stdio_file(pipes, path) }),
+        stderr_fd: plan
+            .stderr_path
+            .as_deref()
+            .map(|path| unsafe { open_stdio_file(pipes, path) }),
+    }
+}
+
+unsafe fn open_stdio_file(pipes: &SyncPipes, path: &std::ffi::CStr) -> RawFd {
     let fd = unsafe {
         libc::open(
             path.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND | libc::O_CLOEXEC,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
             0o644,
         )
     };
     if fd < 0 {
-        unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
+        unsafe { child_setup_fail(pipes, b'O') };
     }
+    fd
+}
+
+unsafe fn redirect_stdio_fd(pipes: &SyncPipes, fd: RawFd, target_fd: libc::c_int) {
     if unsafe { libc::dup2(fd, target_fd) } < 0 {
         let _ = unsafe { libc::close(fd) };
-        unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
+        unsafe { child_setup_fail(pipes, b'O') };
     }
     let _ = unsafe { libc::close(fd) };
 }
 
 const CHILD_SETUP_EXIT_CODE: i32 = 127;
-const CAP_LAST_CAP: libc::c_ulong = 40;
+const CHILD_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
 mod tests {
@@ -814,6 +1035,65 @@ mod tests {
                 .expect("stderr path"),
             "/var/log/denia/stderr.log"
         );
+    }
+
+    #[test]
+    fn null_terminated_ptrs_prepares_execve_payload_before_fork() {
+        let argv = vec![
+            CString::new("/bin/sh").expect("program"),
+            CString::new("-c").expect("arg"),
+        ];
+
+        let ptrs = null_terminated_ptrs(&argv);
+
+        assert_eq!(ptrs.len(), 3);
+        assert_eq!(ptrs[0], argv[0].as_ptr());
+        assert_eq!(ptrs[1], argv[1].as_ptr());
+        assert!(ptrs[2].is_null());
+    }
+
+    #[test]
+    fn child_setup_stage_names_common_failures() {
+        assert_eq!(child_setup_stage(b'U'), "unshare");
+        assert_eq!(child_setup_stage(b'R'), "chroot");
+        assert_eq!(child_setup_stage(b'E'), "execve");
+        assert_eq!(child_setup_stage(b'?'), "unknown setup stage");
+    }
+
+    #[test]
+    fn read_optional_byte_timeout_reports_timeout_without_eof() {
+        let pipe = pipe_cloexec().expect("pipe");
+
+        let result = read_optional_byte_timeout(pipe[0], Duration::ZERO);
+
+        assert!(matches!(result, TimedByte::Timeout));
+        close_fd(pipe[0]);
+        close_fd(pipe[1]);
+    }
+
+    #[test]
+    fn read_optional_byte_timeout_reads_written_byte() {
+        let pipe = pipe_cloexec().expect("pipe");
+        write_byte(pipe[1], b'X').expect("write byte");
+
+        let result = read_optional_byte_timeout(pipe[0], Duration::from_secs(1));
+
+        assert!(matches!(result, TimedByte::Byte(b'X')));
+        close_fd(pipe[0]);
+        close_fd(pipe[1]);
+    }
+
+    #[test]
+    fn deferred_hardening_leaves_stage_one_capabilities_available() {
+        let cfg = NamespaceConfig::new("/tmp/rootfs", vec!["/bin/true".to_string()])
+            .with_uid_map(100000, 65536)
+            .with_cgroup_path("/sys/fs/cgroup/denia/test")
+            .with_deferred_hardening();
+
+        let plan = cfg.setup_plan().expect("setup plan");
+
+        assert!(!plan.no_new_privs);
+        assert!(!plan.drop_bounding_caps);
     }
 
     #[test]

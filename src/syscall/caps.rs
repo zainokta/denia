@@ -7,6 +7,10 @@ pub fn set_no_new_privs() -> Result<(), SyscallError> {
         .map_err(|e| SyscallError::Capability(format!("PR_SET_NO_NEW_PRIVS: {e}")))
 }
 
+pub fn try_set_no_new_privs() -> bool {
+    thread::set_no_new_privs(true).is_ok()
+}
+
 pub fn drop_bounding_caps() -> Result<(), SyscallError> {
     for cap in ALL_CAPABILITIES {
         thread::remove_capability_from_bounding_set(cap).map_err(|e| {
@@ -14,6 +18,12 @@ pub fn drop_bounding_caps() -> Result<(), SyscallError> {
         })?;
     }
     Ok(())
+}
+
+pub fn try_drop_bounding_caps() -> bool {
+    ALL_CAPABILITIES
+        .into_iter()
+        .all(|cap| thread::remove_capability_from_bounding_set(cap).is_ok())
 }
 
 const ALL_CAPABILITIES: [thread::CapabilitySet; 41] = [

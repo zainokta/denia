@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -43,6 +44,18 @@ pub enum StateError {
     RegistryInUse,
 }
 
+fn apply_sqlite_pragmas(connection: &Connection) -> Result<(), StateError> {
+    connection.execute_batch(
+        r#"
+        PRAGMA journal_mode = WAL;
+        PRAGMA foreign_keys = ON;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA busy_timeout = 5000;
+        "#,
+    )?;
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct SqliteStore {
     connection: Arc<Mutex<Connection>>,
@@ -50,14 +63,23 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, StateError> {
+        let path = path.as_ref();
+        let connection = Connection::open(path)?;
+        apply_sqlite_pragmas(&connection)?;
+        #[cfg(unix)]
+        {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
         Ok(Self {
-            connection: Arc::new(Mutex::new(Connection::open(path)?)),
+            connection: Arc::new(Mutex::new(connection)),
         })
     }
 
     pub fn open_in_memory() -> Result<Self, StateError> {
+        let connection = Connection::open_in_memory()?;
+        apply_sqlite_pragmas(&connection)?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(Connection::open_in_memory()?)),
+            connection: Arc::new(Mutex::new(connection)),
         })
     }
 

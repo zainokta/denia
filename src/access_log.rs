@@ -57,11 +57,12 @@ impl AccessLogStore {
 pub fn parse_request_line(line: &str) -> Option<(String, String)> {
     let mut parts = line.split_whitespace();
     let method = parts.next()?.to_string();
-    let path = parts.next()?.to_string();
+    let raw_path = parts.next()?.to_string();
     let proto = parts.next()?;
     if !proto.starts_with("HTTP/") {
         return None;
     }
+    let path = raw_path.split('?').next().unwrap_or(&raw_path).to_string();
     Some((method, path))
 }
 
