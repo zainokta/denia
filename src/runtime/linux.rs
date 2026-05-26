@@ -1,161 +1,32 @@
 use std::{
     collections::HashMap,
     fs::OpenOptions,
-    os::unix::fs::{FileTypeExt, PermissionsExt},
-    path::{Component, Path, PathBuf},
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use tokio::time::{Duration, Instant, sleep};
 
 use crate::artifacts::ArtifactKind;
 use crate::domain::{JobOutcome, JobRunRequest, RuntimeStartRequest, RuntimeStatus};
+use crate::runtime::error::RuntimeError;
+use crate::runtime::fs_helpers::{
+    cpu_max, create_dir_all, create_runtime_directory, exit_code_from_process_status, path_io,
+    prepare_cgroup_directory, remove_cgroup_dir_if_exists, remove_dir_if_exists,
+    remove_existing_runtime_file, resolve_host_binary, safe_artifact_name, terminate_tracked_child,
+    validate_runtime_directory, wait_for_service_socket,
+};
+use crate::runtime::plan::{
+    LinuxRuntimePlan, LinuxRuntimeProcessSpec, TrackedChild, TrackedProcess,
+};
+use crate::runtime::runtime_trait::Runtime;
+use crate::runtime::validation::{
+    validate_process_spec, validate_resource_limits, validate_service_name,
+};
 use crate::syscall::chown;
 use crate::syscall::ns::{NamespaceConfig, spawn_namespaced_process};
-use crate::syscall::signal::{self, ProcessStatus};
-
-#[derive(Debug, Error)]
-pub enum RuntimeError {
-    #[error("runtime lock poisoned")]
-    LockPoisoned,
-    #[error("invalid runtime service name: {name}")]
-    InvalidServiceName { name: String },
-    #[error("linux runtime requires a rootfs bundle artifact, got {kind:?}")]
-    UnsupportedArtifactKind { kind: ArtifactKind },
-    #[error("runtime process manifest is missing argv: {path}")]
-    EmptyArgv { path: PathBuf },
-    #[error("runtime process argv[0] must be an absolute path: {argv0}")]
-    InvalidArgv { argv0: String },
-    #[error("runtime process workdir must be absolute: {workdir}")]
-    InvalidWorkdir { workdir: String },
-    #[error("runtime process environment key is invalid: {key}")]
-    InvalidEnvironmentKey { key: String },
-    #[error("rootfs bundle is missing: {path}")]
-    MissingRootfs { path: PathBuf },
-    #[error("runtime path is unsafe: {path}")]
-    UnsafeRuntimePath { path: PathBuf },
-    #[error("invalid runtime resource limit: {reason}")]
-    InvalidResourceLimit { reason: String },
-    #[error("socket proxy binary not found: {path}")]
-    SocketProxyUnavailable { path: PathBuf },
-    #[error("service socket did not become ready: {path}")]
-    ServiceSocketUnavailable { path: PathBuf },
-    #[error("{action} failed at {path}: {source}")]
-    PathIo {
-        action: &'static str,
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("manifest json error: {0}")]
-    Manifest(#[from] serde_json::Error),
-    #[error("syscall error: {0}")]
-    Syscall(#[from] crate::syscall::SyscallError),
-    #[error("native runtime wait task failed: {0}")]
-    Join(#[from] tokio::task::JoinError),
-}
-
-#[async_trait]
-pub trait Runtime: Send + Sync {
-    async fn start(&self, request: RuntimeStartRequest) -> Result<RuntimeStatus, RuntimeError>;
-    async fn stop(&self, service_name: &str) -> Result<(), RuntimeError>;
-    async fn run_to_completion(&self, _request: JobRunRequest) -> Result<JobOutcome, RuntimeError> {
-        Err(RuntimeError::InvalidServiceName {
-            name: "run_to_completion not implemented".to_string(),
-        })
-    }
-}
-
-#[async_trait]
-impl<T> Runtime for Arc<T>
-where
-    T: Runtime + ?Sized,
-{
-    async fn start(&self, request: RuntimeStartRequest) -> Result<RuntimeStatus, RuntimeError> {
-        (**self).start(request).await
-    }
-
-    async fn stop(&self, service_name: &str) -> Result<(), RuntimeError> {
-        (**self).stop(service_name).await
-    }
-
-    async fn run_to_completion(&self, request: JobRunRequest) -> Result<JobOutcome, RuntimeError> {
-        (**self).run_to_completion(request).await
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct FakeRuntime {
-    started: Arc<Mutex<Vec<RuntimeStartRequest>>>,
-    stopped: Arc<Mutex<Vec<String>>>,
-}
-
-impl FakeRuntime {
-    pub fn started_requests(&self) -> Vec<RuntimeStartRequest> {
-        self.started.lock().expect("started lock").clone()
-    }
-
-    pub fn stopped_services(&self) -> Vec<String> {
-        self.stopped.lock().expect("stopped lock").clone()
-    }
-}
-
-#[async_trait]
-impl Runtime for FakeRuntime {
-    async fn start(&self, request: RuntimeStartRequest) -> Result<RuntimeStatus, RuntimeError> {
-        self.started
-            .lock()
-            .map_err(|_| RuntimeError::LockPoisoned)?
-            .push(request.clone());
-        Ok(RuntimeStatus {
-            service_name: request.service_name,
-            deployment_id: request.deployment_id,
-            state: "running".to_string(),
-            pid: Some(1234),
-            cgroup_path: "/sys/fs/cgroup/denia/fake".into(),
-            socket_path: request.socket_path,
-        })
-    }
-
-    async fn stop(&self, service_name: &str) -> Result<(), RuntimeError> {
-        self.stopped
-            .lock()
-            .map_err(|_| RuntimeError::LockPoisoned)?
-            .push(service_name.to_string());
-        Ok(())
-    }
-
-    async fn run_to_completion(&self, _request: JobRunRequest) -> Result<JobOutcome, RuntimeError> {
-        let now = chrono::Utc::now();
-        Ok(JobOutcome {
-            exit_code: 0,
-            started_at: now,
-            finished_at: now,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LinuxRuntimeProcessSpec {
-    pub argv: Vec<String>,
-    pub env: Vec<(String, String)>,
-    pub workdir: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinuxRuntimePlan {
-    pub namespace: NamespaceConfig,
-    pub rootfs_path: PathBuf,
-    pub socket_path: PathBuf,
-    pub guest_socket_path: String,
-    pub cgroup_path: PathBuf,
-    pub service_dir: PathBuf,
-    pub deployment_dir: PathBuf,
-}
+use crate::syscall::signal;
 
 #[derive(Debug, Clone)]
 pub struct LinuxRuntime {
@@ -169,24 +40,11 @@ pub struct LinuxRuntime {
     children: Arc<Mutex<HashMap<String, TrackedChild>>>,
 }
 
-const SOCKET_PROXY_TARGET: &str = "/.denia/socket-proxy";
-const WORKLOAD_LAUNCHER_TARGET: &str = "/.denia/workload-launcher";
-const GUEST_SERVICE_SOCKET: &str = "/run/denia/service.sock";
-const GUEST_SERVICE_SOCKET_ENV: &str = "DENIA_SERVICE_SOCKET";
-const SERVICE_SOCKET_READY_TIMEOUT: Duration = Duration::from_secs(5);
-const SERVICE_SOCKET_READY_POLL: Duration = Duration::from_millis(50);
-const CGROUP_CONTROLLERS: &[&str] = &["cpu", "memory"];
-
-#[derive(Debug)]
-struct TrackedChild {
-    process: TrackedProcess,
-    plan: LinuxRuntimePlan,
-}
-
-#[derive(Debug)]
-enum TrackedProcess {
-    NativePid(u32),
-}
+pub(crate) const SOCKET_PROXY_TARGET: &str = "/.denia/socket-proxy";
+pub(crate) const WORKLOAD_LAUNCHER_TARGET: &str = "/.denia/workload-launcher";
+pub(crate) const GUEST_SERVICE_SOCKET: &str = "/run/denia/service.sock";
+pub(crate) const GUEST_SERVICE_SOCKET_ENV: &str = "DENIA_SERVICE_SOCKET";
+pub(crate) const CGROUP_CONTROLLERS: &[&str] = &["cpu", "memory"];
 
 impl LinuxRuntime {
     pub fn new(runtime_dir: impl Into<PathBuf>) -> Self {
@@ -387,121 +245,6 @@ impl LinuxRuntime {
         chown::recursive_lchown(path, self.userns_base, self.userns_base)?;
         Ok(())
     }
-}
-
-fn resolve_host_binary(source: &Path) -> Option<PathBuf> {
-    if source.is_absolute() || source.to_string_lossy().contains('/') {
-        if source.exists() {
-            return Some(source.to_path_buf());
-        }
-        return None;
-    }
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(source);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-fn path_io(
-    action: &'static str,
-    path: impl Into<PathBuf>,
-) -> impl FnOnce(std::io::Error) -> RuntimeError {
-    let path = path.into();
-    move |source| RuntimeError::PathIo {
-        action,
-        path,
-        source,
-    }
-}
-
-fn create_dir_all(action: &'static str, path: &Path) -> Result<(), RuntimeError> {
-    std::fs::create_dir_all(path).map_err(path_io(action, path))
-}
-
-fn prepare_cgroup_directory(
-    root: &Path,
-    path: &Path,
-    controllers: &[&str],
-) -> Result<(), RuntimeError> {
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| RuntimeError::UnsafeRuntimePath {
-            path: path.to_path_buf(),
-        })?;
-    let root_existed = root.exists();
-    if !root_existed && let Some(parent) = root.parent() {
-        enable_cgroup_controllers(parent, controllers)?;
-    }
-    create_dir_all("create cgroup root directory", root)?;
-    if !cgroup_has_requested_controllers(root, controllers)?
-        && let Some(parent) = root.parent()
-    {
-        enable_cgroup_controllers(parent, controllers)?;
-    }
-    enable_cgroup_controllers(root, controllers)?;
-
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        let Component::Normal(part) = component else {
-            return Err(RuntimeError::UnsafeRuntimePath {
-                path: path.to_path_buf(),
-            });
-        };
-        current.push(part);
-        create_dir_all("create cgroup directory", &current)?;
-        if current != path {
-            enable_cgroup_controllers(&current, controllers)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn enable_cgroup_controllers(path: &Path, controllers: &[&str]) -> Result<(), RuntimeError> {
-    let controllers_path = path.join("cgroup.controllers");
-    let subtree_control_path = path.join("cgroup.subtree_control");
-    if !controllers_path.exists() || !subtree_control_path.exists() {
-        return Ok(());
-    }
-
-    let available = std::fs::read_to_string(&controllers_path)
-        .map_err(path_io("read cgroup controllers", &controllers_path))?;
-    let requested = controllers
-        .iter()
-        .filter(|controller| {
-            available
-                .split_whitespace()
-                .any(|available| available == **controller)
-        })
-        .map(|controller| format!("+{controller}"))
-        .collect::<Vec<_>>();
-    if requested.is_empty() {
-        return Ok(());
-    }
-
-    std::fs::write(&subtree_control_path, format!("{}\n", requested.join(" ")))
-        .map_err(path_io("enable cgroup controllers", &subtree_control_path))
-}
-
-fn cgroup_has_requested_controllers(
-    path: &Path,
-    controllers: &[&str],
-) -> Result<bool, RuntimeError> {
-    let controllers_path = path.join("cgroup.controllers");
-    if !controllers_path.exists() {
-        return Ok(true);
-    }
-    let available = std::fs::read_to_string(&controllers_path)
-        .map_err(path_io("read cgroup controllers", &controllers_path))?;
-    Ok(controllers.iter().all(|controller| {
-        available
-            .split_whitespace()
-            .any(|available| available == *controller)
-    }))
 }
 
 #[async_trait]
@@ -730,235 +473,23 @@ impl LinuxRuntime {
     }
 }
 
-fn validate_service_name(service_name: &str) -> Result<(), RuntimeError> {
-    let valid = !service_name.is_empty()
-        && service_name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
-    if valid {
-        Ok(())
-    } else {
-        Err(RuntimeError::InvalidServiceName {
-            name: service_name.to_string(),
-        })
-    }
-}
-
-fn validate_process_spec(
-    process: &LinuxRuntimeProcessSpec,
-    manifest_path: &Path,
-) -> Result<(), RuntimeError> {
-    if process.argv.is_empty() {
-        return Err(RuntimeError::EmptyArgv {
-            path: manifest_path.to_path_buf(),
-        });
-    }
-    if !process.argv[0].starts_with('/') {
-        return Err(RuntimeError::InvalidArgv {
-            argv0: process.argv[0].clone(),
-        });
-    }
-    if !process.workdir.starts_with('/') {
-        return Err(RuntimeError::InvalidWorkdir {
-            workdir: process.workdir.clone(),
-        });
-    }
-    for (key, _) in &process.env {
-        if key.is_empty() || key.contains('=') || key.contains('\0') {
-            return Err(RuntimeError::InvalidEnvironmentKey { key: key.clone() });
-        }
-    }
-    Ok(())
-}
-
-fn validate_resource_limits(request: &RuntimeStartRequest) -> Result<(), RuntimeError> {
-    if request.cpu_millis == 0 {
-        return Err(RuntimeError::InvalidResourceLimit {
-            reason: "cpu_millis must be greater than zero".to_string(),
-        });
-    }
-    if request.memory_bytes == 0 {
-        return Err(RuntimeError::InvalidResourceLimit {
-            reason: "memory_bytes must be greater than zero".to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn safe_artifact_name(digest: &str) -> String {
-    digest
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
-fn cpu_max(cpu_millis: u32) -> String {
-    format!("{} 100000\n", u64::from(cpu_millis) * 100)
-}
-
-fn remove_dir_if_exists(path: &Path) -> Result<(), RuntimeError> {
-    match std::fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(RuntimeError::Io(error)),
-    }
-}
-
-fn remove_cgroup_dir_if_exists(path: &Path) -> Result<(), RuntimeError> {
-    match remove_cgroup_dir(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(RuntimeError::Io(error)),
-    }
-}
-
-fn remove_cgroup_dir(path: &Path) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            remove_cgroup_dir(&entry.path())?;
-        }
-    }
-    std::fs::remove_dir(path)
-}
-
-async fn wait_for_service_socket(
-    path: &Path,
-    process: &mut TrackedProcess,
-) -> Result<(), RuntimeError> {
-    let deadline = Instant::now() + SERVICE_SOCKET_READY_TIMEOUT;
-    loop {
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_socket() => return Ok(()),
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(RuntimeError::Io(error)),
-        }
-        if process.try_wait()? {
-            return Err(RuntimeError::ServiceSocketUnavailable {
-                path: path.to_path_buf(),
-            });
-        }
-        if Instant::now() >= deadline {
-            return Err(RuntimeError::ServiceSocketUnavailable {
-                path: path.to_path_buf(),
-            });
-        }
-        sleep(SERVICE_SOCKET_READY_POLL).await;
-    }
-}
-
-async fn terminate_tracked_child(tracked: &mut TrackedChild) -> Result<(), RuntimeError> {
-    match std::fs::write(tracked.plan.cgroup_path.join("cgroup.kill"), "1\n") {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(RuntimeError::Io(error)),
-    }
-    terminate_tracked_process(&mut tracked.process).await?;
-    Ok(())
-}
-
-async fn terminate_tracked_process(process: &mut TrackedProcess) -> Result<(), RuntimeError> {
-    match process {
-        TrackedProcess::NativePid(pid) => {
-            if *pid == 0 {
-                return Ok(());
-            }
-            let raw_pid = *pid;
-            if signal::try_wait(raw_pid)? == ProcessStatus::Running {
-                signal::kill(raw_pid, rustix::process::Signal::KILL)?;
-                let _ = tokio::task::spawn_blocking(move || signal::wait(raw_pid)).await??;
-            }
-            *pid = 0;
-        }
-    }
-    Ok(())
-}
-
-impl TrackedProcess {
-    fn try_wait(&mut self) -> Result<bool, RuntimeError> {
-        match self {
-            TrackedProcess::NativePid(pid) => {
-                if *pid == 0 {
-                    return Ok(true);
-                }
-                match signal::try_wait(*pid)? {
-                    ProcessStatus::Running => Ok(false),
-                    ProcessStatus::Exited(_) | ProcessStatus::Signaled(_) => {
-                        *pid = 0;
-                        Ok(true)
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn validate_runtime_directory(path: &Path) -> Result<(), RuntimeError> {
-    let metadata =
-        std::fs::symlink_metadata(path).map_err(path_io("stat runtime directory", path))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(RuntimeError::UnsafeRuntimePath {
-            path: path.to_path_buf(),
-        });
-    }
-    Ok(())
-}
-
-fn create_runtime_directory(path: &Path) -> Result<(), RuntimeError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(RuntimeError::UnsafeRuntimePath {
-                    path: path.to_path_buf(),
-                });
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            create_dir_all("create runtime directory", path)?;
-            validate_runtime_directory(path)?;
-        }
-        Err(error) => return Err(path_io("stat runtime directory", path)(error)),
-    }
-    Ok(())
-}
-
-fn remove_existing_runtime_file(path: &Path) -> Result<(), RuntimeError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || metadata.is_dir() {
-                return Err(RuntimeError::UnsafeRuntimePath {
-                    path: path.to_path_buf(),
-                });
-            }
-            std::fs::remove_file(path).map_err(path_io("remove existing runtime file", path))?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(path_io("stat existing runtime file", path)(error)),
-    }
-    Ok(())
-}
-
-fn exit_code_from_process_status(status: ProcessStatus) -> i32 {
-    match status {
-        ProcessStatus::Running => -1,
-        ProcessStatus::Exited(code) => code,
-        ProcessStatus::Signaled(signal) => 128 + signal,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        CGROUP_CONTROLLERS, GUEST_SERVICE_SOCKET, GUEST_SERVICE_SOCKET_ENV, LinuxRuntime,
+        LinuxRuntimePlan, LinuxRuntimeProcessSpec, TrackedChild, TrackedProcess,
+    };
     use crate::artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource};
     use crate::domain::RuntimeStartRequest;
+    use crate::runtime::error::RuntimeError;
+    use crate::runtime::fs_helpers::{
+        cgroup_has_requested_controllers, prepare_cgroup_directory, remove_cgroup_dir,
+        remove_dir_if_exists, safe_artifact_name, terminate_tracked_child,
+        terminate_tracked_process, wait_for_service_socket,
+    };
+    use crate::syscall::ns::NamespaceConfig;
     use std::os::unix::fs::symlink;
+    use std::path::{Path, PathBuf};
 
     fn write_process_bundle(
         artifact_dir: &Path,
