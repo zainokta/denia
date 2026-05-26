@@ -1,7 +1,8 @@
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use serde::Deserialize;
 
-use crate::app::{ApiError, AppState};
+use crate::api::ApiError;
+use crate::app::AppState;
 use crate::auth::{Principal, ensure_role};
 use crate::domain::Role;
 use crate::secrets::SecretRef;

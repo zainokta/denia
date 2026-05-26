@@ -6,7 +6,8 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::app::{ApiError, AppState};
+use crate::api::ApiError;
+use crate::app::AppState;
 use crate::auth::{Principal, ensure_role};
 use crate::deploy::DeploymentCoordinator;
 use crate::domain::{Role, ServiceConfig};

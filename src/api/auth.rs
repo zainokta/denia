@@ -6,7 +6,8 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::app::{ApiError, AppState};
+use crate::api::ApiError;
+use crate::app::AppState;
 use crate::auth::Principal;
 use crate::domain::{LoginResult, Me, PrincipalView};
 

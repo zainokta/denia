@@ -4,7 +4,8 @@ use axum::{
     routing::{get, post},
 };
 
-use crate::app::{ApiError, AppState};
+use crate::api::ApiError;
+use crate::app::AppState;
 use crate::artifacts::acquirer::ArtifactAcquirer;
 use crate::auth::{Principal, ensure_role};
 use crate::deploy::DeploymentCoordinator;
