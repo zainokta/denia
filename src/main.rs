@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use denia::{
     app::{AppState, build_router},
-    cgroup_launcher,
     config::AppConfig,
     scheduler::{Scheduler, run_until_shutdown},
     socket_proxy,
     state::SqliteStore,
+    workload_launcher,
 };
 
 #[tokio::main]
@@ -21,13 +21,13 @@ async fn main() -> anyhow::Result<()> {
         socket_proxy::run_from_args(args).await?;
         return Ok(());
     }
-    if args
-        .next()
-        .as_deref()
-        .is_some_and(|arg| arg == cgroup_launcher::MODE_ARG)
+    if argv0
+        .as_ref()
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .is_some_and(|name| name == "workload-launcher")
     {
-        cgroup_launcher::run_from_args(args)?;
-        return Ok(());
+        let code = workload_launcher::run_from_args(args)?;
+        std::process::exit(code);
     }
 
     let config = AppConfig::from_env()?;

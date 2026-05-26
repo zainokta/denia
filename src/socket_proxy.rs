@@ -11,6 +11,8 @@ use tokio::{
     process::Command,
 };
 
+use crate::syscall::{self, caps};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SocketProxyConfig {
     pub listen_socket: PathBuf,
@@ -29,6 +31,8 @@ pub enum SocketProxyError {
     EmptyChildArgv,
     #[error("socket proxy child exited with status {status}")]
     ChildFailed { status: ExitStatus },
+    #[error("socket proxy hardening failed: {0}")]
+    Hardening(#[from] syscall::SyscallError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -114,6 +118,8 @@ pub async fn run(config: SocketProxyConfig) -> Result<(), SocketProxyError> {
     }
 
     let listener = UnixListener::bind(&config.listen_socket)?;
+    caps::set_no_new_privs()?;
+    caps::drop_bounding_caps()?;
     let mut child = Command::new(&config.child_argv[0])
         .args(&config.child_argv[1..])
         .stdin(Stdio::null())
@@ -212,9 +218,6 @@ mod tests {
             OsString::from("--connect"),
             OsString::from("127.0.0.1:3000"),
             OsString::from("--"),
-            OsString::from("/.denia/setpriv"),
-            OsString::from("--no-new-privs"),
-            OsString::from("--"),
             OsString::from("/bin/web"),
         ])
         .expect("config");
@@ -225,15 +228,7 @@ mod tests {
         );
         assert_eq!(config.connect_host, "127.0.0.1");
         assert_eq!(config.connect_port, 3000);
-        assert_eq!(
-            config.child_argv,
-            vec![
-                OsString::from("/.denia/setpriv"),
-                OsString::from("--no-new-privs"),
-                OsString::from("--"),
-                OsString::from("/bin/web")
-            ]
-        );
+        assert_eq!(config.child_argv, vec![OsString::from("/bin/web")]);
     }
 
     #[test]
