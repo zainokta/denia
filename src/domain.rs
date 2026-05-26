@@ -491,13 +491,13 @@ pub struct ApiToken {
     pub user_id: Uuid,
     pub name: String,
     #[serde(skip_serializing)]
-    pub token_hash: String,
+    pub token: String,
     pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
-    pub token_hash: String,
+    pub token: String,
     pub user_id: Uuid,
     pub expires_at: DateTime<Utc>,
 }

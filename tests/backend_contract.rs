@@ -1026,7 +1026,7 @@ async fn registry_api_non_admin_forbidden() {
     let api_token = store
         .create_api_token(user.id, "op-token")
         .expect("api token");
-    let plaintext = api_token.token_hash;
+    let plaintext = api_token.token;
 
     let body = serde_json::json!({
         "name": "ghcr",

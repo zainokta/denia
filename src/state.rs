@@ -813,7 +813,7 @@ impl SqliteStore {
             params![&token_hash, user_id.to_string(), expires_at.to_rfc3339()],
         )?;
         Ok(Session {
-            token_hash: token,
+            token,
             user_id,
             expires_at,
         })
@@ -862,7 +862,7 @@ impl SqliteStore {
             id: Uuid::now_v7(),
             user_id,
             name: name.to_string(),
-            token_hash: token,
+            token,
             created_at: Utc::now(),
         };
         let connection = self.connection()?;
@@ -872,7 +872,7 @@ impl SqliteStore {
                 api_token.id.to_string(),
                 user_id.to_string(),
                 api_token.name,
-                crate::auth::hash_token(&api_token.token_hash),
+                crate::auth::hash_token(&api_token.token),
             api_token.created_at.to_rfc3339(),
             ],
         )?;
@@ -918,7 +918,7 @@ impl SqliteStore {
                 id: Uuid::parse_str(&id)?,
                 user_id: Uuid::parse_str(&uid)?,
                 name,
-                token_hash: th,
+                token: th,
                 created_at: created_at.parse()?,
             });
         }
