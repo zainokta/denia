@@ -20,7 +20,7 @@ fn seed_verified_domain(store: &SqliteStore, service_id: Uuid, hostname: &str) {
             service_id,
             hostname: hostname.into(),
             status: DomainStatus::Verified,
-            challenge_token: denia::domains::generate_token(),
+            challenge_token: denia::verification::generate_token(),
             verified_at: Some(Utc::now()),
             last_check_at: None,
             last_error: None,

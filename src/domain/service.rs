@@ -182,7 +182,7 @@ impl ServiceConfig {
             return Err(DomainError::MissingDomain);
         }
         for domain in &domains {
-            if let Err(e) = crate::domains::validate_hostname(domain) {
+            if let Err(e) = crate::verification::validate_hostname(domain) {
                 return Err(DomainError::InvalidHostname(format!(
                     "domain '{domain}': {e}"
                 )));
