@@ -1,9 +1,43 @@
+use axum::{
+    extract::{Request, State},
+    http::{StatusCode, header},
+    middleware::Next,
+    response::Response,
+};
 use subtle::ConstantTimeEq;
 
+use crate::app::AppState;
 use crate::repo::{TokenRepo, UserRepo};
 
 use super::credentials::hash_token;
 use super::principal::Principal;
+
+pub(crate) async fn require_auth(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+
+    if let Some(token) = token
+        && let Some(principal) = resolve_auth(
+            state.users.as_ref(),
+            state.tokens.as_ref(),
+            &token,
+            &state.config.admin_token,
+        )
+    {
+        let mut request = request;
+        request.extensions_mut().insert(principal);
+        return Ok(next.run(request).await);
+    }
+    Err(StatusCode::UNAUTHORIZED)
+}
 
 pub fn resolve_auth(
     users: &dyn UserRepo,
