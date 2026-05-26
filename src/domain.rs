@@ -203,11 +203,13 @@ impl Registry {
         credential_ref: Option<SecretRef>,
     ) -> Result<Self, DomainError> {
         let name = name.into();
-        if name.trim().is_empty() {
+        let name = name.trim().to_string();
+        if name.is_empty() {
             return Err(DomainError::EmptyName);
         }
         let endpoint = endpoint.into();
-        if endpoint.trim().is_empty() {
+        let endpoint = endpoint.trim().to_string();
+        if endpoint.is_empty() {
             return Err(DomainError::RegistryMissingEndpoint);
         }
         if auth_kind != RegistryAuthKind::Anonymous && credential_ref.is_none() {
@@ -545,9 +547,27 @@ mod tests {
 
     #[test]
     fn registry_requires_credential_unless_anonymous() {
-        let err = Registry::new(Uuid::now_v7(), "ghcr", "ghcr.io", RegistryAuthKind::Basic, None)
-            .unwrap_err();
+        let err = Registry::new(
+            Uuid::now_v7(),
+            "ghcr",
+            "ghcr.io",
+            RegistryAuthKind::Basic,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(err, DomainError::RegistryMissingCredential);
+
+        assert_eq!(
+            Registry::new(
+                Uuid::now_v7(),
+                "tok",
+                "ghcr.io",
+                RegistryAuthKind::Token,
+                None,
+            )
+            .unwrap_err(),
+            DomainError::RegistryMissingCredential
+        );
 
         let ok = Registry::new(
             Uuid::now_v7(),
@@ -572,6 +592,20 @@ mod tests {
             Registry::new(p, "ghcr", "", RegistryAuthKind::Basic, Some(r)).unwrap_err(),
             DomainError::RegistryMissingEndpoint
         );
+    }
+
+    #[test]
+    fn registry_trims_name_and_endpoint() {
+        let reg = Registry::new(
+            Uuid::now_v7(),
+            "  ghcr  ",
+            "  ghcr.io  ",
+            RegistryAuthKind::Anonymous,
+            None,
+        )
+        .unwrap();
+        assert_eq!(reg.name, "ghcr");
+        assert_eq!(reg.endpoint, "ghcr.io");
     }
 
     #[test]
