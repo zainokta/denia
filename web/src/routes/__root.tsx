@@ -16,8 +16,9 @@ import TanStackQueryDevtools from '../integrations/tanstack-query/devtools'
 
 import appCss from '../styles.css?url'
 
+import { useQueryClient } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
-import { captureTokenFromUrl, getToken } from '../effect/auth-store'
+import { captureTokenFromUrl, clearToken, getToken } from '../effect/auth-store'
 import { useAuth } from '../hooks/useAuth'
 
 // Capture a `?token=...` from the launch URL into storage before any
@@ -82,6 +83,7 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 // Never redirects during render; does nothing while loading or token-less.
 function BootstrapGate({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const { token, isLoading, isBootstrap, adminInitialized } = useAuth()
   const pathname = useRouterState({ select: (s) => s.location.pathname })
 
@@ -90,9 +92,21 @@ function BootstrapGate({ children }: { children: React.ReactNode }) {
     if (isBootstrap && !adminInitialized && pathname !== '/setup') {
       navigate({ to: '/setup' })
     } else if (isBootstrap && adminInitialized && pathname === '/setup') {
+      // Already initialized but a stale bootstrap token is in storage. Clear it
+      // (and the cached `me`) so the root `beforeLoad` won't bounce /login -> /.
+      clearToken()
+      queryClient.removeQueries({ queryKey: ['me'] })
       navigate({ to: '/login' })
     }
-  }, [token, isLoading, isBootstrap, adminInitialized, pathname, navigate])
+  }, [
+    token,
+    isLoading,
+    isBootstrap,
+    adminInitialized,
+    pathname,
+    navigate,
+    queryClient,
+  ])
 
   return <>{children}</>
 }

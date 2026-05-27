@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Effect } from 'effect'
 import { clearToken } from '../effect/auth-store'
 import { runQuery } from '../effect/runtime'
@@ -11,19 +11,16 @@ export const Route = createFileRoute('/setup')({
 })
 
 function statusOf(err: unknown): number | undefined {
-  if (
-    typeof err === 'object' &&
-    err !== null &&
-    'status' in err &&
-    typeof (err as { status: unknown }).status === 'number'
-  ) {
-    return (err as { status: number }).status
+  if (typeof err === 'object' && err !== null && 'status' in err) {
+    const status = err.status
+    return typeof status === 'number' ? status : undefined
   }
   return undefined
 }
 
 export function Setup() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -39,12 +36,14 @@ export function Setup() {
       ),
     onSuccess: () => {
       clearToken()
+      queryClient.removeQueries({ queryKey: ['me'] })
       navigate({ to: '/login' })
     },
     onError: (err: unknown) => {
       const status = statusOf(err)
       if (status === 409) {
         clearToken()
+        queryClient.removeQueries({ queryKey: ['me'] })
         navigate({ to: '/login' })
         return
       }
