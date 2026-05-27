@@ -1,6 +1,6 @@
 # ADR-016: Denia-Managed Traefik
 
-- **Status**: Accepted
+- **Status**: Superseded by [ADR-020](020-pingora-ingress.md)
 - **Date**: 2026-05-27
 
 ## Context

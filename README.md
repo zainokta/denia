@@ -21,7 +21,7 @@ separated internally so they can split later if a multi-node ADR is accepted.
 
 - **HTTP API** — `axum`, versioned under `/v1`, protected by a bearer admin token.
 - **State** — SQLite (`rusqlite`, bundled) for services, credentials metadata,
-  artifacts, deployments, runtime status, bridge ports, routes, and recent
+  artifacts, deployments, runtime status, routes, and recent
   metric snapshots.
 - **Secrets** — SOPS-encrypted files; SQLite stores **references only**, never
   raw secret values. Default backend is a host-local age identity with
@@ -47,21 +47,22 @@ separated internally so they can split later if a multi-node ADR is accepted.
   loop samples per-replica CPU/memory from cgroup v2 and scales replicas between
   `min_replicas` and `max_replicas` toward `target_cpu_pct` /`target_mem_pct`,
   with a scale-down cooldown. Idle services scale to zero; the first request
-  reactivates them via a single-flight cold-start through the loopback bridge. A
+  reactivates them via a single-flight cold-start inside the in-process proxy. A
   resource ledger reserves CPU/memory against detected host capacity (minus
   configured headroom) so scale-ups can't oversubscribe the node. Redeploys
   roll replicas one at a time; boot reconcile adopts surviving replicas and
   cleans orphaned overlay layers (ADR-018).
-- **Ingress** — Denia runs and supervises its own Traefik (OCI-pulled, host
-  process) via the file provider; see [Managed Traefik](#managed-traefik) below.
-  Denia owns the loopback-bridge listeners that forward Traefik traffic to
-  per-workload Unix sockets. Each bridge fans out across a service's healthy
-  replica pool with round-robin selection; with zero healthy replicas it
-  single-flights a cold-start activation and holds the connection until a
-  replica is ready (or replies 503). Per-service TLS (`tls_enabled`) emits
-  ACME-resolved `websecure` routers with HTTP→HTTPS redirect (ADR-007). The
-  bridge tees the first HTTP request line and response status into an in-process
-  access log (ADR-009).
+- **Ingress** — Denia is its own L7 proxy: an in-process Pingora (0.8,
+  boringssl) `ProxyHttp` binds `:80`/`:443`; see [In-Process Ingress](#in-process-ingress)
+  below. `upstream_peer` resolves the `Host` header to a service and dials the
+  workload's Unix socket directly (`HttpPeer::new_uds`) — no Traefik, no loopback
+  bridge. It fans out across a service's healthy replica pool round-robin; with
+  zero healthy replicas it single-flights a cold-start and holds the connection
+  until a replica is ready (or replies 503). TLS is terminated in-process: ACME
+  via `instant-acme` (HTTP-01), per-SNI certs from a `TlsAccept` callback, with
+  an HTTP→HTTPS redirect for `tls_enabled` hosts (ADR-020, retains ADR-007's
+  `tls_enabled` model). The `logging()` phase records request line + status into
+  an in-process access log (ADR-009).
 - **RBAC** — Users, sessions, API tokens, and project-scoped roles
   (Viewer/Operator/Admin) plus a bootstrap super-admin. Every `/v1` route
   resolves a `Principal` and enforces a project-scoped role minimum (ADR-008).
@@ -77,8 +78,8 @@ separated internally so they can split later if a multi-node ADR is accepted.
 
 Source modules (`src/`): `api`, `app`, `auth`, `command`, `config`, `deploy`,
 `domain`, `repo`, `state`, `secrets`, `artifacts`, `oci` (in-process
-puller/unpacker + credentials), `runtime`, `ingress` (bridge, socket proxy,
-Traefik rendering), `observability` (access logs, service logs, service metrics,
+puller/unpacker + credentials), `runtime`, `ingress` (pingora proxy + route
+table + ACME/TLS, socket proxy), `observability` (access logs, service logs, service metrics,
 node metrics), `autoscale` (scaler math, controller, resource ledger, replica
 registry, usage sampler, lifecycle), `scheduler`, `verification`, `syscall`
 (rustix chown/caps/ns + overlay/bind mounts + signal), `web`, and
@@ -101,7 +102,7 @@ flowchart TB
   classDef warn fill:#fee2e2,stroke:#991b1b,color:#7f1d1d
 
   Client["CLI · Dashboard · curl"]
-  Edge["Traefik<br/>:80 / :443 + ACME"]:::edge
+  Edge["In-process Pingora<br/>:80 / :443 + in-process ACME"]:::edge
   Challenge["GET /.well-known/<br/>denia-challenge/{token}"]
 
   Client -- "Bearer token" --> Auth["require_auth<br/>src/auth/middleware.rs"]
@@ -127,18 +128,16 @@ flowchart TB
   Health -- "fail" --> Rollback["retain prior deployment"]:::warn
   Health -- "pass" --> Promote["promote_deployment<br/>UPSERT promoted_deployments"]
 
-  Promote --> Routing["write_routing_config<br/>allocate bridge port"]
-  Routing --> Bridge["LoopbackBridge<br/>127.0.0.1:N → unix sock<br/>tees access log (ADR-009)"]:::rt
-  Routing --> Traefik["render_file_provider_config<br/>dynamic YAML (ADR-007)"]
+  Promote --> Routing["write_routing_config<br/>add_replica + RouteTable upsert"]
+  Routing --> IngressState["IngressState<br/>ArcSwap RouteTable + replica pools<br/>access log (ADR-009)"]:::rt
 
-  Traefik --> Edge
-  Edge --> Bridge
-  Bridge --> Workload["workload<br/>isolated namespace"]:::rt
+  Edge -- "Host → service_id → UDS" --> IngressState
+  IngressState --> Workload["workload<br/>isolated namespace (unix sock)"]:::rt
 
   Verify["POST /domains/{id}/verify<br/>HttpDomainVerifier"] -- "fetch challenge file" --> Edge
   Edge --> Challenge
   Challenge -- "constant-time match" --> Verify
-  Verify -- "Verified → rerender" --> Traefik
+  Verify -- "Verified → apply_routes" --> IngressState
 
   Sched["Scheduler<br/>tokio cron tick (ADR-010)"] -- "Forbid concurrency" --> JobRun["job_runs row"]
   JobRun --> Spawn
@@ -204,14 +203,12 @@ All configuration is environment-driven (`src/config.rs`).
 | `DENIA_SOPS_BINARY` | `sops` | SOPS binary |
 | `DENIA_SOCKET_PROXY_BINARY` | current executable | Binary injected into workload rootfs as the socket proxy |
 | `DENIA_CGROUP_ROOT` | `/sys/fs/cgroup/denia` | Root for Denia-owned workload cgroups |
-| `DENIA_BRIDGE_START_PORT` | `19000` | First loopback bridge port allocated for Traefik targets |
-| `DENIA_TRAEFIK_IMAGE` | `docker.io/library/traefik:v3.3` | OCI image Denia pulls and runs as the edge proxy |
-| `DENIA_ACME_EMAIL` | — (required when any service uses TLS) | Email for the ACME `le` resolver; omit on nodes with no TLS service |
-| `DENIA_HTTP_PORT` | `80` | Traefik `web` entrypoint port |
-| `DENIA_HTTPS_PORT` | `443` | Traefik `websecure` entrypoint port |
-| `DENIA_TRAEFIK_DYNAMIC_CONFIG` | `<data_dir>/traefik/dynamic/denia.yml` | Generated Traefik file-provider config (override for advanced setups) |
-| `DENIA_ACME_RESOLVER` | `le` | Traefik certResolver name used for `tls_enabled` services |
-| `DENIA_CONTROL_DOMAIN` | — | Optional Traefik router for the control plane itself |
+| `DENIA_ACME_EMAIL` | — (required when any service uses TLS) | ACME account email; omit on nodes with no TLS service |
+| `DENIA_HTTP_PORT` | `80` | Pingora `:80` (HTTP + ACME/denia challenge + HTTP→HTTPS redirect) |
+| `DENIA_HTTPS_PORT` | `443` | Pingora `:443` (TLS, per-SNI certs) |
+| `DENIA_ACME_DIRECTORY_URL` | Let's Encrypt prod | ACME directory; set the LE **staging** URL for non-prod to avoid rate-limit burns |
+| `DENIA_TLS_DIR` | `<data_dir>/tls` | ACME account key + per-domain certs (`0600` in `0700` dirs) |
+| `DENIA_CONTROL_DOMAIN` | — | Optional ingress router for the control plane itself |
 | `DENIA_CONTROL_TLS` | `false` | TLS on the control-plane router |
 | `DENIA_USERNS_BASE` | `100000` | uid/gid base for the workload user namespace |
 | `DENIA_USERNS_SIZE` | `65536` | uid/gid range size for the workload user namespace |
@@ -226,28 +223,32 @@ as project-scoped `/v1/projects/{project_id}/registries` records that point at
 SOPS secret refs; Denia no longer has `ecr`/`gar` Cargo features or
 `DENIA_ECR_*` / `DENIA_GAR_*` process-wide registry auth variables.
 
-The dynamic Traefik config path default moved from `/etc/traefik/dynamic/denia.yml`
-to `<data_dir>/traefik/dynamic/denia.yml`. `DENIA_TRAEFIK_DYNAMIC_CONFIG` still
-overrides the path for advanced setups.
+## In-Process Ingress
 
-## Managed Traefik
+Denia is its own L7 proxy — there is no external Traefik and no loopback bridge.
+An in-process Pingora (0.8, boringssl) `Server` runs on a dedicated thread (via
+`Server::run(RunArgs { shutdown_signal, .. })`, fed by Denia's shutdown channel)
+and binds `:80`/`:443`. The `DeniaProxy` resolves the `Host` header to a service
+through an in-memory `RouteTable` and dials the workload's Unix socket directly
+with `HttpPeer::new_uds`. Route, scale, and cert changes apply live by swapping
+`ArcSwap` state — no process restart.
 
-Denia pulls the Traefik OCI image in-process at boot, runs the binary as a
-supervised host child process (no namespaces) on `:80`/`:443`, generates
-Traefik's static config (entrypoints, file provider, ACME resolver `le`), and
-keeps the dynamic config current via the file provider. Crash-restart uses
-exponential backoff; graceful shutdown sends SIGTERM.
+TLS is terminated in-process. ACME (`instant-acme`, HTTP-01) issues and renews
+certs for `tls_enabled` services whose domains are verified; the `:80`
+`request_filter` serves `/.well-known/acme-challenge/*` (and `denia-challenge`)
+by proxying to the control-plane backend. A `TlsAccept` callback selects the cert
+by SNI from an `ArcSwap<CertStore>`; unknown SNI declines cleanly. Account key and
+leaf certs are written atomically at `0600` in `0700` dirs under `DENIA_TLS_DIR`
+and boot-loaded before `:443` accepts.
 
-Management is unconditional — there is no opt-out flag and no external-Traefik
-mode. The operator must not run a separate Traefik on the same node.
+Management is unconditional — the operator must not run a separate proxy on the
+same node. **Upgrade note:** if you previously ran Traefik (managed or manual),
+**stop it before starting this version.** Denia owns `:80`/`:443`; a conflicting
+process causes a bind failure that is logged while the control plane keeps
+serving on `DENIA_BIND_ADDR`. Set `DENIA_ACME_DIRECTORY_URL` to the Let's Encrypt
+**staging** directory on non-prod nodes to avoid burning production rate limits.
 
-**Upgrade note:** If you previously installed Traefik manually, **stop it before
-starting this version of Denia.** Denia now owns `:80` and `:443`; a conflicting
-Traefik process causes a fatal port-in-use error logged to
-`<log_dir>/traefik.log`. The dynamic-config path also moves from
-`/etc/traefik/dynamic/denia.yml` to `<data_dir>/traefik/dynamic/denia.yml`.
-
-See ADR-016 for the full design rationale and known v1 limitations.
+See ADR-020 for the full design rationale (supersedes ADR-016).
 
 ## Autoscaling
 
@@ -269,7 +270,7 @@ replica's CPU/memory against detected host capacity minus headroom
 (`DENIA_AUTOSCALE_HEADROOM_*`), so scale-ups never oversubscribe the node.
 
 Replicas are stateless cattle: each runs in a private overlay rootfs (ADR-019),
-gets a per-replica cgroup, and registers a Unix socket the loopback bridge fans
+gets a per-replica cgroup, and registers a Unix socket the in-process proxy fans
 out to round-robin. Scale-to-zero drains all replicas; the next inbound request
 single-flights a cold-start and waits for readiness before proxying. Redeploys
 replace replicas one at a time, and boot reconcile re-adopts replicas that
@@ -321,7 +322,6 @@ user session / API token issued by `/v1/auth/login` (ADR-008).
 | `POST` | `/v1/jobs/{id}/run` | operator | Manual trigger (409 if a run is active) |
 | `GET` | `/v1/jobs/{id}/runs` | viewer | Run history |
 | `GET` | `/v1/ingress/routes` | super-admin | Live RouteSpec snapshot |
-| `GET` | `/v1/ingress/config` | super-admin | Live Traefik dynamic YAML |
 | `GET` | `/v1/metrics/node` | super-admin | NodeSnapshot (CPU/mem/disk/load) |
 | `GET` | `/v1/workloads` | viewer (membership-filtered) | Running-workload roll-up incl. replica + healthy-replica counts |
 
@@ -374,11 +374,11 @@ per-aggregate SQLite repositories.
   project-scoped RBAC, `009` observability, `010` jobs scheduler, `011`
   in-process OCI acquisition, `012` `src/` modularization, `013` domain
   verification, `014` per-service registry, `015` streaming OCI layer staging,
-  `016` managed Traefik, `017` service CRUD API, `018` autoscaling, `019`
-  per-replica runtime filesystem isolation.
+  `016` managed Traefik (superseded by 020), `017` service CRUD API, `018`
+  autoscaling, `019` per-replica runtime filesystem isolation, `020` in-process
+  Pingora ingress.
 - `docs/superpowers/specs/` and `docs/superpowers/plans/` — design specs and
   implementation plans used to track active backend and console work.
 - `CLAUDE.md` — agent/contributor guidelines.
 - [Rust](https://www.rust-lang.org/) · [Axum](https://docs.rs/axum/) ·
-  [SOPS](https://getsops.io/) ·
-  [Traefik file provider](https://doc.traefik.io/traefik/providers/file/)
+  [SOPS](https://getsops.io/) · [Pingora](https://github.com/cloudflare/pingora)
