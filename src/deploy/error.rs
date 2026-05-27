@@ -1,8 +1,8 @@
 use thiserror::Error;
 
 use crate::{
-    artifacts::acquirer::ArtifactAcquireError, bridge::BridgeError, health::HealthError,
-    repo::RepoError, runtime::RuntimeError, state::StateError, traefik::TraefikError,
+    artifacts::acquirer::ArtifactAcquireError, health::HealthError, ingress::pingora::IngressError,
+    repo::RepoError, runtime::RuntimeError, state::StateError,
 };
 
 #[derive(Debug, Error)]
@@ -15,16 +15,12 @@ pub enum DeployError {
     Runtime(#[from] RuntimeError),
     #[error("health error: {0}")]
     Health(#[from] HealthError),
-    #[error("traefik error: {0}")]
-    Traefik(#[from] TraefikError),
+    #[error("ingress error: {0}")]
+    Ingress(#[from] IngressError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("bridge allocator lock poisoned")]
-    BridgeLockPoisoned,
-    #[error("bridge error: {0}")]
-    Bridge(#[from] BridgeError),
-    #[error("bridge port pool exhausted")]
-    BridgePortExhausted,
+    #[error("ingress routes lock poisoned")]
+    RoutesLockPoisoned,
     #[error("service does not use an external image source")]
     UnsupportedServiceSource,
     #[error("service does not use a git source")]

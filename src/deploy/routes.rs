@@ -4,54 +4,79 @@ use std::{
 };
 
 use crate::deploy::error::DeployError;
-use crate::traefik::{IngressRenderOptions, RouteSpec, render_file_provider_config};
+use crate::ingress::pingora::{RouteSpec, RouteTable};
 
+/// Snapshot of the live route table, keyed by `service.id` (F-3: names are only
+/// unique per project), surfaced by `GET /v1/ingress/routes`. The canonical
+/// routing source is the `Arc<IngressState>` route table; this map mirrors it so
+/// the read-only API does not need to reach into the proxy state.
 pub type SharedRoutes = Arc<Mutex<BTreeMap<String, RouteSpec>>>;
 
-pub fn default_ingress_options() -> IngressRenderOptions {
-    IngressRenderOptions {
-        acme_resolver: String::new(),
-        control_domain: None,
-        control_tls: false,
-        control_backend_addr: String::new(),
+/// Build a [`RouteTable`] from a snapshot map. Each entry is inserted via
+/// [`RouteTable::try_upsert`] so an invalid domain surfaces as
+/// [`crate::ingress::pingora::IngressError`] rather than being silently dropped
+/// (audit A1).
+pub fn route_table_from_snapshot(
+    snapshot: &BTreeMap<String, RouteSpec>,
+) -> Result<RouteTable, DeployError> {
+    let mut table = RouteTable::default();
+    for spec in snapshot.values() {
+        if spec.domains.is_empty() {
+            // A service with a bridge entry but no verified domains has nothing
+            // to route yet; skip it rather than erroring.
+            continue;
+        }
+        table.try_upsert(spec.clone())?;
     }
+    Ok(table)
 }
 
-pub fn rerender_traefik(state: &crate::app::AppState) -> Result<(), DeployError> {
+/// Rebuild the live route table from persisted state and apply it to the shared
+/// `IngressState` (and the API snapshot).
+///
+/// Routes are keyed by `service.id` (globally unique) — not `service.name`,
+/// which is only unique within a project (F-3) — so two projects' same-named
+/// services cannot collide. Each service's verified hostnames are looked up and,
+/// when present, upserted into the table via [`RouteTable::try_upsert`] so an
+/// invalid domain is surfaced as a typed [`DeployError::Ingress`] at this
+/// control-plane boundary (audit A1).
+///
+/// The `IngressState` route table is the single writer's last-writer-wins
+/// snapshot (audit A8): only the control plane (deploy/verify/delete paths) calls
+/// this, so a whole-table swap is safe.
+pub fn apply_routes(state: &crate::app::AppState) -> Result<(), DeployError> {
     let services = state.services.list_services()?;
-    let mut routes_guard = state
+    let mut snapshot = state
         .routes
         .lock()
-        .map_err(|_| DeployError::BridgeLockPoisoned)?;
-    let existing = routes_guard.clone();
-    routes_guard.clear();
+        .map_err(|_| DeployError::RoutesLockPoisoned)?;
+
+    // Rebuild the snapshot from current DB state, preserving each service's
+    // existing entry (and its tls flag) while refreshing verified hostnames.
+    let existing = snapshot.clone();
+    snapshot.clear();
     for svc in services {
+        let route_key = svc.id.to_string();
         let hostnames = state.domains.list_verified_hostnames(svc.id)?;
         if hostnames.is_empty() {
             continue;
         }
-        let Some(prev) = existing.get(&svc.name) else {
-            // Service has never been routed (no bridge_port known). Stays unrouted.
+        // A service is only routable once it has been deployed (an entry exists).
+        let Some(prev) = existing.get(&route_key) else {
             continue;
         };
-        routes_guard.insert(
-            svc.name.clone(),
+        snapshot.insert(
+            route_key,
             RouteSpec {
                 route_key: prev.route_key.clone(),
                 service_name: svc.name.clone(),
                 domains: hostnames,
-                bridge_port: prev.bridge_port,
                 tls: svc.tls_enabled,
             },
         );
     }
-    let yaml = render_file_provider_config(
-        &routes_guard.values().cloned().collect::<Vec<_>>(),
-        &state.ingress_options,
-    )?;
-    if let Some(parent) = state.config.traefik_dynamic_config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&state.config.traefik_dynamic_config_path, yaml)?;
+
+    let table = route_table_from_snapshot(&snapshot)?;
+    state.ingress.swap_routes(table);
     Ok(())
 }

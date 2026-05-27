@@ -171,7 +171,7 @@ async fn verify_service_domain(
                 Some(chrono::Utc::now()),
                 None,
             )?;
-            crate::deploy::rerender_traefik(&state)?;
+            crate::deploy::apply_routes(&state)?;
             state.domains.get_service_domain(d.id)?.unwrap()
         }
         Err(e) => {
@@ -208,7 +208,7 @@ async fn delete_service_domain_handler(
     let was_verified = d.status == DomainStatus::Verified;
     state.domains.delete_service_domain(domain_id)?;
     if was_verified {
-        crate::deploy::rerender_traefik(&state)?;
+        crate::deploy::apply_routes(&state)?;
     }
     Ok(StatusCode::NO_CONTENT)
 }

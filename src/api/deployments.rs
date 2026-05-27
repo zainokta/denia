@@ -35,11 +35,8 @@ async fn create_deployment(
                 state.deployment_repos(),
                 state.runtime.clone(),
                 state.health.clone(),
-                state.bridge_allocator.clone(),
-                state.bridge_manager.clone(),
-                state.config.traefik_dynamic_config_path.clone(),
+                state.ingress.clone(),
                 state.routes.clone(),
-                state.ingress_options.clone(),
             );
             let acquirer = ArtifactAcquirer::new(state.config.clone());
             let secret_store = crate::secrets::SopsSecretStore::new(state.config.data_dir.clone());
@@ -60,11 +57,8 @@ async fn create_deployment(
                 state.deployment_repos(),
                 state.runtime.clone(),
                 state.health.clone(),
-                state.bridge_allocator.clone(),
-                state.bridge_manager.clone(),
-                state.config.traefik_dynamic_config_path.clone(),
+                state.ingress.clone(),
                 state.routes.clone(),
-                state.ingress_options.clone(),
             );
             let acquirer = ArtifactAcquirer::new(state.config.clone());
             Ok(Json(
