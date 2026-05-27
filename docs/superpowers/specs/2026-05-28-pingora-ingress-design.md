@@ -343,19 +343,26 @@ Author `docs/adr/020-pingora-ingress.md`:
 - HTTP/3, advanced middlewares, rate limiting, WAF.
 - Multi-node control plane.
 
-## Gating Pre-Implementation Spikes (must resolve BEFORE the plan, not during)
+## Gating Pre-Implementation Spikes — RESOLVED 2026-05-28 (verdict: GO)
 
-These three determine whether the design holds. Run a throwaway spike against the
-pinned Pingora version before writing the implementation plan:
+Spiked against **pingora 0.8.0 (boringssl backend)**. Findings in
+`2026-05-28-pingora-ingress-spike-notes.md`. All three clear:
 
-1. **Signal handling.** Can Pingora's `Server` be constructed/run without installing
-   its own SIGTERM/SIGINT/SIGQUIT handlers (so Denia stays authoritative)? Pingora
-   has historically trapped these unconditionally. If it cannot be suppressed, the
-   "dedicated thread + explicit shutdown channel" lifecycle must be redesigned.
-   **This gates the whole embedding model.**
-2. **UDS upstream.** Does `HttpPeer`/the connector support a Unix-domain-socket
-   upstream? Decides full bridge deletion vs. the thin loopback-TCP shim, and
-   whether `bridge_start_port` survives. Two of the four motivations hinge on this.
-3. **Dynamic per-SNI cert callback.** Confirm the exact `TlsAccept` (or equivalent)
-   API shape in the pinned version and that boringssl supports declining (no-cert)
-   for an unknown SNI.
+1. **Signal handling — GREEN.** `RunArgs.shutdown_signal: Box<dyn
+   ShutdownSignalWatch>` is injectable; with a custom watcher Pingora installs no
+   OS signal handler, so Denia stays authoritative. **Constraints:** call
+   `Server::run(RunArgs{ shutdown_signal: <custom>, .. })` — **never**
+   `run_forever()` (it `process::exit`s); run the `Server` on a dedicated
+   `std::thread` (it builds its own tokio runtimes); do not enable daemon /
+   zero-downtime-upgrade modes.
+2. **UDS upstream — YES.** `HttpPeer::new_uds(path: &str, tls: bool, sni: String)`
+   dials a pathname Unix socket via the L4 connector. **Decision: the loopback
+   bridge transport, `BridgeAllocator`/`bridge_port`, and `bridge_start_port` are
+   DELETED.** Pingora connects straight to the workload host UDS.
+3. **Per-SNI cert callback — WORKS (boringssl only).** Trait
+   `pingora::listeners::TlsAccept`: `async fn certificate_callback(&self, ssl:
+   &mut TlsRef)` installs the cert via `ext::ssl_use_certificate` +
+   `ext::ssl_use_private_key`; wire with `TlsSettings::with_callbacks(...)` +
+   `add_tls_with_settings(addr, None, settings)`. Declining (install no cert) →
+   clean `TLSHandshakeFailure`, no default/wrong-cert leak. **The `rustls` backend
+   is a stub — Cargo must enable Pingora's `boringssl` feature explicitly.**

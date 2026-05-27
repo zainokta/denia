@@ -49,7 +49,11 @@ git add docs/superpowers/specs/2026-05-28-pingora-ingress-spike-notes.md
 git commit -m "docs(ingress): record Pingora pre-implementation spike findings"
 ```
 
-> **Decision gate:** update the spec's "Gating Spikes" section and the `bridge_port` / `bridge_start_port` decisions before continuing. The tasks below assume **UDS upstream supported**; where it differs, the shim fallback is noted inline.
+> **Decision gate — RESOLVED 2026-05-28 (GO).** Spiked on **pingora 0.8.0 (boringssl)**. Outcomes locked:
+> - **Signal: GREEN** — inject `RunArgs.shutdown_signal: Box<dyn ShutdownSignalWatch>`, call `Server::run(..)` (NOT `run_forever()`), run on a dedicated `std::thread`, no daemon/upgrade mode.
+> - **UDS: YES** — use `HttpPeer::new_uds(path, tls, sni)`. **`bridge_port`, `BridgeAllocator`, `bridge_start_port` are DELETED** (all "if Spike 0.2 = UDS" branches below are now active).
+> - **Cert callback** — `pingora::listeners::TlsAccept::certificate_callback(&self, ssl: &mut TlsRef)` + `ext::ssl_use_certificate`/`ssl_use_private_key`, via `TlsSettings::with_callbacks`. Decline = no cert installed → clean `TLSHandshakeFailure`.
+> - **Cargo: pin `pingora`/`pingora-proxy = "0.8"` and ENABLE the `boringssl` feature** (no TLS in default features; `rustls` path is a stub).
 
 ---
 
