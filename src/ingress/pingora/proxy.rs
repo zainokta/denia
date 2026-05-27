@@ -208,9 +208,7 @@ impl ProxyHttp for DeniaProxy {
                     .map_err(|_| Error::new(ErrorType::InternalError))?;
                 resp.insert_header("Content-Length", "0")
                     .map_err(|_| Error::new(ErrorType::InternalError))?;
-                session
-                    .write_response_header(Box::new(resp), true)
-                    .await?;
+                session.write_response_header(Box::new(resp), true).await?;
                 Ok(true)
             }
             Port80Decision::Passthrough => Ok(false),
