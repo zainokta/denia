@@ -110,10 +110,7 @@ export class ApiClient extends Context.Service<
       ApiError | DecodeError
     >
     readonly createDeployment: (
-      input: {
-        service_id: string
-        source?: { type: 'git', repo_url: string, git_ref: string, dockerfile_path: string, context_path: string, credential?: { name: string, key: string } } | { type: 'external_image', image?: string, registry_id?: string, image_ref?: string, credential?: { name: string, key: string } | null }
-      },
+      service: Service,
     ) => Effect.Effect<Deployment, ApiError | DecodeError>
     readonly stopService: (
       id: string,
@@ -493,29 +490,24 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, Metrics)
       })
 
-    const createDeployment = (input: {
-      service_id: string
-      source?:
-        | {
-            type: 'git'
-            repo_url: string
-            git_ref: string
-            dockerfile_path: string
-            context_path: string
-            credential?: { name: string; key: string }
-          }
-        | {
-            type: 'external_image'
-            image?: string
-            registry_id?: string
-            image_ref?: string
-            credential?: { name: string; key: string } | null
-          }
-    }) =>
+    const createDeployment = (service: Service) =>
       Effect.gen(function* () {
-        const body: Record<string, unknown> = { source: input.source }
+        const src = service.source
+        const body =
+          src.type === 'git'
+            ? {
+                source: 'git',
+                service_id: service.id,
+                repo_url: src.repo_url,
+                git_ref: src.git_ref,
+              }
+            : {
+                source: 'external_image',
+                service_id: service.id,
+                image: src.image,
+              }
         const response = yield* http
-          .post(url(`/v1/services/${input.service_id}/deployments`), {
+          .post(url('/v1/deployments'), {
             headers: {
               ...authHeaders(),
               'content-type': 'application/json',
