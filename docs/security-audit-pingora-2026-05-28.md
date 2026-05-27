@@ -98,3 +98,17 @@ Commits `a1e6853..6ed7e45`.
 - **A9** `cargo audit` — not installed in this environment; recommend running in CI before release.
 
 **Sign-off: all BLOCKER/MAJOR findings (A1, B1, C1) resolved and re-verified. Migration is functionally complete and clippy/test-green. GO, conditional on running `cargo audit` + the rootful privileged suite on a real host before production deploy.**
+
+### Independent final audit (senior infra + security, 2026-05-28)
+
+Holistic read-only pass over the final code (not just claims). Per-item PASS with file:line evidence:
+- **C1** PASS — `proxy.rs:238-254` keys `resolve_or_activate` by `route.service_id`; chain id-consistent through coordinator/routes/lifecycle/catalog; join + live e2e tests confirm.
+- **A1** PASS — `validate_domain` at every sink (route key, ACME id, cert dir w/ `../` blocked, SNI, disk load); boundary surfaces `DeployError::Ingress`.
+- **B1** PASS — challenge routes top-level siblings of `/healthz`, outside the `/v1` login limiter; login/admin still limited.
+- **Secrets** PASS — no key/keyauth via Debug/Serialize/log/error; atomic 0600-in-0700 writes.
+- **Lifecycle** PASS — dedicated thread, `Server::run(RunArgs{shutdown_signal})`, bind-failure non-fatal, control plane loopback-only.
+- **TLS** PASS — unknown SNI declines; certs boot-loaded before `:443`.
+- **New issues** none material (`service_id` is `#[serde(skip)]`; `/v1/ingress/routes` shape unchanged; `route_key` UUID is super-admin-only, pre-existing).
+- **Orphans** PASS — no Traefik/bridge/`run_forever`/`DENIA_TRAEFIK` refs remain in `src/`/`tests/`/`Cargo.toml`.
+
+**VERDICT: GO-WITH-CONDITIONS.** No code defects block merge. Before production deploy on a real host: (1) run `cargo audit` (A9); (2) run the rootful `DENIA_RUN_PRIVILEGED_TESTS=1` suite + a real `:80`/`:443` ACME issuance against LE **staging** first (C5).
