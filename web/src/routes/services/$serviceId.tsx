@@ -41,10 +41,10 @@ const getMetrics = (id: string) =>
     return yield* api.getServiceMetrics(id)
   })
 
-const createDeployment = (serviceId: string) =>
+const createDeployment = (service: Service) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
-    return yield* api.createDeployment({ service_id: serviceId })
+    return yield* api.createDeployment(service)
   })
 
 const stopService = (id: string) =>
@@ -225,7 +225,7 @@ export function ServiceDetail() {
   })
 
   const deploy = useMutation({
-    mutationFn: () => runQuery(createDeployment(id)),
+    mutationFn: (svc: Service) => runQuery(createDeployment(svc)),
     onSuccess: () => {
       queryClient.invalidateQueries({
         queryKey: ['services', id, 'deployments'],
@@ -298,8 +298,8 @@ export function ServiceDetail() {
             <button
               className="btn btn-primary text-xs"
               type="button"
-              onClick={() => deploy.mutate()}
-              disabled={deploy.isPending}
+              onClick={() => service && deploy.mutate(service)}
+              disabled={deploy.isPending || !service}
             >
               {deploy.isPending ? 'deploying...' : 'deploy'}
             </button>

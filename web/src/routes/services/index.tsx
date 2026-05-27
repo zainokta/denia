@@ -40,10 +40,10 @@ export const deleteService = (id: string) =>
     return yield* api.deleteService(id)
   })
 
-const createDeployment = (input: { service_id: string }) =>
+const createDeployment = (service: Service) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
-    return yield* api.createDeployment(input)
+    return yield* api.createDeployment(service)
   })
 
 const stopService = (id: string) =>
@@ -129,8 +129,8 @@ export function ServicesIndex() {
   })
 
   const deploy = useMutation({
-    mutationFn: (id: string) =>
-      runQuery(createDeployment({ service_id: id })),
+    mutationFn: (service: Service) =>
+      runQuery(createDeployment(service)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['services'] })
     },
@@ -225,7 +225,7 @@ export function ServicesIndex() {
                       <button
                         className="btn btn-primary text-xs"
                         type="button"
-                        onClick={() => deploy.mutate(svc.id)}
+                        onClick={() => deploy.mutate(svc)}
                         disabled={deploy.isPending}
                       >
                         {deploy.isPending ? 'deploying...' : 'deploy'}
