@@ -15,11 +15,11 @@ pub mod state;
 pub mod tls;
 
 pub use acme::{
-    AcmeDriver, AcmeError, ChallengeStore, IssuedCert, load_certs_from_disk, persist_cert,
-    select_renewals,
+    AcmeDriver, AcmeError, ChallengeStore, IssuedCert, RENEWAL_WINDOW_DAYS, load_certs_from_disk,
+    persist_cert, select_renewals,
 };
 pub use proxy::{DeniaProxy, Port80Decision, RequestCtx, UpstreamChoice, classify_port80};
-pub use server::{IngressServerConfig, build_server};
+pub use server::{IngressServerConfig, ServerBuildError, build_server, run_server};
 pub use state::{
     ActivationError, ActivationHook, CertStore, IngressError, IngressState, ParsedCert,
     ReplicaEndpoint, RouteSpec, RouteTable,
