@@ -269,6 +269,7 @@ pub fn build_router(state: AppState) -> Router {
     ));
 
     let authed = api::auth::router()
+        .merge(api::bootstrap::router())
         .merge(api::users::router())
         .merge(api::tokens::router())
         .merge(api::jobs::router())

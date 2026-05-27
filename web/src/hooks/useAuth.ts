@@ -80,6 +80,7 @@ export function useAuth() {
     isLoading: meQuery.isLoading,
     isError: meQuery.error,
     isBootstrap: meQuery.data?.principal.kind === 'bootstrap',
+    adminInitialized: meQuery.data?.admin_initialized ?? false,
     isSuperAdmin: meQuery.data?.is_super_admin ?? false,
     roleForActiveProject,
     login: loginMutation.mutateAsync,

@@ -11,7 +11,7 @@ export const Role = Schema.Literals(['viewer', 'operator', 'admin'])
 export type Role = typeof Role.Type
 
 export class User extends Schema.Class<User>('User')({
-  id: Schema.Number,
+  id: Schema.String,
   username: Schema.String,
   created_at: Schema.String,
 }) {}
@@ -46,6 +46,7 @@ export const ProjectMembers = Schema.Array(ProjectMember)
 export class Me extends Schema.Class<Me>('Me')({
   principal: PrincipalView,
   is_super_admin: Schema.Boolean,
+  admin_initialized: Schema.Boolean,
   memberships: Schema.Array(Membership),
 }) {}
 

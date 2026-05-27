@@ -3,8 +3,10 @@ import {
   Scripts,
   createRootRouteWithContext,
   redirect,
+  useNavigate,
   useRouterState,
 } from '@tanstack/react-router'
+import { useEffect } from 'react'
 import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
 import { TanStackDevtools } from '@tanstack/react-devtools'
 import Footer from '../components/Footer'
@@ -15,12 +17,21 @@ import TanStackQueryDevtools from '../integrations/tanstack-query/devtools'
 
 import appCss from '../styles.css?url'
 
+import { useQueryClient } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
-import { getToken } from '../effect/auth-store'
+import { captureTokenFromUrl, clearToken, getToken } from '../effect/auth-store'
+import { useAuth } from '../hooks/useAuth'
+
+// Capture a `?token=...` from the launch URL into storage before any
+// `beforeLoad` auth gate runs, then strip it from the address bar.
+captureTokenFromUrl()
 
 interface MyRouterContext {
   queryClient: QueryClient
 }
+
+// Public routes that do not require an authenticated session.
+const PUBLIC_ROUTES = ['/login', '/setup']
 
 function hasAuth(): boolean {
   if (getToken()) return true
@@ -37,8 +48,9 @@ const THEME_INIT_SCRIPT = `(function(){try{var stored=window.localStorage.getIte
 
 export const Route = createRootRouteWithContext<MyRouterContext>()({
   beforeLoad: ({ location }) => {
+    const isPublicRoute = PUBLIC_ROUTES.includes(location.pathname)
     const isLoginRoute = location.pathname === '/login'
-    if (!hasAuth() && !isLoginRoute) {
+    if (!hasAuth() && !isPublicRoute) {
       throw redirect({ to: '/login' })
     }
     if (hasAuth() && isLoginRoute) {
@@ -71,7 +83,7 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 function Chrome({ children }: { children: React.ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname })
 
-  if (pathname === '/login') {
+  if (pathname === '/login' || pathname === '/setup') {
     return <main id="main">{children}</main>
   }
 
@@ -89,6 +101,38 @@ function Chrome({ children }: { children: React.ReactNode }) {
   )
 }
 
+// Redirects bootstrap principals to/from `/setup` AFTER `me()` resolves.
+// Never redirects during render; does nothing while loading or token-less.
+function BootstrapGate({ children }: { children: React.ReactNode }) {
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const { token, isLoading, isBootstrap, adminInitialized } = useAuth()
+  const pathname = useRouterState({ select: (s) => s.location.pathname })
+
+  useEffect(() => {
+    if (isLoading || !token) return
+    if (isBootstrap && !adminInitialized && pathname !== '/setup') {
+      navigate({ to: '/setup' })
+    } else if (isBootstrap && adminInitialized && pathname === '/setup') {
+      // Already initialized but a stale bootstrap token is in storage. Clear it
+      // (and the cached `me`) so the root `beforeLoad` won't bounce /login -> /.
+      clearToken()
+      queryClient.removeQueries({ queryKey: ['me'] })
+      navigate({ to: '/login' })
+    }
+  }, [
+    token,
+    isLoading,
+    isBootstrap,
+    adminInitialized,
+    pathname,
+    navigate,
+    queryClient,
+  ])
+
+  return <>{children}</>
+}
+
 function RootDocument({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
@@ -100,7 +144,9 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <a href="#main" className="skip-link">
           Skip to content
         </a>
-        <Chrome>{children}</Chrome>
+        <Chrome>
+          <BootstrapGate>{children}</BootstrapGate>
+        </Chrome>
         <TanStackDevtools
           config={{
             position: 'bottom-right',

@@ -60,7 +60,11 @@ export class ApiClient extends Context.Service<
       username: string,
       password: string,
     ) => Effect.Effect<User, ApiError | DecodeError>
-    readonly deleteUser: (id: number) => Effect.Effect<void, ApiError>
+    readonly bootstrap: (
+      username: string,
+      password: string,
+    ) => Effect.Effect<User, ApiError | DecodeError>
+    readonly deleteUser: (id: string) => Effect.Effect<void, ApiError>
     readonly listApiTokens: Effect.Effect<
       ReadonlyArray<ApiToken>,
       ApiError | DecodeError
@@ -362,7 +366,21 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, User)
       })
 
-    const deleteUser = (id: number) =>
+    const bootstrap = (username: string, password: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url('/v1/bootstrap'), {
+            headers: {
+              ...authHeaders(),
+              'content-type': 'application/json',
+            },
+            body: jsonBody({ username, password }),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, User)
+      })
+
+    const deleteUser = (id: string) =>
       Effect.gen(function* () {
         const response = yield* http
           .del(url(`/v1/users/${id}`), { headers: authHeaders() })
@@ -748,6 +766,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       me,
       listUsers,
       createUser,
+      bootstrap,
       deleteUser,
       listApiTokens,
       createApiToken,
