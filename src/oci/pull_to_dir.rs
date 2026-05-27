@@ -6,7 +6,7 @@ fn pinned_digest(image: &str) -> Option<&str> {
     image.split_once('@').map(|(_, d)| d)
 }
 
-/// Pull `image`, unpack into `<traefik_dir>/rootfs` atomically, verify the binary
+/// Pull `image`, unpack into `<traefik_dir>/rootfs` (swap into place), verify the binary
 /// at `binary_rel` exists, and record the digest in `<traefik_dir>/.image-digest`.
 /// Returns the image digest. Skips work if the cached digest matches the pinned
 /// digest in `image` and the binary is already present.
@@ -23,14 +23,12 @@ pub async fn pull_image_to_dir(
     let digest_file = traefik_dir.join(".image-digest");
     let binary = rootfs.join(binary_rel);
 
-    if let Some(pinned) = pinned_digest(image) {
-        if binary.exists() {
-            if let Ok(cached) = std::fs::read_to_string(&digest_file) {
-                if cached.trim() == pinned {
-                    return Ok(pinned.to_string());
-                }
-            }
-        }
+    if let Some(pinned) = pinned_digest(image)
+        && binary.exists()
+        && let Ok(cached) = std::fs::read_to_string(&digest_file)
+        && cached.trim() == pinned
+    {
+        return Ok(pinned.to_string());
     }
 
     let pulled = puller.pull(image, auth).await?;
@@ -182,5 +180,6 @@ mod tests {
             !dir.join(".image-digest").exists(),
             "digest must not be written on failure"
         );
+        assert!(matches!(err.unwrap_err(), OciError::Pull(_)));
     }
 }
