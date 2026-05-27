@@ -9,7 +9,6 @@ use uuid::Uuid;
 
 use crate::domain::ServiceConfig;
 use crate::repo::error::RepoError;
-use crate::repo::service_repo::ServiceRepo;
 use crate::repo::sqlite::pool::SqlitePool;
 use crate::state::{SqliteStore, StateError};
 
@@ -76,6 +75,7 @@ impl SqliteStore {
     }
 }
 
+#[derive(Clone)]
 pub struct SqliteServiceRepo {
     pool: SqlitePool,
 }
@@ -86,19 +86,19 @@ impl SqliteServiceRepo {
     }
 }
 
-impl ServiceRepo for SqliteServiceRepo {
-    fn put_service(&self, config: ServiceConfig) -> Result<ServiceConfig, RepoError> {
+impl SqliteServiceRepo {
+    pub fn put_service(&self, config: ServiceConfig) -> Result<ServiceConfig, RepoError> {
         let conn = self.pool.connection()?;
         put_service_q(&conn, &config)?;
         Ok(config)
     }
 
-    fn list_services(&self) -> Result<Vec<ServiceConfig>, RepoError> {
+    pub fn list_services(&self) -> Result<Vec<ServiceConfig>, RepoError> {
         let conn = self.pool.connection()?;
         list_services_q(&conn)
     }
 
-    fn get_service(&self, service_id: Uuid) -> Result<Option<ServiceConfig>, RepoError> {
+    pub fn get_service(&self, service_id: Uuid) -> Result<Option<ServiceConfig>, RepoError> {
         let conn = self.pool.connection()?;
         get_service_q(&conn, service_id)
     }

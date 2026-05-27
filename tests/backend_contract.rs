@@ -568,10 +568,10 @@ fn deploy_test_coordinator(
     };
     let pool = store.pool();
     let repos = denia::deploy::DeploymentRepos {
-        deployments: std::sync::Arc::new(SqliteDeploymentRepo::new(pool.clone())),
-        projects: std::sync::Arc::new(SqliteProjectRepo::new(pool.clone())),
-        registries: std::sync::Arc::new(SqliteRegistryRepo::new(pool.clone())),
-        domains: std::sync::Arc::new(SqliteDomainRepo::new(pool)),
+        deployments: SqliteDeploymentRepo::new(pool.clone()),
+        projects: SqliteProjectRepo::new(pool.clone()),
+        registries: SqliteRegistryRepo::new(pool.clone()),
+        domains: SqliteDomainRepo::new(pool),
     };
     denia::deploy::DeploymentCoordinator::new(
         repos,

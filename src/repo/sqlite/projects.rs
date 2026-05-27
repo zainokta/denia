@@ -8,7 +8,6 @@ use uuid::Uuid;
 
 use crate::domain::Project;
 use crate::repo::error::RepoError;
-use crate::repo::project_repo::ProjectRepo;
 use crate::repo::sqlite::pool::SqlitePool;
 use crate::state::{SqliteStore, StateError};
 
@@ -123,6 +122,7 @@ impl SqliteStore {
     }
 }
 
+#[derive(Clone)]
 pub struct SqliteProjectRepo {
     pool: SqlitePool,
 }
@@ -133,34 +133,34 @@ impl SqliteProjectRepo {
     }
 }
 
-impl ProjectRepo for SqliteProjectRepo {
-    fn default_project_id(&self) -> Result<Uuid, RepoError> {
+impl SqliteProjectRepo {
+    pub fn default_project_id(&self) -> Result<Uuid, RepoError> {
         let conn = self.pool.connection()?;
         default_project_id_q(&conn)
     }
 
-    fn put_project(&self, project: Project) -> Result<Project, RepoError> {
+    pub fn put_project(&self, project: Project) -> Result<Project, RepoError> {
         let conn = self.pool.connection()?;
         put_project_q(&conn, &project)?;
         Ok(project)
     }
 
-    fn get_project(&self, project_id: Uuid) -> Result<Option<Project>, RepoError> {
+    pub fn get_project(&self, project_id: Uuid) -> Result<Option<Project>, RepoError> {
         let conn = self.pool.connection()?;
         get_project_q(&conn, project_id)
     }
 
-    fn list_projects(&self) -> Result<Vec<Project>, RepoError> {
+    pub fn list_projects(&self) -> Result<Vec<Project>, RepoError> {
         let conn = self.pool.connection()?;
         list_projects_q(&conn)
     }
 
-    fn count_services_in_project(&self, project_id: Uuid) -> Result<i64, RepoError> {
+    pub fn count_services_in_project(&self, project_id: Uuid) -> Result<i64, RepoError> {
         let conn = self.pool.connection()?;
         count_services_in_project_q(&conn, project_id)
     }
 
-    fn delete_project(&self, project_id: Uuid) -> Result<(), RepoError> {
+    pub fn delete_project(&self, project_id: Uuid) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         delete_project_q(&conn, project_id)
     }

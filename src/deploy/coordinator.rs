@@ -16,7 +16,10 @@ use crate::domain::{
 };
 use crate::health::HealthChecker;
 use crate::oci::RegistryAuth;
-use crate::repo::{DeploymentRepo, DomainRepo, ProjectRepo, RegistryRepo, RepoError};
+use crate::repo::RepoError;
+use crate::repo::sqlite::{
+    SqliteDeploymentRepo, SqliteDomainRepo, SqliteProjectRepo, SqliteRegistryRepo,
+};
 use crate::runtime::Runtime;
 use crate::traefik::{IngressRenderOptions, RouteSpec, render_file_provider_config};
 
@@ -31,10 +34,10 @@ pub struct DeploymentPlan {
 /// aggregates it needs (deployments, projects, registries, domains).
 #[derive(Clone)]
 pub struct DeploymentRepos {
-    pub deployments: Arc<dyn DeploymentRepo>,
-    pub projects: Arc<dyn ProjectRepo>,
-    pub registries: Arc<dyn RegistryRepo>,
-    pub domains: Arc<dyn DomainRepo>,
+    pub deployments: SqliteDeploymentRepo,
+    pub projects: SqliteProjectRepo,
+    pub registries: SqliteRegistryRepo,
+    pub domains: SqliteDomainRepo,
 }
 
 pub struct DeploymentCoordinator<R, H> {

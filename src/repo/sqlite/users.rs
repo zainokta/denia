@@ -12,7 +12,6 @@ use uuid::Uuid;
 use crate::domain::{ProjectMembership, Role, Session, User};
 use crate::repo::error::RepoError;
 use crate::repo::sqlite::pool::SqlitePool;
-use crate::repo::user_repo::UserRepo;
 use crate::state::{SqliteStore, StateError};
 
 pub(super) fn create_user_q(
@@ -391,6 +390,7 @@ impl SqliteStore {
     }
 }
 
+#[derive(Clone)]
 pub struct SqliteUserRepo {
     pool: SqlitePool,
 }
@@ -401,8 +401,8 @@ impl SqliteUserRepo {
     }
 }
 
-impl UserRepo for SqliteUserRepo {
-    fn create_user(
+impl SqliteUserRepo {
+    pub fn create_user(
         &self,
         username: &str,
         password_hash: &str,
@@ -412,61 +412,61 @@ impl UserRepo for SqliteUserRepo {
         create_user_q(&conn, username, password_hash, is_super_admin)
     }
 
-    fn get_user(&self, user_id: Uuid) -> Result<Option<User>, RepoError> {
+    pub fn get_user(&self, user_id: Uuid) -> Result<Option<User>, RepoError> {
         let conn = self.pool.connection()?;
         get_user_q(&conn, user_id)
     }
 
-    fn list_users(&self) -> Result<Vec<User>, RepoError> {
+    pub fn list_users(&self) -> Result<Vec<User>, RepoError> {
         let conn = self.pool.connection()?;
         list_users_q(&conn)
     }
 
-    fn delete_user(&self, user_id: Uuid) -> Result<(), RepoError> {
+    pub fn delete_user(&self, user_id: Uuid) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         delete_user_q(&conn, user_id)
     }
 
-    fn verify_login(&self, username: &str, password: &str) -> Result<User, RepoError> {
+    pub fn verify_login(&self, username: &str, password: &str) -> Result<User, RepoError> {
         let conn = self.pool.connection()?;
         verify_login_q(&conn, username, password)
     }
 
-    fn create_session(&self, user_id: Uuid, ttl_hours: i64) -> Result<Session, RepoError> {
+    pub fn create_session(&self, user_id: Uuid, ttl_hours: i64) -> Result<Session, RepoError> {
         let conn = self.pool.connection()?;
         create_session_q(&conn, user_id, ttl_hours)
     }
 
-    fn user_for_session(&self, token_hash: &str) -> Result<Option<User>, RepoError> {
+    pub fn user_for_session(&self, token_hash: &str) -> Result<Option<User>, RepoError> {
         user_for_session_q(&self.pool, token_hash)
     }
 
-    fn delete_session(&self, token_hash: &str) -> Result<(), RepoError> {
+    pub fn delete_session(&self, token_hash: &str) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         delete_session_q(&conn, token_hash)
     }
 
-    fn set_membership(&self, user_id: Uuid, project_id: Uuid, role: Role) -> Result<(), RepoError> {
+    pub fn set_membership(&self, user_id: Uuid, project_id: Uuid, role: Role) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         set_membership_q(&conn, user_id, project_id, role)
     }
 
-    fn role_for(&self, user_id: Uuid, project_id: Uuid) -> Result<Option<Role>, RepoError> {
+    pub fn role_for(&self, user_id: Uuid, project_id: Uuid) -> Result<Option<Role>, RepoError> {
         let conn = self.pool.connection()?;
         role_for_q(&conn, user_id, project_id)
     }
 
-    fn list_members(&self, project_id: Uuid) -> Result<Vec<ProjectMembership>, RepoError> {
+    pub fn list_members(&self, project_id: Uuid) -> Result<Vec<ProjectMembership>, RepoError> {
         let conn = self.pool.connection()?;
         list_members_q(&conn, project_id)
     }
 
-    fn remove_membership(&self, user_id: Uuid, project_id: Uuid) -> Result<(), RepoError> {
+    pub fn remove_membership(&self, user_id: Uuid, project_id: Uuid) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         remove_membership_q(&conn, user_id, project_id)
     }
 
-    fn list_memberships_for_user(
+    pub fn list_memberships_for_user(
         &self,
         user_id: Uuid,
     ) -> Result<Vec<ProjectMembership>, RepoError> {

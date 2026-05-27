@@ -12,16 +12,15 @@ use denia::{
     runtime::{FakeRuntime, Runtime},
     state::SqliteStore,
 };
-use std::sync::Arc;
 use uuid::Uuid;
 
 fn build_repos(store: &SqliteStore) -> DeploymentRepos {
     let pool = store.pool();
     DeploymentRepos {
-        deployments: Arc::new(SqliteDeploymentRepo::new(pool.clone())),
-        projects: Arc::new(SqliteProjectRepo::new(pool.clone())),
-        registries: Arc::new(SqliteRegistryRepo::new(pool.clone())),
-        domains: Arc::new(SqliteDomainRepo::new(pool)),
+        deployments: SqliteDeploymentRepo::new(pool.clone()),
+        projects: SqliteProjectRepo::new(pool.clone()),
+        registries: SqliteRegistryRepo::new(pool.clone()),
+        domains: SqliteDomainRepo::new(pool),
     }
 }
 

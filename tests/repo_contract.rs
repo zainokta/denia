@@ -16,17 +16,10 @@ use denia::domain::{
     CredentialKind, DeploymentRequest, DomainStatus, ExternalImageSource, HealthCheck, Job,
     Project, Role, ServiceConfig, ServiceDomain, ServiceSource,
 };
-use denia::repo::deployment_repo::DeploymentRepo;
-use denia::repo::domain_repo::DomainRepo;
-use denia::repo::job_repo::JobRepo;
-use denia::repo::project_repo::ProjectRepo;
-use denia::repo::service_repo::ServiceRepo;
 use denia::repo::sqlite::{
     SqliteCredentialRepo, SqliteDeploymentRepo, SqliteDomainRepo, SqliteJobRepo, SqliteProjectRepo,
     SqliteServiceRepo, SqliteTokenRepo, SqliteUserRepo,
 };
-use denia::repo::token_repo::TokenRepo;
-use denia::repo::user_repo::UserRepo;
 use denia::secrets::SecretRef;
 use denia::state::SqliteStore;
 
@@ -244,7 +237,6 @@ fn api_token_create_list_and_revoke() {
 
 #[test]
 fn credential_put_roundtrip() {
-    use denia::repo::credential_repo::CredentialRepo;
     let store = migrated_store();
     let repo = SqliteCredentialRepo::new(store.pool());
     let secret = SecretRef::parse("registry-cred").unwrap();
