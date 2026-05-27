@@ -1,28 +1,34 @@
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
+use uuid::Uuid;
+
 use crate::artifacts::acquirer::{ArtifactAcquireRequest, ArtifactAcquirer};
 use crate::artifacts::{ArtifactRecord, ArtifactSource};
-use crate::bridge::{BridgeAllocator, BridgeManager};
 use crate::command::CommandRunner;
 use crate::deploy::error::DeployError;
-use crate::deploy::routes::{SharedRoutes, default_ingress_options};
+use crate::deploy::routes::{SharedRoutes, route_table_from_snapshot};
 use crate::domain::ServiceSource;
 use crate::domain::{
     Deployment, DeploymentRequest, DeploymentStatus, RuntimeInstanceId, RuntimeStartRequest,
     ServiceConfig,
 };
 use crate::health::HealthChecker;
+use crate::ingress::pingora::{IngressState, RouteSpec};
 use crate::oci::RegistryAuth;
 use crate::repo::RepoError;
 use crate::repo::sqlite::{
     SqliteDeploymentRepo, SqliteDomainRepo, SqliteProjectRepo, SqliteRegistryRepo,
 };
 use crate::runtime::Runtime;
-use crate::traefik::{IngressRenderOptions, RouteSpec, render_file_provider_config};
+
+/// Stable replica id for the single endpoint the deploy path registers for a
+/// service. The deploy coordinator manages one promoted replica per service; the
+/// autoscaler owns multi-replica fan-out via its own (UUIDv7) ids. A fixed
+/// nil-derived id keeps this endpoint addressable and replaceable on re-deploy.
+const DEPLOY_REPLICA_ID: Uuid = Uuid::nil();
 
 pub struct DeploymentPlan {
     pub service: ServiceConfig,
@@ -49,11 +55,8 @@ pub struct DeploymentCoordinator<R, H> {
 }
 
 struct RoutingState {
-    bridge: Arc<Mutex<BridgeAllocator>>,
+    ingress: Arc<IngressState>,
     routes: SharedRoutes,
-    manager: Arc<dyn BridgeManager>,
-    traefik_config_path: PathBuf,
-    ingress_options: IngressRenderOptions,
 }
 
 impl<R, H> DeploymentCoordinator<R, H>
@@ -74,44 +77,29 @@ where
         repos: DeploymentRepos,
         runtime: R,
         health: H,
-        bridge: BridgeAllocator,
-        manager: Arc<dyn BridgeManager>,
-        traefik_config_path: impl Into<PathBuf>,
+        ingress: Arc<IngressState>,
     ) -> Self {
         Self::new_with_shared_routing(
             repos,
             runtime,
             health,
-            Arc::new(Mutex::new(bridge)),
-            manager,
-            traefik_config_path,
+            ingress,
             Arc::new(Mutex::new(BTreeMap::new())),
-            default_ingress_options(),
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn new_with_shared_routing(
         repos: DeploymentRepos,
         runtime: R,
         health: H,
-        bridge: Arc<Mutex<BridgeAllocator>>,
-        manager: Arc<dyn BridgeManager>,
-        traefik_config_path: impl Into<PathBuf>,
+        ingress: Arc<IngressState>,
         routes: SharedRoutes,
-        ingress_options: IngressRenderOptions,
     ) -> Self {
         Self {
             repos,
             runtime,
             health,
-            routing: Some(RoutingState {
-                bridge,
-                routes,
-                manager,
-                traefik_config_path: traefik_config_path.into(),
-                ingress_options,
-            }),
+            routing: Some(RoutingState { ingress, routes }),
         }
     }
 
@@ -284,19 +272,21 @@ where
             .await?;
         if let Some(routing) = &self.routing {
             let route_key = service.id.to_string();
-            routing.manager.deactivate(&route_key).await?;
-            let yaml = {
+            // Drop the workload replica from the proxy pool, then rebuild and
+            // swap the route table from the trimmed snapshot.
+            routing
+                .ingress
+                .remove_replica(&route_key, DEPLOY_REPLICA_ID)
+                .await;
+            let table = {
                 let mut routes = routing
                     .routes
                     .lock()
-                    .map_err(|_| DeployError::BridgeLockPoisoned)?;
+                    .map_err(|_| DeployError::RoutesLockPoisoned)?;
                 routes.remove(&route_key);
-                render_file_provider_config(
-                    &routes.values().cloned().collect::<Vec<_>>(),
-                    &routing.ingress_options,
-                )?
+                route_table_from_snapshot(&routes)?
             };
-            std::fs::write(&routing.traefik_config_path, yaml)?;
+            routing.ingress.swap_routes(table);
         }
 
         if let Some(deployment_id) = promoted_deployment {
@@ -318,45 +308,49 @@ where
         let Some(routing) = &self.routing else {
             return Ok(());
         };
-        // Key bridge/route state by service_id, not service.name — names are only
+        // Key replica/route state by service_id, not service.name — names are only
         // unique within a project, so two projects' same-named services would
         // otherwise share runtime/ingress state (F-3).
         let route_key = service.id.to_string();
-        let bridge_target = routing
-            .bridge
-            .lock()
-            .map_err(|_| DeployError::BridgeLockPoisoned)?
-            .assign(&route_key, socket_path.to_path_buf())
-            .ok_or(DeployError::BridgePortExhausted)?;
-        routing.manager.activate(bridge_target.clone()).await?;
+
+        // Register the workload's Denia-owned Unix socket as the service's
+        // (single) promoted replica and mark it healthy so the Pingora proxy can
+        // dial it directly (no loopback bridge, ADR-020).
+        routing
+            .ingress
+            .add_replica(&route_key, DEPLOY_REPLICA_ID, socket_path.to_path_buf())
+            .await;
+        routing
+            .ingress
+            .set_replica_healthy(&route_key, DEPLOY_REPLICA_ID, true)
+            .await;
 
         let hostnames = self.repos.domains.list_verified_hostnames(service.id)?;
         if hostnames.is_empty() {
-            // No verified domains yet — bridge is allocated but Traefik is not told
-            // to route this service. A future verify call will not retroactively add
-            // the route either (the routes map has no entry to update); the operator
-            // can verify a domain before deploy, or re-deploy after verifying.
+            // No verified domains yet — the replica is registered but the service
+            // has no host route. A future verify call rebuilds the table only if
+            // an entry exists, so the operator should verify a domain before
+            // deploy, or re-deploy after verifying.
             return Ok(());
         }
-        let mut routes = routing
-            .routes
-            .lock()
-            .map_err(|_| DeployError::BridgeLockPoisoned)?;
-        routes.insert(
-            route_key,
-            RouteSpec {
-                route_key: format!("svc-{}", service.id),
-                service_name: service.name.clone(),
-                domains: hostnames,
-                bridge_port: bridge_target.port,
-                tls: service.tls_enabled,
-            },
-        );
-        let yaml = render_file_provider_config(
-            &routes.values().cloned().collect::<Vec<_>>(),
-            &routing.ingress_options,
-        )?;
-        std::fs::write(&routing.traefik_config_path, yaml)?;
+        let table = {
+            let mut routes = routing
+                .routes
+                .lock()
+                .map_err(|_| DeployError::RoutesLockPoisoned)?;
+            routes.insert(
+                route_key,
+                RouteSpec {
+                    route_key: format!("svc-{}", service.id),
+                    service_name: service.name.clone(),
+                    domains: hostnames,
+                    tls: service.tls_enabled,
+                },
+            );
+            route_table_from_snapshot(&routes)?
+        };
+        // Single control-plane writer: whole-table last-writer-wins swap (A8).
+        routing.ingress.swap_routes(table);
         Ok(())
     }
 }
