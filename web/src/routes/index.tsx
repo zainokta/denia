@@ -22,7 +22,7 @@ const listServices = Effect.gen(function* () {
   return yield* api.listServices
 })
 
-const getServiceDeployments = (id: number) =>
+const getServiceDeployments = (id: string) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
     return yield* api.getServiceDeployments(id)
@@ -206,7 +206,7 @@ export function Dashboard() {
   )
 }
 
-function RecentDeployments({ serviceIds }: { serviceIds: number[] }) {
+function RecentDeployments({ serviceIds }: { serviceIds: string[] }) {
   // Fetch deployments for each service — in a real app with many services
   // we'd want a backend aggregate endpoint, but for solo-operator scale
   // this is fine.
@@ -221,7 +221,7 @@ function DeploymentRows({
   serviceIds,
   maxRows,
 }: {
-  serviceIds: number[]
+  serviceIds: string[]
   maxRows: number
 }) {
   // Fetch the first service's deployments to render something useful
@@ -236,7 +236,7 @@ function DeploymentRows({
   )
 }
 
-function ServiceDeploymentRow({ serviceId }: { serviceId: number }) {
+function ServiceDeploymentRow({ serviceId }: { serviceId: string }) {
   const { data: deployments = [] } = useQuery({
     queryKey: ['services', serviceId, 'deployments'],
     queryFn: () => runQuery(getServiceDeployments(serviceId)),

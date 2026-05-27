@@ -147,6 +147,7 @@ impl ExternalImageSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceConfig {
+    #[serde(default)]
     pub id: Uuid,
     pub project_id: Uuid,
     pub name: String,
@@ -226,6 +227,39 @@ impl ServiceConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_config_deserializes_without_id_as_nil() {
+        let json = r#"{
+            "project_id": "0190b3a0-0000-7000-8000-000000000000",
+            "name": "web",
+            "domains": ["x.example.com"],
+            "source": {"type": "external_image", "image": "nginx"},
+            "internal_port": 80,
+            "health_check": {"path": "/", "timeout_seconds": 5}
+        }"#;
+        let cfg: ServiceConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.id.is_nil());
+        assert_eq!(cfg.name, "web");
+    }
+
+    #[test]
+    fn service_config_deserializes_with_id_preserves_id() {
+        let id = Uuid::now_v7();
+        let json = format!(
+            r#"{{
+                "id": "{id}",
+                "project_id": "0190b3a0-0000-7000-8000-000000000000",
+                "name": "web",
+                "domains": ["x.example.com"],
+                "source": {{"type": "external_image", "image": "nginx"}},
+                "internal_port": 80,
+                "health_check": {{"path": "/", "timeout_seconds": 5}}
+            }}"#
+        );
+        let cfg: ServiceConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(cfg.id, id);
+    }
 
     #[test]
     fn external_image_source_resolution_matrix() {

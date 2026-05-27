@@ -57,6 +57,14 @@ pub(super) fn get_service_q(
         .map_err(Into::into)
 }
 
+pub(super) fn delete_service_q(conn: &Connection, service_id: Uuid) -> Result<(), RepoError> {
+    conn.execute(
+        "DELETE FROM services WHERE id = ?1",
+        params![service_id.to_string()],
+    )?;
+    Ok(())
+}
+
 impl SqliteStore {
     pub fn put_service(&self, config: ServiceConfig) -> Result<ServiceConfig, StateError> {
         let connection = self.connection()?;
@@ -72,6 +80,11 @@ impl SqliteStore {
     pub fn get_service(&self, service_id: Uuid) -> Result<Option<ServiceConfig>, StateError> {
         let connection = self.connection()?;
         get_service_q(&connection, service_id).map_err(StateError::from)
+    }
+
+    pub fn delete_service(&self, service_id: Uuid) -> Result<(), StateError> {
+        let connection = self.connection()?;
+        delete_service_q(&connection, service_id).map_err(StateError::from)
     }
 }
 
@@ -101,5 +114,10 @@ impl SqliteServiceRepo {
     pub fn get_service(&self, service_id: Uuid) -> Result<Option<ServiceConfig>, RepoError> {
         let conn = self.pool.connection()?;
         get_service_q(&conn, service_id)
+    }
+
+    pub fn delete_service(&self, service_id: Uuid) -> Result<(), RepoError> {
+        let conn = self.pool.connection()?;
+        delete_service_q(&conn, service_id)
     }
 }

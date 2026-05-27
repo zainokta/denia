@@ -31,6 +31,7 @@ import {
   RouteView,
   RouteViews,
   Service,
+  ServiceInput,
   ServiceDomain,
   ServiceDomains,
   Services,
@@ -89,29 +90,33 @@ export class ApiClient extends Context.Service<
       ReadonlyArray<Service>,
       ApiError | DecodeError
     >
+    readonly getService: (
+      id: string,
+    ) => Effect.Effect<Service, ApiError | DecodeError>
+    readonly deleteService: (id: string) => Effect.Effect<void, ApiError>
     readonly getServiceDeployments: (
-      id: number,
+      id: string,
     ) => Effect.Effect<
       ReadonlyArray<Deployment>,
       ApiError | DecodeError
     >
     readonly getServiceLogs: (
-      id: number,
+      id: string,
     ) => Effect.Effect<ReadonlyArray<string>, ApiError | DecodeError>
     readonly getServiceMetrics: (
-      id: number,
+      id: string,
     ) => Effect.Effect<
       ReadonlyArray<MetricSnapshot>,
       ApiError | DecodeError
     >
     readonly createDeployment: (
       input: {
-        service_id: number
+        service_id: string
         source?: { type: 'git', repo_url: string, git_ref: string, dockerfile_path: string, context_path: string, credential?: { name: string, key: string } } | { type: 'external_image', image?: string, registry_id?: string, image_ref?: string, credential?: { name: string, key: string } | null }
       },
     ) => Effect.Effect<Deployment, ApiError | DecodeError>
     readonly stopService: (
-      id: number,
+      id: string,
     ) => Effect.Effect<void, ApiError>
     readonly listProjects: Effect.Effect<
       ReadonlyArray<Project>,
@@ -127,7 +132,7 @@ export class ApiClient extends Context.Service<
       id: string,
     ) => Effect.Effect<void, ApiError>
     readonly putService: (
-      service: Service,
+      service: Service | ServiceInput,
     ) => Effect.Effect<Service, ApiError | DecodeError>
     readonly listRoutes: Effect.Effect<
       ReadonlyArray<RouteView>,
@@ -168,21 +173,21 @@ export class ApiClient extends Context.Service<
       ApiError | DecodeError
     >
     readonly listDomains: (
-      serviceId: number,
+      serviceId: string,
     ) => Effect.Effect<
       ReadonlyArray<ServiceDomain>,
       ApiError | DecodeError
     >
     readonly addDomain: (
-      serviceId: number,
+      serviceId: string,
       hostname: string,
     ) => Effect.Effect<ServiceDomain, ApiError | DecodeError>
     readonly verifyDomain: (
-      serviceId: number,
+      serviceId: string,
       domainId: string,
     ) => Effect.Effect<ServiceDomain, ApiError | DecodeError>
     readonly deleteDomain: (
-      serviceId: number,
+      serviceId: string,
       domainId: string,
     ) => Effect.Effect<void, ApiError>
     readonly listRegistries: (
@@ -458,7 +463,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       return yield* parseResponse(response, Services)
     })
 
-    const getServiceDeployments = (id: number) =>
+    const getServiceDeployments = (id: string) =>
       Effect.gen(function* () {
         const response = yield* http
           .get(url(`/v1/services/${id}/deployments`), {
@@ -468,7 +473,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, Deployments)
       })
 
-    const getServiceLogs = (id: number) =>
+    const getServiceLogs = (id: string) =>
       Effect.gen(function* () {
         const response = yield* http
           .get(url(`/v1/services/${id}/logs`), {
@@ -478,7 +483,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, Schema.Array(Schema.String))
       })
 
-    const getServiceMetrics = (id: number) =>
+    const getServiceMetrics = (id: string) =>
       Effect.gen(function* () {
         const response = yield* http
           .get(url(`/v1/services/${id}/metrics`), {
@@ -489,7 +494,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       })
 
     const createDeployment = (input: {
-      service_id: number
+      service_id: string
       source?:
         | {
             type: 'git'
@@ -521,7 +526,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, Deployment)
       })
 
-    const stopService = (id: number) =>
+    const stopService = (id: string) =>
       Effect.gen(function* () {
         const response = yield* http
           .post(url(`/v1/services/${id}/stop`), {
@@ -568,7 +573,23 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseDeleteResponse(response)
       })
 
-    const putService = (service: Service) =>
+    const getService = (id: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/services/${id}`), { headers: authHeaders() })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Service)
+      })
+
+    const deleteService = (id: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .del(url(`/v1/services/${id}`), { headers: authHeaders() })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseDeleteResponse(response)
+      })
+
+    const putService = (service: Service | ServiceInput) =>
       Effect.gen(function* () {
         const response = yield* http
           .post(url('/v1/services'), {
@@ -678,7 +699,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, AccessEntries)
       })
 
-    const listDomains = (serviceId: number) =>
+    const listDomains = (serviceId: string) =>
       Effect.gen(function* () {
         const response = yield* http
           .get(url(`/v1/services/${serviceId}/domains`), {
@@ -688,7 +709,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, ServiceDomains)
       })
 
-    const addDomain = (serviceId: number, hostname: string) =>
+    const addDomain = (serviceId: string, hostname: string) =>
       Effect.gen(function* () {
         const response = yield* http
           .post(url(`/v1/services/${serviceId}/domains`), {
@@ -702,7 +723,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, ServiceDomain)
       })
 
-    const verifyDomain = (serviceId: number, domainId: string) =>
+    const verifyDomain = (serviceId: string, domainId: string) =>
       Effect.gen(function* () {
         const response = yield* http
           .post(
@@ -713,7 +734,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, ServiceDomain)
       })
 
-    const deleteDomain = (serviceId: number, domainId: string) =>
+    const deleteDomain = (serviceId: string, domainId: string) =>
       Effect.gen(function* () {
         const response = yield* http
           .del(
@@ -775,6 +796,8 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       addMember,
       removeMember,
       listServices,
+      getService,
+      deleteService,
       getServiceDeployments,
       getServiceLogs,
       getServiceMetrics,
