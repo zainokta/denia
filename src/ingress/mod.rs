@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod pingora;
 pub mod socket_proxy;
 pub mod traefik;
 pub mod traefik_supervisor;
