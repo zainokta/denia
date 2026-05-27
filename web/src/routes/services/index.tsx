@@ -244,6 +244,7 @@ export function ServicesIndex() {
                           <button
                             type="button"
                             className="btn text-xs"
+                            aria-label="confirm delete service"
                             onClick={() => remove.mutate(svc.id)}
                             disabled={remove.isPending}
                           >
@@ -252,6 +253,7 @@ export function ServicesIndex() {
                           <button
                             type="button"
                             className="btn text-xs"
+                            aria-label="cancel delete service"
                             onClick={() => setDeleteConfirm(null)}
                           >
                             no

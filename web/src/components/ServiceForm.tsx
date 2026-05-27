@@ -14,6 +14,7 @@ interface ServiceFormProps {
 }
 
 interface EnvRow {
+  id: string
   key: string
   value: string
 }
@@ -22,7 +23,7 @@ const inputClass =
   'border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]'
 
 function envFromInitial(env: ReadonlyArray<readonly [string, string]>): EnvRow[] {
-  return env.map(([key, value]) => ({ key, value }))
+  return env.map(([key, value]) => ({ id: crypto.randomUUID(), key, value }))
 }
 
 function parseDomains(raw: string): string[] {
@@ -180,7 +181,7 @@ export function ServiceForm({
   }
 
   return (
-    <form className="panel px-4 py-4" onSubmit={handleSubmit}>
+    <form className="panel p-4" onSubmit={handleSubmit}>
       {error ? (
         <div className="mb-3 text-xs text-[var(--violet)]">
           <span className="signal signal-fault mr-2 inline-block align-middle" />
@@ -214,6 +215,7 @@ export function ServiceForm({
         <input
           id="sf-name"
           type="text"
+          aria-label="service name"
           className={inputClass}
           value={name}
           onChange={(e) => setName(e.target.value)}
@@ -227,6 +229,7 @@ export function ServiceForm({
         <input
           id="sf-domains"
           type="text"
+          aria-label="domains"
           placeholder="comma or space separated"
           className={inputClass}
           value={domains}
@@ -241,6 +244,7 @@ export function ServiceForm({
         <input
           id="sf-port"
           type="number"
+          aria-label="internal port"
           className={inputClass}
           value={internalPort}
           onChange={(e) => setInternalPort(e.target.value)}
@@ -252,6 +256,7 @@ export function ServiceForm({
         <label className="inline-flex items-center gap-1.5 text-[var(--fg)]">
           <input
             type="radio"
+            aria-label="source type git"
             name="sf-sourceType"
             value="git"
             checked={sourceType === 'git'}
@@ -262,6 +267,7 @@ export function ServiceForm({
         <label className="inline-flex items-center gap-1.5 text-[var(--fg)]">
           <input
             type="radio"
+            aria-label="source type external image"
             name="sf-sourceType"
             value="external_image"
             checked={sourceType === 'external_image'}
@@ -360,6 +366,7 @@ export function ServiceForm({
           <input
             id="sf-health-path"
             type="text"
+            aria-label="health path"
             className={inputClass}
             value={healthPath}
             onChange={(e) => setHealthPath(e.target.value)}
@@ -372,6 +379,7 @@ export function ServiceForm({
           <input
             id="sf-health-timeout"
             type="number"
+            aria-label="health timeout in seconds"
             className={inputClass}
             value={healthTimeout}
             onChange={(e) => setHealthTimeout(e.target.value)}
@@ -387,6 +395,7 @@ export function ServiceForm({
           <input
             id="sf-cpu"
             type="number"
+            aria-label="cpu millis"
             className={inputClass}
             value={cpuMillis}
             onChange={(e) => setCpuMillis(e.target.value)}
@@ -399,6 +408,7 @@ export function ServiceForm({
           <input
             id="sf-mem"
             type="number"
+            aria-label="memory bytes"
             className={inputClass}
             value={memoryBytes}
             onChange={(e) => setMemoryBytes(e.target.value)}
@@ -409,7 +419,7 @@ export function ServiceForm({
       <div className="mb-3">
         <p className="kicker mb-1">env</p>
         {envRows.map((row, i) => (
-          <div key={i} className="mb-2 flex items-center gap-2">
+          <div key={row.id} className="mb-2 flex items-center gap-2">
             <input
               type="text"
               aria-label={`env key ${i}`}
@@ -440,7 +450,12 @@ export function ServiceForm({
         <button
           type="button"
           className="btn text-xs"
-          onClick={() => setEnvRows((rows) => [...rows, { key: '', value: '' }])}
+          onClick={() =>
+            setEnvRows((rows) => [
+              ...rows,
+              { id: crypto.randomUUID(), key: '', value: '' },
+            ])
+          }
         >
           add env var
         </button>
@@ -449,6 +464,7 @@ export function ServiceForm({
       <label className="mb-4 inline-flex items-center gap-1.5 text-sm text-[var(--fg)]">
         <input
           type="checkbox"
+          aria-label="TLS enabled"
           checked={tlsEnabled}
           onChange={(e) => setTlsEnabled(e.target.checked)}
         />

@@ -60,6 +60,7 @@ export function Tabs({ tabs, active, onChange, children }: TabsProps) {
     <div>
       <div
         role="tablist"
+        tabIndex={0}
         onKeyDown={onKeyDown}
         className="flex items-center gap-5 border-b border-[var(--border)]"
       >
