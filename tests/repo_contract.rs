@@ -246,6 +246,15 @@ fn credential_put_roundtrip() {
     assert_eq!(cred.name, "ghcr");
 }
 
+// --- Admin bootstrap -------------------------------------------------------
+
+#[test]
+fn admin_initialized_is_false_on_fresh_store() {
+    let store = migrated_store();
+    let users = SqliteUserRepo::new(store.pool());
+    assert!(!users.is_admin_initialized().unwrap());
+}
+
 // --- Domains (token lookup path) ------------------------------------------
 
 #[test]

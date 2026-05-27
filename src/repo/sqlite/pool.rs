@@ -335,5 +335,18 @@ pub fn run_migrations(pool: &SqlitePool) -> Result<(), RepoError> {
         connection.execute("INSERT INTO schema_version (version) VALUES (6)", [])?;
     }
 
+    if current < 7 {
+        connection.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            "#,
+        )?;
+        connection.execute("DELETE FROM schema_version", [])?;
+        connection.execute("INSERT INTO schema_version (version) VALUES (7)", [])?;
+    }
+
     Ok(())
 }

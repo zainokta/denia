@@ -478,4 +478,16 @@ impl SqliteUserRepo {
         let conn = self.pool.connection()?;
         list_memberships_for_user_q(&conn, user_id)
     }
+
+    pub fn is_admin_initialized(&self) -> Result<bool, RepoError> {
+        let conn = self.pool.connection()?;
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM system_settings WHERE key = 'admin_initialized'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.as_deref() == Some("true"))
+    }
 }
