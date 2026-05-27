@@ -280,7 +280,10 @@ impl SqliteDomainRepo {
         get_service_domain_q(&conn, id)
     }
 
-    pub fn get_service_domain_by_token(&self, token: &str) -> Result<Option<ServiceDomain>, RepoError> {
+    pub fn get_service_domain_by_token(
+        &self,
+        token: &str,
+    ) -> Result<Option<ServiceDomain>, RepoError> {
         let conn = self.pool.connection()?;
         get_service_domain_by_token_q(&conn, token)
     }
