@@ -29,10 +29,27 @@ use crate::state::SqliteStore;
 /// Events emitted by a controller tick (and, for `ScaledToZero`, a later idle task).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutoscaleEvent {
-    ScaledUp { service: String, from: u32, to: u32 },
-    ScaledDown { service: String, from: u32, to: u32 },
-    ScaleUpDenied { service: String, reason: String },
-    ScaledToZero { service: String },
+    ScaledUp {
+        service: String,
+        from: u32,
+        to: u32,
+    },
+    ScaledDown {
+        service: String,
+        from: u32,
+        to: u32,
+    },
+    ScaleUpDenied {
+        service: String,
+        reason: String,
+    },
+    ScaledToZero {
+        service: String,
+    },
+    RolloutStep {
+        service: String,
+        to_deployment: Uuid,
+    },
 }
 
 /// Per-tick launch context for one autoscaled service, assembled by the caller
@@ -151,17 +168,7 @@ impl Controller {
             return Ok(()); // defensive; policy.validate forbids, but be safe
         }
         let index = 0; // from zero, first replica is index 0
-        let spec = LaunchSpec {
-            service_name: ms.service_name.clone(),
-            service_id: ms.service_id,
-            deployment_id: ms.deployment_id,
-            replica_index: index,
-            artifact: ms.artifact.clone(),
-            internal_port: ms.internal_port,
-            limits: ms.limits.clone(),
-            env: ms.env.clone(),
-            health_check: ms.health_check.clone(),
-        };
+        let spec = launch_spec(&ms, index);
         match launch_replica(
             &spec,
             &mut self.registry,
@@ -188,6 +195,128 @@ impl Controller {
 
         'service: for ms in services {
             let start = self.registry.replica_count(ms.service_id) as u32;
+
+            // 0. Rolling replace (ADR-016). If any live replica runs an older
+            // deployment than the desired `ms.deployment_id`, roll exactly one
+            // replica to the new deployment this tick. Normal scaling is deferred
+            // while old replicas remain; each subsequent tick re-evaluates `old`,
+            // so the rollout completes one replica at a time over several ticks.
+            let to_dep = ms.deployment_id;
+            let old: Vec<(Uuid, u32)> = self
+                .registry
+                .replicas(ms.service_id)
+                .iter()
+                .filter(|r| r.deployment_id != to_dep)
+                .map(|r| (r.id, r.index))
+                .collect();
+            if !old.is_empty() {
+                let next_index = self.next_replica_index(ms.service_id);
+                let new_spec = launch_spec(ms, next_index);
+                let total = self.registry.replica_count(ms.service_id) as u32;
+                let (old_id, old_index) = old[0];
+                let instance = RuntimeInstanceId {
+                    service_name: ms.service_name.clone(),
+                    replica_index: old_index,
+                };
+
+                if total <= 1 {
+                    // Single replica: launch-then-drain (brief +1 surge) so the
+                    // service never drops to zero capacity mid-rollout.
+                    match launch_replica(
+                        &new_spec,
+                        &mut self.registry,
+                        &mut self.ledger,
+                        self.runtime.as_ref(),
+                        self.bridge.as_ref(),
+                        self.health.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            let _ = drain_replica(
+                                &ms.service_name,
+                                old_id,
+                                &instance,
+                                &ms.limits,
+                                self.drain_grace,
+                                &mut self.registry,
+                                &mut self.ledger,
+                                self.runtime.as_ref(),
+                                self.bridge.as_ref(),
+                            )
+                            .await;
+                            events.push(AutoscaleEvent::RolloutStep {
+                                service: ms.service_name.clone(),
+                                to_deployment: to_dep,
+                            });
+                        }
+                        Err(LifecycleError::Capacity) => {
+                            events.push(AutoscaleEvent::ScaleUpDenied {
+                                service: ms.service_name.clone(),
+                                reason: "insufficient_capacity".to_string(),
+                            });
+                        }
+                        Err(e) => {
+                            events.push(AutoscaleEvent::ScaleUpDenied {
+                                service: ms.service_name.clone(),
+                                reason: e.to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    // Multiple replicas: drain-then-launch (maxUnavailable=1, no
+                    // surge) so the rollout stays within the resource budget.
+                    let _ = drain_replica(
+                        &ms.service_name,
+                        old_id,
+                        &instance,
+                        &ms.limits,
+                        self.drain_grace,
+                        &mut self.registry,
+                        &mut self.ledger,
+                        self.runtime.as_ref(),
+                        self.bridge.as_ref(),
+                    )
+                    .await;
+                    match launch_replica(
+                        &new_spec,
+                        &mut self.registry,
+                        &mut self.ledger,
+                        self.runtime.as_ref(),
+                        self.bridge.as_ref(),
+                        self.health.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            events.push(AutoscaleEvent::RolloutStep {
+                                service: ms.service_name.clone(),
+                                to_deployment: to_dep,
+                            });
+                        }
+                        Err(LifecycleError::Capacity) => {
+                            events.push(AutoscaleEvent::ScaleUpDenied {
+                                service: ms.service_name.clone(),
+                                reason: "insufficient_capacity".to_string(),
+                            });
+                        }
+                        Err(e) => {
+                            events.push(AutoscaleEvent::ScaleUpDenied {
+                                service: ms.service_name.clone(),
+                                reason: e.to_string(),
+                            });
+                        }
+                    }
+                }
+
+                self.store
+                    .set_desired_replicas(
+                        ms.service_id,
+                        self.registry.replica_count(ms.service_id) as u32,
+                    )
+                    .ok();
+                continue 'service; // defer normal scaling this tick
+            }
 
             // 1/2. Determine the desired replica count.
             let desired = if start == 0 {
@@ -280,17 +409,7 @@ impl Controller {
 
             while current < desired {
                 let replica_index = self.next_replica_index(ms.service_id);
-                let spec = LaunchSpec {
-                    service_name: ms.service_name.clone(),
-                    service_id: ms.service_id,
-                    deployment_id: ms.deployment_id,
-                    replica_index,
-                    artifact: ms.artifact.clone(),
-                    internal_port: ms.internal_port,
-                    limits: ms.limits.clone(),
-                    env: ms.env.clone(),
-                    health_check: ms.health_check.clone(),
-                };
+                let spec = launch_spec(ms, replica_index);
                 match launch_replica(
                     &spec,
                     &mut self.registry,
@@ -389,6 +508,23 @@ impl Controller {
             .max()
             .map(|m| m + 1)
             .unwrap_or(0)
+    }
+}
+
+/// Build a [`LaunchSpec`] for one replica of `ms` at `replica_index`. Shared by
+/// cold-start activation, the reconcile loop, and the rollout branch so spec
+/// construction stays in one place.
+fn launch_spec(ms: &ManagedService, replica_index: u32) -> LaunchSpec {
+    LaunchSpec {
+        service_name: ms.service_name.clone(),
+        service_id: ms.service_id,
+        deployment_id: ms.deployment_id,
+        replica_index,
+        artifact: ms.artifact.clone(),
+        internal_port: ms.internal_port,
+        limits: ms.limits.clone(),
+        env: ms.env.clone(),
+        health_check: ms.health_check.clone(),
     }
 }
 
@@ -660,6 +796,148 @@ mod tests {
         )
         .await
         .expect("seed launch ok")
+    }
+
+    /// Seed one healthy replica at a specific deployment and index, so a rollout
+    /// test can stage replicas on an OLD deployment before ticking with a new one.
+    async fn seed_replica_at(
+        ctrl: &mut Controller,
+        ms: &ManagedService,
+        deployment_id: Uuid,
+        index: u32,
+    ) -> Uuid {
+        let mut spec = launch_spec(ms, index);
+        spec.deployment_id = deployment_id;
+        launch_replica(
+            &spec,
+            &mut ctrl.registry,
+            &mut ctrl.ledger,
+            ctrl.runtime.as_ref(),
+            ctrl.bridge.as_ref(),
+            ctrl.health.as_ref(),
+        )
+        .await
+        .expect("seed launch ok")
+    }
+
+    fn deployment_ids_for(ctrl: &Controller, svc: Uuid) -> Vec<Uuid> {
+        ctrl.registry
+            .replicas(svc)
+            .iter()
+            .map(|r| r.deployment_id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn rollout_replaces_old_with_new() {
+        let svc = Uuid::now_v7();
+        let d1 = Uuid::now_v7();
+        let d2 = Uuid::now_v7();
+        let mut ms = managed(svc);
+        ms.deployment_id = d2; // desired deployment
+        let mut ctrl = controller(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+        );
+
+        // Two replicas already running the OLD deployment d1.
+        seed_replica_at(&mut ctrl, &ms, d1, 0).await;
+        seed_replica_at(&mut ctrl, &ms, d1, 1).await;
+        assert_eq!(ctrl.registry.replica_count(svc), 2);
+
+        // First tick: drain-then-launch one. Still 2 replicas, exactly one at d2.
+        let e0 = ctrl.tick(std::slice::from_ref(&ms), 0).await;
+        assert_eq!(ctrl.registry.replica_count(svc), 2);
+        assert!(e0.contains(&AutoscaleEvent::RolloutStep {
+            service: "web".to_string(),
+            to_deployment: d2,
+        }));
+        let deps = deployment_ids_for(&ctrl, svc);
+        assert_eq!(deps.iter().filter(|d| **d == d2).count(), 1);
+        assert_eq!(deps.iter().filter(|d| **d == d1).count(), 1);
+
+        // Second tick: the last old replica rolls to d2.
+        let e1 = ctrl.tick(std::slice::from_ref(&ms), 1).await;
+        assert_eq!(ctrl.registry.replica_count(svc), 2);
+        assert!(e1.contains(&AutoscaleEvent::RolloutStep {
+            service: "web".to_string(),
+            to_deployment: d2,
+        }));
+        assert!(deployment_ids_for(&ctrl, svc).iter().all(|d| *d == d2));
+
+        // Third tick: nothing to roll, no further RolloutStep.
+        let e2 = ctrl.tick(std::slice::from_ref(&ms), 2).await;
+        assert!(!e2.contains(&AutoscaleEvent::RolloutStep {
+            service: "web".to_string(),
+            to_deployment: d2,
+        }));
+    }
+
+    #[tokio::test]
+    async fn rollout_defers_scaling() {
+        let svc = Uuid::now_v7();
+        let d1 = Uuid::now_v7();
+        let d2 = Uuid::now_v7();
+        let mut ms = managed(svc);
+        ms.deployment_id = d2;
+        // Very high cpu would normally scale up, but rollout takes priority.
+        let mut ctrl = controller(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 100,
+                mem_pct: 0,
+            }),
+        );
+
+        seed_replica_at(&mut ctrl, &ms, d1, 0).await;
+        seed_replica_at(&mut ctrl, &ms, d1, 1).await;
+        assert_eq!(ctrl.registry.replica_count(svc), 2);
+
+        let events = ctrl.tick(std::slice::from_ref(&ms), 0).await;
+
+        // Replaced one replica, did not scale up: count stays 2, no ScaledUp.
+        assert_eq!(ctrl.registry.replica_count(svc), 2);
+        assert!(events.contains(&AutoscaleEvent::RolloutStep {
+            service: "web".to_string(),
+            to_deployment: d2,
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AutoscaleEvent::ScaledUp { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn single_replica_launch_then_drain() {
+        let svc = Uuid::now_v7();
+        let d1 = Uuid::now_v7();
+        let d2 = Uuid::now_v7();
+        let mut ms = managed(svc);
+        ms.deployment_id = d2;
+        let mut ctrl = controller(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+        );
+
+        seed_replica_at(&mut ctrl, &ms, d1, 0).await;
+        assert_eq!(ctrl.registry.replica_count(svc), 1);
+
+        let events = ctrl.tick(std::slice::from_ref(&ms), 0).await;
+
+        // Ends with exactly one replica, now on d2 (launched before old drained).
+        assert_eq!(ctrl.registry.replica_count(svc), 1);
+        assert_eq!(deployment_ids_for(&ctrl, svc), vec![d2]);
+        assert!(events.contains(&AutoscaleEvent::RolloutStep {
+            service: "web".to_string(),
+            to_deployment: d2,
+        }));
     }
 
     #[tokio::test]
