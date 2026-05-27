@@ -635,6 +635,20 @@ impl Controller {
         events
     }
 
+    /// Catalog-driven tick: fetches all managed services from the catalog and
+    /// drives one scaling tick for each.
+    pub async fn tick_all(&mut self, now_s: u64) -> Vec<AutoscaleEvent> {
+        let services = self.catalog.all();
+        self.tick(&services, now_s).await
+    }
+
+    /// Catalog-driven boot reconcile: fetches all managed services from the
+    /// catalog and runs [`reconcile_boot`] over them.
+    pub async fn reconcile_boot_all(&mut self) -> Vec<AutoscaleEvent> {
+        let services = self.catalog.all();
+        self.reconcile_boot(&services).await
+    }
+
     /// Next replica index: max existing index + 1, or 0 if the service has none.
     fn next_replica_index(&self, service_id: Uuid) -> u32 {
         self.registry
@@ -676,6 +690,29 @@ impl ActivationHook for SharedController {
     async fn activate(&self, service: &str) -> Result<(), ActivationError> {
         let mut guard = self.0.lock().await;
         guard.activate_one(service).await
+    }
+}
+
+/// Background run loop for the autoscaler, mirroring `scheduler::run_until_shutdown`.
+///
+/// Ticks the controller at the given `interval` until a shutdown signal is
+/// received on `shutdown`. The controller is held behind an `Arc<Mutex>` so
+/// it can be shared with [`SharedController`] for cold-start activation.
+pub async fn run_until_shutdown(
+    controller: std::sync::Arc<tokio::sync::Mutex<Controller>>,
+    interval: std::time::Duration,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = ticker.tick() => {
+                let now_s = chrono::Utc::now().timestamp().max(0) as u64;
+                let mut guard = controller.lock().await;
+                let _ = guard.tick_all(now_s).await;
+            }
+        }
     }
 }
 
@@ -1446,6 +1483,66 @@ mod tests {
 
         assert_eq!(ctrl.registry.replica_count(svc), 0);
         assert!(runtime.started_requests().is_empty());
+    }
+
+    // ---- catalog-driven method tests (TDD: written before implementation) ----
+
+    #[tokio::test]
+    async fn tick_all_uses_catalog() {
+        let svc = Uuid::now_v7();
+        let ms = managed(svc);
+        let catalog = Arc::new(FakeCatalog::with(ms.clone()));
+        let mut ctrl = controller_with_catalog(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            catalog,
+        );
+
+        // tick_all should fetch the service from the catalog and bring it to
+        // min_replicas=1 (same as calling tick(&[ms], 0)).
+        let events = ctrl.tick_all(0).await;
+
+        assert_eq!(ctrl.registry.replica_count(svc), 1);
+        assert!(
+            events.contains(&AutoscaleEvent::ScaledUp {
+                service: "web".to_string(),
+                from: 0,
+                to: 1,
+            }),
+            "expected ScaledUp event, got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_boot_all_uses_catalog() {
+        let svc = Uuid::now_v7();
+        let ms = managed(svc);
+        let catalog = Arc::new(FakeCatalog::with(ms.clone()));
+        let runtime = Arc::new(FakeRuntime::default());
+        let mut ctrl = controller_full(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            catalog,
+            runtime.clone(),
+        );
+        // Persisted desired = 2 so reconcile_boot tops up without any orphans.
+        ctrl.store.set_desired_replicas(svc, 2).unwrap();
+
+        let events = ctrl.reconcile_boot_all().await;
+
+        assert_eq!(ctrl.registry.replica_count(svc), 2);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AutoscaleEvent::ScaledUp { .. })),
+            "expected ScaledUp event, got: {events:?}"
+        );
     }
 
     #[tokio::test]
