@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 afterEach(() => {
   cleanup()
 })
+
+const navigateMock = vi.fn()
 
 vi.mock('#/effect/runtime', () => ({
   runQuery: vi.fn(() => Promise.resolve([])),
@@ -15,7 +17,8 @@ vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual('@tanstack/react-router')
   return {
     ...actual,
-    useParams: vi.fn(() => ({ serviceId: '1' })),
+    useParams: vi.fn(() => ({ serviceId: 's-1' })),
+    useNavigate: vi.fn(() => navigateMock),
   }
 })
 
@@ -34,6 +37,26 @@ import { ServiceDetail } from './\$serviceId'
 
 const mockRunQuery = runQuery as ReturnType<typeof vi.fn>
 
+const fixService = {
+  id: 's-1',
+  project_id: 'p-42',
+  name: 'web',
+  domains: ['example.com'],
+  source: {
+    type: 'git' as const,
+    repo_url: 'https://example.com/repo.git',
+    git_ref: 'main',
+    dockerfile_path: 'Dockerfile',
+    context_path: '.',
+    credential: { name: 'deploy', key: 'ssh' },
+  },
+  internal_port: 3000,
+  health_check: { path: '/', timeout_seconds: 5 },
+  resource_limits: null,
+  env: [['LOG_LEVEL', 'info'] as [string, string]],
+  tls_enabled: true,
+}
+
 const fixDeployments = [
   { id: 5, service_id: 1, status: 'Failed', created_at: '2026-05-25T02:00:00Z' },
   { id: 1, service_id: 1, status: 'Healthy', created_at: '2026-05-25T00:00:00Z' },
@@ -49,26 +72,6 @@ const fixMetrics = [
   { service_id: 1, cpu_percent: 0.12, memory_bytes: 134217728, recorded_at: '2026-05-25T00:01:00Z' },
 ]
 
-const fixServices = [
-  { id: 1, project_id: 42, name: 'web', domains: ['example.com'], internal_port: 3000 },
-]
-
-const fixServicesWithSecurity = [
-  {
-    id: 1,
-    project_id: 42,
-    name: 'web',
-    domains: ['example.com'],
-    internal_port: 3000,
-    security: {
-      userns: true,
-      mapped_uid: 100000,
-      no_new_privs: true,
-      caps_dropped: true,
-    },
-  },
-]
-
 function makeWrapper() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -82,151 +85,124 @@ function makeWrapper() {
   }
 }
 
-function allReturns(results: unknown[]) {
+// Hook declaration order in ServiceDetail:
+//   getService, listProjects, deployments, logs, metrics, requests, domains.
+// Map each to a fixture; anything unspecified defaults to [].
+interface Returns {
+  service?: unknown
+  projects?: unknown
+  deployments?: unknown
+  logs?: unknown
+  metrics?: unknown
+  requests?: unknown
+  domains?: unknown
+}
+
+function setReturns(r: Returns) {
+  const sequence = [
+    r.service ?? fixService,
+    r.projects ?? [],
+    r.deployments ?? [],
+    r.logs ?? [],
+    r.metrics ?? [],
+    r.requests ?? [],
+    r.domains ?? [],
+  ]
   let idx = 0
   mockRunQuery.mockImplementation(() => {
-    const val = idx < results.length ? results[idx] : []
+    const val = idx < sequence.length ? sequence[idx] : []
     idx++
     return Promise.resolve(val)
   })
 }
 
 describe('ServiceDetail', () => {
-  it('renders deployments newest first with status signals', async () => {
-    allReturns([fixDeployments, [], []])
-    // 4th call (services) falls through to default []
-
+  it('renders the service name in the header', async () => {
+    setReturns({})
     render(<ServiceDetail />, { wrapper: makeWrapper() })
-
-    expect(await screen.findByText('Healthy')).toBeTruthy()
-    expect(screen.getByText('Failed')).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'web' })).toBeTruthy()
   })
 
-  it('renders no-deployments empty state', async () => {
-    allReturns([[], [], []])
-
+  it('shows overview tab by default with port and tls', async () => {
+    setReturns({})
     render(<ServiceDetail />, { wrapper: makeWrapper() })
-
-    expect(await screen.findByText(/No deployments yet/)).toBeTruthy()
+    await screen.findByRole('heading', { name: 'web' })
+    expect(screen.getByText('3000')).toBeTruthy()
+    expect(screen.getByText('enabled')).toBeTruthy()
   })
 
-  it('renders logs with line numbers', async () => {
-    allReturns([fixDeployments, fixLogs, []])
-
+  it('shows source summary when the Source tab is selected', async () => {
+    setReturns({})
     render(<ServiceDetail />, { wrapper: makeWrapper() })
+    await screen.findByRole('heading', { name: 'web' })
 
+    fireEvent.click(screen.getByRole('tab', { name: 'source' }))
+    expect(await screen.findByText('https://example.com/repo.git')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'edit' })).toBeTruthy()
+  })
+
+  it('shows logs when the Logs tab is selected', async () => {
+    setReturns({ logs: fixLogs })
+    render(<ServiceDetail />, { wrapper: makeWrapper() })
+    await screen.findByRole('heading', { name: 'web' })
+
+    fireEvent.click(screen.getByRole('tab', { name: 'logs' }))
     expect(await screen.findByText(/\[init\]/)).toBeTruthy()
     expect(screen.getByText(/\[http\]/)).toBeTruthy()
   })
 
-  it('renders empty logs state', async () => {
-    allReturns([fixDeployments, [], []])
-
+  it('shows metrics when the Metrics tab is selected', async () => {
+    setReturns({ metrics: fixMetrics })
     render(<ServiceDetail />, { wrapper: makeWrapper() })
+    await screen.findByRole('heading', { name: 'web' })
 
-    expect(await screen.findByText(/No logs available/)).toBeTruthy()
-  })
-
-  it('renders metrics table with formatted values', async () => {
-    allReturns([fixDeployments, [], fixMetrics])
-
-    render(<ServiceDetail />, { wrapper: makeWrapper() })
-
+    fireEvent.click(screen.getByRole('tab', { name: 'metrics' }))
     expect(await screen.findByText('45.0%')).toBeTruthy()
     expect(screen.getByText('256.0 MiB')).toBeTruthy()
-    expect(screen.getByText('12.0%')).toBeTruthy()
-    expect(screen.getByText('128.0 MiB')).toBeTruthy()
   })
 
-  it('renders empty metrics state', async () => {
-    allReturns([fixDeployments, [], []])
-
+  it('shows deployments when the Deployments tab is selected', async () => {
+    setReturns({ deployments: fixDeployments })
     render(<ServiceDetail />, { wrapper: makeWrapper() })
+    await screen.findByRole('heading', { name: 'web' })
 
-    expect(await screen.findByText(/No metrics available/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('tab', { name: 'deployments' }))
+    expect(await screen.findByText('Healthy')).toBeTruthy()
+    expect(screen.getByText('Failed')).toBeTruthy()
   })
 
-  it('has deploy and stop buttons', async () => {
-    allReturns([fixDeployments, [], []])
-
+  it('renders env table on the Environment tab', async () => {
+    setReturns({})
     render(<ServiceDetail />, { wrapper: makeWrapper() })
+    await screen.findByRole('heading', { name: 'web' })
 
+    fireEvent.click(screen.getByRole('tab', { name: 'environment' }))
+    expect(await screen.findByText('LOG_LEVEL')).toBeTruthy()
+    expect(screen.getByText('info')).toBeTruthy()
+  })
+
+  it('has deploy and stop buttons in the header', async () => {
+    setReturns({})
+    render(<ServiceDetail />, { wrapper: makeWrapper() })
     expect(await screen.findByText('deploy')).toBeTruthy()
     expect(screen.getByText('stop')).toBeTruthy()
   })
 
-  it('renders DeployPhase stepline for newest deployment', async () => {
-    const deployFix = [
-      { id: 1, service_id: 1, status: 'Building', created_at: '2026-05-25T00:00:00Z' },
-    ]
-    allReturns([deployFix, [], [], [], fixServices])
-
+  it('deletes the service after confirming and navigates back', async () => {
+    setReturns({})
     render(<ServiceDetail />, { wrapper: makeWrapper() })
+    await screen.findByRole('heading', { name: 'web' })
 
-    await screen.findByText('queued')
-    const warn = document.querySelector('.signal-warn')
-    expect(warn).toBeTruthy()
-  })
+    mockRunQuery.mockClear()
+    mockRunQuery.mockResolvedValue(undefined)
 
-  it('renders artifact digest when present', async () => {
-    const deployFix = [
-      {
-        id: 1,
-        service_id: 1,
-        status: 'Healthy',
-        created_at: '2026-05-25T00:00:00Z',
-        artifact: { digest: 'sha256:abc123def456', kind: 'OciImage' },
-      },
-    ]
-    allReturns([deployFix, [], [], [], fixServices])
+    fireEvent.click(screen.getByRole('button', { name: 'delete' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'yes' }))
 
-    render(<ServiceDetail />, { wrapper: makeWrapper() })
-
-    expect(await screen.findByText(/sha256:abc1/)).toBeTruthy()
-    expect(screen.getByText('image')).toBeTruthy()
-  })
-
-  it('shows artifact pending when not present', async () => {
-    const deployFix = [
-      {
-        id: 1,
-        service_id: 1,
-        status: 'Building',
-        created_at: '2026-05-25T00:00:00Z',
-      },
-    ]
-    allReturns([deployFix, [], [], [], fixServices])
-
-    render(<ServiceDetail />, { wrapper: makeWrapper() })
-
-    expect(await screen.findByText(/artifact/)).toBeTruthy()
-  })
-
-  it('renders posture panel with all protections', async () => {
-    const deployFix = [
-      { id: 1, service_id: 1, status: 'Healthy', created_at: '2026-05-25T00:00:00Z' },
-    ]
-    allReturns([deployFix, [], [], [], fixServicesWithSecurity])
-
-    const { container } = render(<ServiceDetail />, { wrapper: makeWrapper() })
-
-    await screen.findByText('Healthy')
-    expect(container.textContent).toContain('userns')
-    expect(container.textContent).toContain('100000')
-    expect(container.textContent).toContain('no_new_privs')
-    expect(container.textContent).toContain('caps')
-    expect(container.textContent).toContain('sandboxed')
-  })
-
-  it('no posture panel when service has no security', async () => {
-    const deployFix = [
-      { id: 1, service_id: 1, status: 'Healthy', created_at: '2026-05-25T00:00:00Z' },
-    ]
-    allReturns([deployFix, [], [], [], fixServices])
-
-    const { container } = render(<ServiceDetail />, { wrapper: makeWrapper() })
-
-    await screen.findByText('Healthy')
-    expect(container.textContent).toContain('posture: n/a')
+    // deleteService -> runQuery was invoked
+    await vi.waitFor(() => {
+      expect(mockRunQuery).toHaveBeenCalled()
+      expect(navigateMock).toHaveBeenCalledWith({ to: '/services' })
+    })
   })
 })
