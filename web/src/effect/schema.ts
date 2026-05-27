@@ -127,7 +127,6 @@ export const Metrics = Schema.Array(MetricSnapshot)
 export class RouteView extends Schema.Class<RouteView>('RouteView')({
   service_name: Schema.String,
   domains: Schema.Array(Schema.String),
-  bridge_port: Schema.Number,
   tls: Schema.Boolean,
 }) {}
 export const RouteViews = Schema.Array(RouteView)
