@@ -13,11 +13,11 @@ use crate::{
     access_log::AccessLogStore,
     api,
     auth::require_auth,
-    bridge::{BridgeAllocator, BridgeManager, LoopbackBridgeSupervisor},
     command::{CommandRunner, TokioCommandRunner},
     config::AppConfig,
     deploy::{DeploymentRepos, SharedRoutes},
     health::{FakeHealthChecker, HealthChecker},
+    ingress::pingora::IngressState,
     rate_limit::{AdminRateLimiter, LoginRateLimiter, rate_limit_admin, rate_limit_login},
     repo::sqlite::{
         SqliteCredentialRepo, SqliteDeploymentRepo, SqliteDomainRepo, SqliteJobRepo,
@@ -25,7 +25,6 @@ use crate::{
     },
     runtime::{LinuxRuntime, Runtime},
     state::SqliteStore,
-    traefik::IngressRenderOptions,
 };
 
 #[derive(Clone)]
@@ -43,10 +42,10 @@ pub struct AppState {
     pub(crate) runtime: Arc<dyn Runtime>,
     pub(crate) health: Arc<dyn HealthChecker>,
     pub(crate) command_runner: Arc<dyn CommandRunner>,
-    pub(crate) bridge_allocator: Arc<Mutex<BridgeAllocator>>,
-    pub(crate) bridge_manager: Arc<dyn BridgeManager>,
+    /// Shared in-process ingress control brain (replica pools, health, route
+    /// table, cert store). Cloned into the Pingora proxy in `main` (Chunk C).
+    pub ingress: Arc<IngressState>,
     pub routes: SharedRoutes,
-    pub ingress_options: IngressRenderOptions,
     pub access_log: AccessLogStore,
     pub domain_verifier: Arc<dyn crate::verification::DomainVerifier>,
     pub verifying_domains: Arc<Mutex<std::collections::HashSet<uuid::Uuid>>>,
@@ -56,7 +55,6 @@ pub struct AppState {
     pub acme_challenges: crate::ingress::pingora::acme::ChallengeStore,
     pub(crate) autoscaler:
         Option<Arc<tokio::sync::Mutex<crate::autoscale::controller::Controller>>>,
-    pub(crate) bridge_supervisor: Option<Arc<LoopbackBridgeSupervisor>>,
 }
 
 impl AppState {
@@ -67,7 +65,6 @@ impl AppState {
         use crate::autoscale::registry::ReplicaRegistry;
         use crate::observability::metrics::CgroupMetricsReader;
 
-        let bridge_start_port = config.bridge_start_port;
         let cgroup_root = config.cgroup_root.clone();
         let headroom = Headroom {
             cpu_millis: config.autoscale_headroom_cpu_millis,
@@ -85,9 +82,7 @@ impl AppState {
             .with_log_dir(config.log_dir.clone()),
         );
         let access_log = AccessLogStore::new();
-        let supervisor = Arc::new(LoopbackBridgeSupervisor::with_access_log(
-            access_log.clone(),
-        ));
+        let ingress = Arc::new(IngressState::with_access_log(access_log.clone()));
         let health: Arc<dyn HealthChecker> = Arc::new(FakeHealthChecker::healthy());
 
         let mut state = Self::new_with_deploy_dependencies_and_log(
@@ -96,8 +91,7 @@ impl AppState {
             runtime.clone(),
             health.clone(),
             TokioCommandRunner,
-            BridgeAllocator::new(bridge_start_port),
-            supervisor.clone(),
+            ingress.clone(),
             access_log,
         );
 
@@ -114,7 +108,7 @@ impl AppState {
             ReplicaRegistry::default(),
             ledger,
             runtime,
-            supervisor.clone(),
+            ingress.clone(),
             health,
             store.clone(),
             usage,
@@ -122,40 +116,35 @@ impl AppState {
             std::time::Duration::from_secs(30),
         );
         state.autoscaler = Some(Arc::new(tokio::sync::Mutex::new(controller)));
-        state.bridge_supervisor = Some(supervisor);
         state
     }
 
-    /// Handle for `main` to wire the bridge activator and spawn the periodic
-    /// control loop: returns `(supervisor, controller)` when the autoscaler was
-    /// constructed (only via [`AppState::new`]).
+    /// Handle for `main` to wire the activator and spawn the periodic control
+    /// loop: returns `(ingress, controller)` when the autoscaler was constructed
+    /// (only via [`AppState::new`]).
     pub fn autoscaler_handle(
         &self,
     ) -> Option<(
-        Arc<LoopbackBridgeSupervisor>,
+        Arc<IngressState>,
         Arc<tokio::sync::Mutex<crate::autoscale::controller::Controller>>,
     )> {
-        match (&self.bridge_supervisor, &self.autoscaler) {
-            (Some(s), Some(c)) => Some((s.clone(), c.clone())),
-            _ => None,
-        }
+        self.autoscaler
+            .as_ref()
+            .map(|c| (self.ingress.clone(), c.clone()))
     }
 
-    pub fn new_with_deploy_dependencies<R, H, C, B, M>(
+    pub fn new_with_deploy_dependencies<R, H, C>(
         config: AppConfig,
         store: &SqliteStore,
         runtime: R,
         health: H,
         command_runner: C,
-        bridge_allocator: B,
-        bridge_manager: M,
+        ingress: Arc<IngressState>,
     ) -> Self
     where
         R: Runtime + 'static,
         H: HealthChecker + 'static,
         C: CommandRunner + 'static,
-        B: Into<BridgeAllocator>,
-        M: BridgeManager + 'static,
     {
         Self::new_with_deploy_dependencies_and_log(
             config,
@@ -163,36 +152,26 @@ impl AppState {
             runtime,
             health,
             command_runner,
-            bridge_allocator,
-            bridge_manager,
+            ingress,
             AccessLogStore::new(),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_deploy_dependencies_and_log<R, H, C, B, M>(
+    pub fn new_with_deploy_dependencies_and_log<R, H, C>(
         config: AppConfig,
         store: &SqliteStore,
         runtime: R,
         health: H,
         command_runner: C,
-        bridge_allocator: B,
-        bridge_manager: M,
+        ingress: Arc<IngressState>,
         access_log: AccessLogStore,
     ) -> Self
     where
         R: Runtime + 'static,
         H: HealthChecker + 'static,
         C: CommandRunner + 'static,
-        B: Into<BridgeAllocator>,
-        M: BridgeManager + 'static,
     {
-        let ingress_options = IngressRenderOptions {
-            acme_resolver: config.acme_resolver.clone(),
-            control_domain: config.control_domain.clone(),
-            control_tls: config.control_tls,
-            control_backend_addr: format!("http://{}", config.bind_addr),
-        };
         let pool = store.pool();
         Self {
             config,
@@ -208,16 +187,13 @@ impl AppState {
             runtime: Arc::new(runtime),
             health: Arc::new(health),
             command_runner: Arc::new(command_runner),
-            bridge_allocator: Arc::new(Mutex::new(bridge_allocator.into())),
-            bridge_manager: Arc::new(bridge_manager),
+            ingress,
             routes: Arc::new(Mutex::new(BTreeMap::new())),
-            ingress_options,
             access_log,
             domain_verifier: Arc::new(crate::verification::HttpDomainVerifier::new()),
             verifying_domains: Arc::new(Mutex::new(std::collections::HashSet::new())),
             acme_challenges: crate::ingress::pingora::acme::ChallengeStore::new(),
             autoscaler: None,
-            bridge_supervisor: None,
         }
     }
 
@@ -280,13 +256,6 @@ impl AppStateBuilder {
         let store = SqliteStore::open_in_memory().expect("open in-memory store");
         store.migrate().expect("run migrations");
         let pool = store.pool();
-        let ingress_options = IngressRenderOptions {
-            acme_resolver: self.config.acme_resolver.clone(),
-            control_domain: self.config.control_domain.clone(),
-            control_tls: self.config.control_tls,
-            control_backend_addr: format!("http://{}", self.config.bind_addr),
-        };
-        let bridge_start_port = self.config.bridge_start_port;
         AppState {
             config: self.config,
             services: SqliteServiceRepo::new(pool.clone()),
@@ -303,10 +272,8 @@ impl AppStateBuilder {
                 .unwrap_or_else(|| Arc::new(crate::runtime::FakeRuntime::default())),
             health: Arc::new(FakeHealthChecker::healthy()),
             command_runner: Arc::new(TokioCommandRunner),
-            bridge_allocator: Arc::new(Mutex::new(BridgeAllocator::new(bridge_start_port))),
-            bridge_manager: Arc::new(crate::bridge::FakeBridgeManager::default()),
+            ingress: Arc::new(IngressState::default()),
             routes: Arc::new(Mutex::new(BTreeMap::new())),
-            ingress_options,
             access_log: AccessLogStore::new(),
             domain_verifier: self
                 .domain_verifier
@@ -314,7 +281,6 @@ impl AppStateBuilder {
             verifying_domains: Arc::new(Mutex::new(std::collections::HashSet::new())),
             acme_challenges: crate::ingress::pingora::acme::ChallengeStore::new(),
             autoscaler: None,
-            bridge_supervisor: None,
         }
     }
 }
