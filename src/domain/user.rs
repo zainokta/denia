@@ -71,6 +71,7 @@ pub enum PrincipalView {
 pub struct Me {
     pub principal: PrincipalView,
     pub is_super_admin: bool,
+    pub admin_initialized: bool,
     pub memberships: Vec<ProjectMembership>,
 }
 

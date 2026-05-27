@@ -1233,3 +1233,51 @@ async fn bootstrap_rejects_short_password() {
         .unwrap();
     assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn me_reports_admin_initialized_flag() {
+    let store = SqliteStore::open_in_memory().expect("open sqlite");
+    store.migrate().expect("migrate");
+    let app = build_router(AppState::new(AppConfig::for_test("test-token"), &store));
+
+    let me = |app: axum::Router| async move {
+        let resp = app
+            .oneshot(
+                http::Request::builder()
+                    .uri("/v1/me")
+                    .header(http::header::AUTHORIZATION, "Bearer test-token")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+    };
+
+    let before = me(app.clone()).await;
+    assert_eq!(before["admin_initialized"], serde_json::json!(false));
+
+    app.clone()
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri("/v1/bootstrap")
+                .header(http::header::AUTHORIZATION, "Bearer test-token")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "username": "root", "password": "supersecret"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let after = me(app).await;
+    assert_eq!(after["admin_initialized"], serde_json::json!(true));
+}
