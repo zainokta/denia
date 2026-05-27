@@ -63,6 +63,25 @@ impl ResourceLedger {
     }
 }
 
+impl HostCapacity {
+    /// Detect host totals from the running system. Memory from /proc/meminfo (reusing the
+    /// node_metrics parser); CPU from the logical core count * 1000 millicores.
+    pub fn detect() -> Self {
+        let cpu_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1) as u32;
+        let mem_bytes = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|s| crate::observability::parse_meminfo(&s).ok())
+            .map(|(total, _available)| total)
+            .unwrap_or(0);
+        Self {
+            cpu_millis: cpu_count.saturating_mul(1000),
+            mem_bytes,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +110,15 @@ mod tests {
         assert!(l.try_reserve(&lim).is_err()); // would exceed allocatable
         l.release(&lim);
         assert!(l.try_reserve(&lim).is_ok()); // freed, fits again
+    }
+
+    #[test]
+    fn detect_returns_nonzero_capacity() {
+        let cap = HostCapacity::detect();
+        assert!(
+            cap.cpu_millis >= 1000,
+            "expected at least one core worth of millis"
+        );
+        assert!(cap.mem_bytes > 0, "expected nonzero total memory");
     }
 }
