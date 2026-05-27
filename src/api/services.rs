@@ -171,11 +171,8 @@ async fn lifecycle_command(
                 state.deployment_repos(),
                 state.runtime.clone(),
                 state.health.clone(),
-                state.bridge_allocator.clone(),
-                state.bridge_manager.clone(),
-                state.config.traefik_dynamic_config_path.clone(),
+                state.ingress.clone(),
                 state.routes.clone(),
-                state.ingress_options.clone(),
             );
             coordinator.stop_service(&service).await?;
             Ok((
