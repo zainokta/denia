@@ -12,7 +12,9 @@
 
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Instant};
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use pingora::tls::{pkey::PKey, pkey::Private, x509::X509};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -80,6 +82,53 @@ impl RouteTable {
     /// Number of distinct host entries (for diagnostics/tests).
     pub fn host_count(&self) -> usize {
         self.by_host.len()
+    }
+}
+
+/// A parsed TLS certificate chain plus its private key, ready to install into a
+/// handshake. The leaf certificate is first in `chain`.
+///
+/// Holds boringssl-parsed material (`X509` / `PKey`). The key is never logged or
+/// serialized (CLAUDE.md secrets discipline); `ParsedCert` intentionally does
+/// not derive `Debug`/`Serialize`.
+#[derive(Clone)]
+pub struct ParsedCert {
+    /// Full chain, leaf first.
+    pub chain: Vec<X509>,
+    /// Private key for the leaf certificate.
+    pub key: PKey<Private>,
+}
+
+/// SNI → parsed certificate map, swapped atomically on issuance/renewal.
+///
+/// Selection (the `TlsAccept` callback, wired in a later chunk) reads a snapshot
+/// of this store synchronously at handshake time; issuance swaps a new store in
+/// without restarting the listener. A missing SNI means "decline" — no default
+/// cert is ever leaked.
+#[derive(Default, Clone)]
+pub struct CertStore {
+    by_sni: BTreeMap<String, ParsedCert>,
+}
+
+impl CertStore {
+    /// Insert or replace the certificate served for `sni`.
+    pub fn insert(&mut self, sni: impl Into<String>, cert: ParsedCert) {
+        self.by_sni.insert(sni.into(), cert);
+    }
+
+    /// Look up the certificate for an exact SNI, if present.
+    pub fn get(&self, sni: &str) -> Option<&ParsedCert> {
+        self.by_sni.get(sni)
+    }
+
+    /// Number of certificates held (for diagnostics/tests).
+    pub fn len(&self) -> usize {
+        self.by_sni.len()
+    }
+
+    /// Whether the store holds no certificates.
+    pub fn is_empty(&self) -> bool {
+        self.by_sni.is_empty()
     }
 }
 
@@ -164,6 +213,10 @@ impl ServicePool {
 /// The route table and cert store are added as `ArcSwap` fields in Task 2.3.
 #[derive(Default)]
 pub struct IngressState {
+    /// Host-indexed routing table, swapped atomically on route changes.
+    routes: ArcSwap<RouteTable>,
+    /// SNI-indexed cert store, swapped atomically on issuance/renewal.
+    certs: ArcSwap<CertStore>,
     pools: Mutex<BTreeMap<String, ServicePool>>,
     access_log: AccessLogStore,
     /// Optional cold-start hook injected by the controller. When unset, a
@@ -177,6 +230,8 @@ impl IngressState {
     /// Construct with a shared `AccessLogStore`.
     pub fn with_access_log(access_log: AccessLogStore) -> Self {
         Self {
+            routes: ArcSwap::default(),
+            certs: ArcSwap::default(),
             pools: Mutex::new(BTreeMap::new()),
             access_log,
             activator: Mutex::new(None),
@@ -187,6 +242,34 @@ impl IngressState {
     /// Clone the shared access log handle.
     pub fn access_log(&self) -> AccessLogStore {
         self.access_log.clone()
+    }
+
+    /// Atomically replace the routing table. Lock-free for readers.
+    pub fn swap_routes(&self, table: RouteTable) {
+        self.routes.store(Arc::new(table));
+    }
+
+    /// Load a snapshot of the current routing table (cheap, lock-free).
+    pub fn routes(&self) -> Arc<RouteTable> {
+        self.routes.load_full()
+    }
+
+    /// Resolve a request `Host` to its owning service name, if routed.
+    pub fn resolve_host(&self, host: &str) -> Option<String> {
+        self.routes
+            .load()
+            .resolve(host)
+            .map(|r| r.service_name.clone())
+    }
+
+    /// Atomically replace the cert store. Lock-free for readers.
+    pub fn swap_certs(&self, store: CertStore) {
+        self.certs.store(Arc::new(store));
+    }
+
+    /// Load a snapshot of the current cert store (cheap, lock-free).
+    pub fn certs(&self) -> Arc<CertStore> {
+        self.certs.load_full()
     }
 
     /// Inject the cold-start activation hook. Until set, requests to a
@@ -352,7 +435,8 @@ mod route_table_tests {
             tls: true,
         });
         assert_eq!(
-            t.resolve("api.example.com").map(|r| r.service_name.as_str()),
+            t.resolve("api.example.com")
+                .map(|r| r.service_name.as_str()),
             Some("api")
         );
         assert!(t.resolve("nope.example.com").is_none());
@@ -393,6 +477,47 @@ mod route_table_tests {
         let resolved = t.resolve("app.example.com").expect("resolved");
         assert_eq!(resolved.service_name, "new");
         assert!(resolved.tls);
+    }
+}
+
+#[cfg(test)]
+mod assembly_tests {
+    use super::*;
+
+    #[test]
+    fn cert_store_default_is_empty() {
+        let store = CertStore::default();
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+        assert!(store.get("api.example.com").is_none());
+    }
+
+    #[tokio::test]
+    async fn ingress_state_swaps_routes() {
+        let state = IngressState::default();
+        assert_eq!(state.routes().host_count(), 0);
+        assert!(state.certs().is_empty());
+
+        let mut table = RouteTable::default();
+        table.upsert(RouteSpec {
+            route_key: "svc-1".into(),
+            service_name: "api".into(),
+            domains: vec!["api.example.com".into()],
+            tls: true,
+        });
+        state.swap_routes(table);
+
+        // Swap is observable through a fresh snapshot.
+        assert_eq!(state.routes().host_count(), 1);
+        assert_eq!(
+            state.resolve_host("api.example.com").as_deref(),
+            Some("api")
+        );
+        assert_eq!(state.resolve_host("nope.example.com"), None);
+
+        // Swapping a fresh (empty) cert store is observable too.
+        state.swap_certs(CertStore::default());
+        assert!(state.certs().is_empty());
     }
 }
 
