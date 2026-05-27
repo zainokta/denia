@@ -1,11 +1,14 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use denia::{
     app::{AppState, build_router},
     config::AppConfig,
-    ingress::traefik_supervisor::{HostTraefikSpawner, TraefikSupervisor, acquire_and_prepare},
-    oci::{registry::RegistryImagePuller, unpack::TarRootfsUnpacker},
+    ingress::pingora::{
+        AcmeDriver, ChallengeStore, IngressServerConfig, RENEWAL_WINDOW_DAYS, build_server,
+        load_certs_from_disk, persist_cert, run_server, select_renewals,
+    },
     scheduler::{Scheduler, run_until_shutdown},
     socket_proxy,
     state::SqliteStore,
@@ -56,41 +59,101 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let scheduler_task = tokio::spawn(run_until_shutdown(scheduler.clone(), shutdown_rx));
 
-    let (traefik_shutdown_tx, traefik_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
-    let traefik_task = {
-        let config = config.clone();
-        tokio::spawn(async move {
-            if let Err(e) = std::fs::create_dir_all(&config.traefik_dir) {
-                eprintln!("traefik dir create failed: {e}");
-                return;
-            }
-            let puller = RegistryImagePuller::new(config.traefik_dir.clone());
-            let unpacker = TarRootfsUnpacker::new();
-            match acquire_and_prepare(&config, &puller, &unpacker).await {
-                Ok(binary) => {
-                    let spawner = HostTraefikSpawner {
-                        binary,
-                        config_file: config.traefik_dir.join("traefik.yml"),
-                        cwd: config.traefik_dir.clone(),
-                        log_path: config.log_dir.join("traefik.log"),
-                    };
-                    let sup = TraefikSupervisor {
-                        spawner,
-                        max_restarts_for_test: None,
-                    };
-                    let outcome = sup.run(traefik_shutdown_rx).await;
-                    eprintln!("traefik supervisor exited: {outcome:?}");
+    // --- In-process ACME (instant-acme, HTTP-01) ---------------------------
+    //
+    // Build ONE shared `ChallengeStore` and clone it into both the axum
+    // acme-challenge handler (`AppState.acme_challenges`) and the issuer so the
+    // `:80` challenge proxy and the order driver observe the same token map
+    // (Chunk B carry-forward). The driver is built only when an email is set;
+    // `require_acme_email` above guarantees one exists if any service uses TLS.
+    let challenges: ChallengeStore = state.acme_challenges.clone();
+    let acme_driver = match &config.acme_email {
+        Some(email) => {
+            match AcmeDriver::new(
+                &config.tls_dir,
+                &config.acme_directory_url,
+                email,
+                challenges.clone(),
+            )
+            .await
+            {
+                Ok(driver) => Some(Arc::new(driver)),
+                Err(e) => {
+                    eprintln!("acme driver init failed (cert issuance disabled): {e}");
+                    None
                 }
-                Err(e) => eprintln!("traefik acquire failed: {e}"),
             }
-        })
+        }
+        None => None,
     };
 
-    // Wire the autoscaler: hand the bridge its activation hook, run boot
+    // Boot-load any persisted certs into the cert store BEFORE `:443` accepts so
+    // a restart never re-orders every cert (LE rate limits) and never serves a
+    // handshake with an empty store (Chunk B carry-forward).
+    state
+        .ingress
+        .swap_certs(load_certs_from_disk(&config.tls_dir));
+
+    // --- Pingora ingress server (dedicated thread, Denia-owned shutdown) ----
+    //
+    // Spawn on a dedicated `std::thread` (Spike 0.1: Pingora builds its own tokio
+    // runtimes). Shutdown is modeled on the old Traefik mpsc pattern: a `watch`
+    // channel flipped from the same graceful-shutdown point. A bind failure is
+    // ISOLATED — it logs a clear `:80`/`:443`-in-use message and the control
+    // plane keeps serving `bind_addr` (axum), never aborting the process (A6).
+    let (pingora_shutdown_tx, pingora_shutdown_rx) = tokio::sync::watch::channel(false);
+    let pingora_cfg =
+        IngressServerConfig::from_ports(config.http_port, config.https_port, config.bind_addr);
+    let pingora_thread = {
+        let ingress = state.ingress.clone();
+        std::thread::Builder::new()
+            .name("denia-ingress".to_string())
+            .spawn(move || match build_server(ingress, &pingora_cfg) {
+                Ok(server) => run_server(server, pingora_shutdown_rx),
+                Err(e) => eprintln!(
+                    "ingress proxy failed to start ({e}); :80/:443 may be in use — Denia owns \
+                     these ports. The control plane keeps serving the management API."
+                ),
+            })
+            .ok()
+    };
+
+    // Issue certs for already-verified TLS hostnames, then scan for renewals on
+    // an interval. Both run on Denia's runtime (issuance is async/out-of-band;
+    // selection is the sync TlsAccept callback). Secrets discipline: never log
+    // key authorizations, private keys, or the ACME account key.
+    let acme_task = acme_driver.as_ref().map(|driver| {
+        let driver = driver.clone();
+        let ingress = state.ingress.clone();
+        let tls_dir = config.tls_dir.clone();
+        let services = state.services.clone();
+        let domains = state.domains.clone();
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            // Initial issuance pass for verified TLS hostnames lacking a cert.
+            issue_missing_certs(&driver, &ingress, &tls_dir, &services, &domains).await;
+            let mut ticker = tokio::time::interval(Duration::from_secs(12 * 60 * 60));
+            loop {
+                tokio::select! {
+                    _ = &mut rx => break,
+                    _ = ticker.tick() => {
+                        let due = select_renewals(&ingress.certs(), RENEWAL_WINDOW_DAYS);
+                        for domain in due {
+                            reissue(&driver, &ingress, &tls_dir, &domain).await;
+                        }
+                        issue_missing_certs(&driver, &ingress, &tls_dir, &services, &domains).await;
+                    }
+                }
+            }
+        });
+        (tx, handle)
+    });
+
+    // Wire the autoscaler: hand the ingress its activation hook, run boot
     // reconcile once, then spawn the periodic control loop until shutdown.
     let autoscale_interval = config.autoscale_interval_s;
-    let autoscaler_task = if let Some((supervisor, controller)) = state.autoscaler_handle() {
-        supervisor
+    let autoscaler_task = if let Some((ingress, controller)) = state.autoscaler_handle() {
+        ingress
             .set_activator(Arc::new(denia::autoscale::controller::SharedController(
                 controller.clone(),
             )))
@@ -123,11 +186,67 @@ async fn main() -> anyhow::Result<()> {
 
     let _ = shutdown_tx.send(());
     let _ = scheduler_task.await;
-    let _ = traefik_shutdown_tx.send(()).await;
-    let _ = traefik_task.await;
+    // Tell the Pingora server to stop and join its thread (mirrors the old
+    // traefik_shutdown send point).
+    let _ = pingora_shutdown_tx.send(true);
+    if let Some(thread) = pingora_thread {
+        let _ = thread.join();
+    }
+    if let Some((tx, handle)) = acme_task {
+        let _ = tx.send(());
+        let _ = handle.await;
+    }
     if let Some((tx, handle)) = autoscaler_task {
         let _ = tx.send(());
         let _ = handle.await;
     }
     Ok(())
+}
+
+/// Issue certs for every verified hostname of a TLS-enabled service that does
+/// not yet have one in the cert store. Persists atomically and swaps into the
+/// live store. Never logs secret material.
+async fn issue_missing_certs(
+    driver: &AcmeDriver,
+    ingress: &denia::ingress::pingora::IngressState,
+    tls_dir: &std::path::Path,
+    services: &denia::repo::sqlite::SqliteServiceRepo,
+    domains: &denia::repo::sqlite::SqliteDomainRepo,
+) {
+    let Ok(all) = services.list_services() else {
+        return;
+    };
+    for svc in all.into_iter().filter(|s| s.tls_enabled) {
+        let Ok(hostnames) = domains.list_verified_hostnames(svc.id) else {
+            continue;
+        };
+        for hostname in hostnames {
+            if ingress.certs().get(&hostname).is_some() {
+                continue;
+            }
+            reissue(driver, ingress, tls_dir, &hostname).await;
+        }
+    }
+}
+
+/// Drive one ACME order for `domain`, persist the result, and hot-swap it into
+/// the live cert store. Errors are logged without leaking secret material.
+async fn reissue(
+    driver: &AcmeDriver,
+    ingress: &denia::ingress::pingora::IngressState,
+    tls_dir: &std::path::Path,
+    domain: &str,
+) {
+    match driver.issue(domain).await {
+        Ok(issued) => {
+            if let Err(e) = persist_cert(tls_dir, domain, &issued) {
+                eprintln!("failed to persist issued cert for {domain}: {e}");
+                return;
+            }
+            // Reload the whole store from disk so the swap stays single-writer
+            // and observes all persisted certs (A8).
+            ingress.swap_certs(load_certs_from_disk(tls_dir));
+        }
+        Err(e) => eprintln!("acme issuance failed for {domain}: {e}"),
+    }
 }

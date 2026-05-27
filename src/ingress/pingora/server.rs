@@ -13,13 +13,50 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use pingora::listeners::tls::TlsSettings;
-use pingora::server::Server;
+use pingora::server::{RunArgs, Server, ShutdownSignal, ShutdownSignalWatch};
 use pingora_proxy::http_proxy_service;
+use tokio::sync::watch;
 
 use super::proxy::DeniaProxy;
 use super::state::IngressState;
 use super::tls::DeniaCertResolver;
+
+/// App-driven shutdown watcher (Spike 0.1): a custom [`ShutdownSignalWatch`]
+/// means Pingora installs **no** OS signal handler, so Denia's `tokio::signal`
+/// handler stays authoritative. The control plane fires shutdown by flipping the
+/// `watch` channel from its existing graceful-shutdown path.
+struct ChannelShutdownSignalWatch {
+    rx: watch::Receiver<bool>,
+}
+
+#[async_trait]
+impl ShutdownSignalWatch for ChannelShutdownSignalWatch {
+    async fn recv(&self) -> ShutdownSignal {
+        let mut rx = self.rx.clone();
+        // Wait until the flag flips true (or the sender drops).
+        while !*rx.borrow() {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+        ShutdownSignal::FastShutdown
+    }
+}
+
+/// Run a built Pingora [`Server`] to completion on the current thread, shutting
+/// down when `shutdown_rx` flips to `true`.
+///
+/// MUST be invoked on a dedicated `std::thread` (Pingora builds its own tokio
+/// runtimes and `block_on`s internally — Spike 0.1). Uses `Server::run` (never
+/// `run_forever`, which `process::exit`s) so control returns to the caller for a
+/// clean thread join.
+pub fn run_server(server: Server, shutdown_rx: watch::Receiver<bool>) {
+    server.run(RunArgs {
+        shutdown_signal: Box::new(ChannelShutdownSignalWatch { rx: shutdown_rx }),
+    });
+}
 
 /// Configuration for the Pingora ingress server.
 ///
@@ -36,6 +73,17 @@ pub struct IngressServerConfig {
 }
 
 impl IngressServerConfig {
+    /// Build from the configured HTTP/HTTPS ports and control-plane bind address.
+    /// `:80`/`:443` bind on all interfaces (`0.0.0.0`) since Denia owns the
+    /// public ingress; the control backend is loopback-local axum.
+    pub fn from_ports(http_port: u16, https_port: u16, control_backend: SocketAddr) -> Self {
+        Self {
+            http_addr: SocketAddr::from(([0, 0, 0, 0], http_port)),
+            https_addr: SocketAddr::from(([0, 0, 0, 0], https_port)),
+            control_backend,
+        }
+    }
+
     /// Test/default configuration binding loopback ports.
     #[cfg(test)]
     pub fn test_defaults() -> Self {
