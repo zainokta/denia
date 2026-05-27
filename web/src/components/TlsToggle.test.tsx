@@ -13,11 +13,20 @@ import { runQuery } from '#/effect/runtime'
 const mockRunQuery = runQuery as ReturnType<typeof vi.fn>
 
 const FIXTURE_SERVICE = {
-  id: 1,
-  project_id: 42,
+  id: '018f1100-0000-7000-0000-000000000001',
+  project_id: '018f1100-0000-7000-0000-000000000002',
   name: 'web',
   domains: ['example.com'],
+  source: {
+    type: 'external_image' as const,
+    image: 'nginx:latest',
+    credential: null,
+    registry_id: null,
+    image_ref: null,
+  },
   internal_port: 3000,
+  health_check: { path: '/healthz', timeout_seconds: 5 },
+  env: [] as ReadonlyArray<readonly [string, string]>,
   tls_enabled: false,
 }
 

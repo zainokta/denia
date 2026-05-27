@@ -280,6 +280,8 @@ const mockApi = (success = true) =>
     addMember: ((_pid: string, _uid: string, _r: string) => emptyApi()) as never,
     removeMember: ((_pid: string, _uid: string) => emptyApi()) as never,
     listServices: emptyApi() as never,
+    getService: ((_id: string) => emptyApi()) as never,
+    deleteService: ((_id: string) => Effect.void) as never,
     getServiceDeployments: ((_id: number) => emptyApi()) as never,
     getServiceLogs: ((_id: number) => emptyApi()) as never,
     getServiceMetrics: ((_id: number) => emptyApi()) as never,
@@ -428,6 +430,8 @@ describe('ApiClient jobs', () => {
     addMember: ((_pid: string, _uid: string, _r: string) => emptyApi()) as never,
     removeMember: ((_pid: string, _uid: string) => emptyApi()) as never,
     listServices: emptyApi() as never,
+    getService: ((_id: string) => emptyApi()) as never,
+    deleteService: ((_id: string) => Effect.void) as never,
     getServiceDeployments: ((_id: number) => emptyApi()) as never,
     getServiceLogs: ((_id: number) => emptyApi()) as never,
     getServiceMetrics: ((_id: number) => emptyApi()) as never,
@@ -572,48 +576,60 @@ describe('ArtifactRef schema', () => {
   )
 })
 
-describe('SecurityPosture schema', () => {
-  const FIXTURE_SVC_WITH_SECURITY = {
-    id: 1,
-    project_id: 42,
+describe('Service schema', () => {
+  const FIXTURE_SVC_WITH_TLS = {
+    id: '018f1100-0000-7000-0000-000000000031',
+    project_id: '018f1100-0000-7000-0000-000000000001',
     name: 'web',
     domains: ['example.com'],
-    internal_port: 3000,
-    security: {
-      userns: true,
-      mapped_uid: 100000,
-      no_new_privs: true,
-      caps_dropped: true,
+    source: {
+      type: 'external_image',
+      image: 'nginx:latest',
+      credential: null,
+      registry_id: null,
+      image_ref: null,
     },
+    internal_port: 3000,
+    health_check: { path: '/healthz', timeout_seconds: 5 },
+    env: [['KEY', 'val']],
+    tls_enabled: true,
   }
 
-  const FIXTURE_SVC_WITHOUT_SECURITY = {
-    id: 2,
-    project_id: 42,
+  const FIXTURE_SVC_DEFAULT_TLS = {
+    id: '018f1100-0000-7000-0000-000000000032',
+    project_id: '018f1100-0000-7000-0000-000000000001',
     name: 'api',
     domains: ['api.example.com'],
+    source: {
+      type: 'external_image',
+      image: 'alpine:latest',
+      credential: null,
+      registry_id: null,
+      image_ref: null,
+    },
     internal_port: 8080,
+    health_check: { path: '/', timeout_seconds: 2 },
+    env: [],
   }
 
-  it.effect('decodes Service with security posture', () =>
-    Schema.decodeUnknownEffect(Service)(FIXTURE_SVC_WITH_SECURITY).pipe(
+  it.effect('decodes Service with tls_enabled true', () =>
+    Schema.decodeUnknownEffect(Service)(FIXTURE_SVC_WITH_TLS).pipe(
       Effect.map((svc) => {
-        expect(svc.id).toBe(1)
-        expect(svc.security).toBeDefined()
-        expect(svc.security!.userns).toBe(true)
-        expect(svc.security!.mapped_uid).toBe(100000)
-        expect(svc.security!.no_new_privs).toBe(true)
-        expect(svc.security!.caps_dropped).toBe(true)
+        expect(svc.id).toBe('018f1100-0000-7000-0000-000000000031')
+        expect(svc.tls_enabled).toBe(true)
+        expect(svc.source.type).toBe('external_image')
+        expect(svc.health_check.path).toBe('/healthz')
+        expect(svc.env[0]).toEqual(['KEY', 'val'])
       }),
     ),
   )
 
-  it.effect('tolerates missing security posture', () =>
-    Schema.decodeUnknownEffect(Service)(FIXTURE_SVC_WITHOUT_SECURITY).pipe(
+  it.effect('defaults tls_enabled to false when omitted', () =>
+    Schema.decodeUnknownEffect(Service)(FIXTURE_SVC_DEFAULT_TLS).pipe(
       Effect.map((svc) => {
-        expect(svc.id).toBe(2)
+        expect(svc.id).toBe('018f1100-0000-7000-0000-000000000032')
         expect(svc.name).toBe('api')
-        expect(svc.security).toBeUndefined()
+        expect(svc.tls_enabled).toBe(false)
       }),
     ),
   )
@@ -729,6 +745,8 @@ const mockIngressApi = () =>
     addMember: ((_pid: string, _uid: string, _r: string) => emptyApi()) as never,
     removeMember: ((_pid: string, _uid: string) => emptyApi()) as never,
     listServices: emptyApi() as never,
+    getService: ((_id: string) => emptyApi()) as never,
+    deleteService: ((_id: string) => Effect.void) as never,
     getServiceDeployments: ((_id: number) => emptyApi()) as never,
     getServiceLogs: ((_id: number) => emptyApi()) as never,
     getServiceMetrics: ((_id: number) => emptyApi()) as never,
@@ -786,11 +804,20 @@ describe('Ingress ApiClient methods', () => {
 
 describe('putService', () => {
   const FIXTURE_SVC = {
-    id: 1,
-    project_id: 42,
+    id: '018f1100-0000-7000-0000-000000000041',
+    project_id: '018f1100-0000-7000-0000-000000000001',
     name: 'web',
     domains: ['example.com'],
+    source: {
+      type: 'external_image',
+      image: 'nginx:latest',
+      credential: null,
+      registry_id: null,
+      image_ref: null,
+    },
     internal_port: 3000,
+    health_check: { path: '/healthz', timeout_seconds: 5 },
+    env: [],
     tls_enabled: true,
   }
 
@@ -817,6 +844,8 @@ describe('putService', () => {
           addMember: ((_pid: string, _uid: string, _r: string) => emptyApi()) as never,
           removeMember: ((_pid: string, _uid: string) => emptyApi()) as never,
           listServices: emptyApi() as never,
+          getService: ((_id: string) => emptyApi()) as never,
+          deleteService: ((_id: string) => Effect.void) as never,
           getServiceDeployments: ((_id: number) => emptyApi()) as never,
           getServiceLogs: ((_id: number) => emptyApi()) as never,
           getServiceMetrics: ((_id: number) => emptyApi()) as never,
