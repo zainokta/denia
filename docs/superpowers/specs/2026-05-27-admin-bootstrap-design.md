@@ -71,11 +71,17 @@ settings have a home without another migration.
   2. Create the user with `is_super_admin = true` (UUIDv7, via the existing
      `create_user_q` path).
   3. Insert `('admin_initialized', 'true')` into `system_settings`.
-  4. Commit. The transaction makes concurrent bootstrap calls safe — only one
-     can win; the loser sees the flag and errors.
+  4. Commit.
 
-Password hashing stays in the API layer (`crate::auth::hash_password`), matching
-`create_user_handler`; the repo receives an already-hashed value.
+  `SqlitePool` is a single `Connection` behind one `Arc<Mutex>`
+  (`src/repo/sqlite/pool.rs`), so all repo calls already serialize — overlapping
+  bootstrap calls cannot truly race. The transaction's role is an **atomic
+  check-and-set within the one locked connection**: it guarantees the flag check
+  and the user+flag writes commit together (no partial state if an insert fails),
+  and the in-transaction re-check makes a second call after commit deterministic.
+
+Password hashing stays in the API layer via `crate::auth::hash_password`
+(matching `create_user_handler`); the repo receives an already-hashed value.
 
 ### API layer (`src/api/`)
 
@@ -85,23 +91,33 @@ New module `src/api/bootstrap.rs` exposing:
 POST /v1/bootstrap   body: { username, password }
 ```
 
-- Nested under the **authed** router (`src/app.rs`) so the existing auth
-  middleware requires a valid token. Missing/invalid token → 401 (unchanged
-  middleware behavior).
+- Added to the **authed** router via `.merge(bootstrap::router())` alongside the
+  other authed routers in `src/app.rs` (same axum verb as `users::router()` etc.,
+  not `.nest`), so the existing auth middleware requires a valid token.
+  Missing/invalid token → 401 (unchanged middleware behavior).
 - Handler requires `principal.is_super_admin` (the Bootstrap principal already
   satisfies this); otherwise 403, mirroring `users.rs`.
-- If `is_admin_initialized()` is true → **409 Conflict** (`ApiError::Conflict`).
-- Else call `bootstrap_admin(...)` and return `201 Created` with the created
-  `User` (password hash is `skip_serializing`).
+- Validate input: non-empty username (trimmed) and password length ≥ 8;
+  otherwise 400 (`ApiError::BadRequest`). This is the only password policy for
+  now — anything stronger is out of scope.
+- If `is_admin_initialized()` is true → **409 Conflict** (`ApiError::Conflict`,
+  already defined in `src/api/error.rs`).
+- Else hash the password with `crate::auth::hash_password`, call
+  `bootstrap_admin(...)`, and return `201 Created` with the created `User`
+  (password hash is `skip_serializing`).
 
 `/v1/users` and its handlers are untouched.
 
 ### `me()` / `PrincipalView`
 
-Extend the Bootstrap response so the SPA can route deterministically without a
-separate status endpoint. Add `admin_initialized: bool` to the `Me` payload (or
-to the `Bootstrap` variant) in `src/domain/user.rs`, and populate it in
-`me_handler` (`src/api/auth.rs`) from `state.users.is_admin_initialized()`.
+Add `admin_initialized: bool` to the **`Me` struct itself** in
+`src/domain/user.rs` (not to the `Bootstrap` variant). `me_handler`
+(`src/api/auth.rs`) currently returns early with `PrincipalView::Bootstrap` in
+one branch and `PrincipalView::User` in another — populate `admin_initialized`
+from `state.users.is_admin_initialized()` in **both** branches so the field is
+always present regardless of principal kind. (After the operator logs in as the
+new user, `me()` returns the `User` variant, and the frontend still needs the
+flag to route correctly.)
 
 Rationale: with the token-in-URL flow, `me()` already succeeds for the admin
 token. Surfacing `admin_initialized` lets the frontend distinguish "needs setup"
@@ -125,19 +141,34 @@ Add `bootstrap(username, password)` to the `ApiClient` service: `POST
 On app load, read `token` from the URL query string. If present, store it via
 the existing `auth-store` (`setToken`) and strip it from the URL
 (`history.replaceState`) so the secret isn't left in the address bar / history.
+Residual risk: the token may still appear in server access logs / referrer for
+the initial request — acceptable for a host-local first-run flow, noted here so
+it isn't a surprise.
 
-### Routing (`web/src/routes/__root.tsx` + new `/setup` route)
+### Routing — sync gate vs async `me()`
 
-Current `beforeLoad` only checks `hasAuth()` and redirects to `/login`. Extend
-the gate to account for bootstrap:
+This is the subtle part. `beforeLoad` in `__root.tsx` is **synchronous** and only
+has access to `getToken()` (localStorage); it cannot read `me()`, which is an
+async React Query. So the bootstrap decision cannot live in `beforeLoad`. Split
+the responsibilities:
+
+1. **`beforeLoad` (sync, unchanged in spirit):** token-presence redirects only.
+   Allow `/login` and `/setup` without a token; redirect everything else to
+   `/login` when `!hasAuth()`. (Token-in-URL must be stored *before* this runs —
+   do it at module load / router creation so `getToken()` sees it.)
+2. **A top-level gate component** (rendered inside `Chrome`/root, using
+   `useAuth()`): once `meQuery` resolves, branch on the data:
+   - while `meQuery.isLoading` → render a loading state (no redirect).
+   - `isBootstrap && !admin_initialized` → `navigate('/setup')`.
+   - `admin_initialized` but Bootstrap principal (stale token, already set up) →
+     `navigate('/login')`.
+   - authenticated `User` → render the app.
+   Use `useEffect` + `router.navigate` for the redirects so they run after the
+   query settles, not during render.
 
 - New route `web/src/routes/setup.tsx` rendering the setup form.
-- Routing logic (via `useAuth()` / `me()`):
-  - `isBootstrap && !admin_initialized` → `/setup`.
-  - authenticated user → app.
-  - otherwise → `/login`.
-- The `/setup` route, like `/login`, renders without the app chrome
-  (`Chrome` in `__root.tsx` should treat `/setup` like `/login`).
+- `/setup`, like `/login`, renders without the app chrome (`Chrome` in
+  `__root.tsx` should treat `/setup` the same as `/login`).
 
 ### `/setup` page behavior
 
@@ -149,14 +180,19 @@ the gate to account for bootstrap:
   2. Invalidate the `me` query.
   3. Redirect to `/login`; the operator logs in with the new username/password
      to obtain a normal session token.
-- On 409 (already initialized): redirect to `/login`.
-- On 401: show an error indicating the token is missing/invalid.
+- Error handling branches on `ApiError.status` in the mutation's error handler
+  (`parseResponse` only special-cases 401/403; 409/400 surface as a generic
+  `ApiError` carrying `status`):
+  - `409` (already initialized) → redirect to `/login`.
+  - `401` → show "missing/invalid admin token".
+  - `400` → show the validation message (username/password rules).
 
 ## Error Handling Summary
 
 | Condition | Backend response | Frontend handling |
 |-----------|------------------|-------------------|
-| No/invalid token | 401 | Error message on `/setup`; route to `/login` |
+| Empty username / password < 8 | 400 | Show validation message |
+| No/invalid token | 401 | Error message on `/setup` |
 | Not super_admin | 403 | Error message |
 | Already initialized | 409 Conflict | Redirect to `/login` |
 | Success | 201 + `User` | Clear token, redirect to `/login` |
