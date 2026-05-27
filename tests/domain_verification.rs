@@ -324,6 +324,53 @@ async fn challenge_endpoint_404_for_unknown_token() {
 }
 
 // ---------------------------------------------------------------------------
+// Audit B1: challenge routes must NOT be behind the login rate limiter
+//
+// Let's Encrypt validates HTTP-01 from many distributed vantage points and
+// retries; a per-IP ~5/min login bucket would 429 and break issuance/renewal.
+// Issue far more than the login limit (5/60s) of rapid requests to each
+// well-known challenge route and assert NONE return 429. Unknown tokens return
+// 404, which still proves the request reached the handler un-throttled.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn challenge_routes_are_not_login_rate_limited() {
+    let store = make_store();
+    let app = build_app_with_verifier(store, Arc::new(FakeVerifier { ok: true }));
+
+    for uri in [
+        "/.well-known/acme-challenge/unknown-token",
+        "/.well-known/denia-challenge/unknown-token",
+    ] {
+        // 20 rapid requests >> the 5/60s login bucket. If either route were
+        // still behind rate_limit_login, requests 6+ would be 429.
+        for i in 0..20 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    http::Request::builder()
+                        .method(http::Method::GET)
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(
+                resp.status(),
+                http::StatusCode::TOO_MANY_REQUESTS,
+                "{uri} request #{i} was rate-limited (429); challenge routes must be un-throttled"
+            );
+            assert_eq!(
+                resp.status(),
+                http::StatusCode::NOT_FOUND,
+                "{uri} request #{i} expected 404 for unknown token"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test 8: verify re-renders traefik when route exists
 // ---------------------------------------------------------------------------
 
