@@ -196,18 +196,7 @@ impl NodeMetricsReader {
 }
 
 fn read_disk(path: &Path) -> Result<(u64, u64), NodeMetricsError> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let c_path =
-        CString::new(path.as_os_str().as_bytes()).map_err(|_| NodeMetricsError::Parse {
-            field: "disk path",
-            reason: "contains NUL byte".to_string(),
-        })?;
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
-    if ret != 0 {
-        return Err(NodeMetricsError::Io(std::io::Error::last_os_error()));
-    }
+    let stat = rustix::fs::statvfs(path).map_err(NodeMetricsError::Io)?;
     let block_size = stat.f_frsize as u64;
     let total = (stat.f_blocks as u64).saturating_mul(block_size);
     let available = (stat.f_bavail as u64).saturating_mul(block_size);

@@ -141,7 +141,8 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
         if !is_symlink {
             let mode = entry.header().mode()?;
             if mode != 0 {
-                let _ = fs::set_permissions(&safe_path, fs::Permissions::from_mode(mode));
+                let safe_mode = mode & 0o0777;
+                let _ = fs::set_permissions(&safe_path, fs::Permissions::from_mode(safe_mode));
             }
         }
     }
@@ -315,5 +316,67 @@ mod tests {
         let rootfs = Path::new("/tmp/test-rootfs");
         let result = safe_join(rootfs, Path::new("usr/bin/app")).unwrap();
         assert_eq!(result, Path::new("/tmp/test-rootfs/usr/bin/app"));
+    }
+
+    fn gz_layer_with_modes(dir: &Path, name: &str, entries: &[(&str, &[u8], u32)]) -> LayerBlob {
+        let mut tar = Builder::new(Vec::new());
+        for (path, data, mode) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(*mode);
+            h.set_cksum();
+            tar.append_data(&mut h, path, *data).unwrap();
+        }
+        let raw = tar.into_inner().unwrap();
+        let mut enc = GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&raw).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, enc.finish().unwrap()).unwrap();
+        LayerBlob {
+            digest: "sha256:test".into(),
+            compression: LayerCompression::Gzip,
+            path,
+        }
+    }
+
+    #[test]
+    fn strips_suid_sgid_sticky_bits() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        let layer = gz_layer_with_modes(
+            dir.path(),
+            "suid.tar.gz",
+            &[
+                ("suid_bin", b"#!/bin/sh", 0o4755),
+                ("sgid_bin", b"#!/bin/sh", 0o2755),
+                ("sticky_file", b"data", 0o1777),
+                ("normal", b"ok", 0o644),
+            ],
+        );
+        TarRootfsUnpacker::new().unpack(&[layer], &rootfs).unwrap();
+        let suid_mode = fs::metadata(rootfs.join("suid_bin"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(suid_mode & 0o7777, 0o755, "SUID bit should be stripped");
+        let sgid_mode = fs::metadata(rootfs.join("sgid_bin"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(sgid_mode & 0o7777, 0o755, "SGID bit should be stripped");
+        let sticky_mode = fs::metadata(rootfs.join("sticky_file"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(sticky_mode & 0o7777, 0o777, "sticky bit should be stripped");
+        let normal_mode = fs::metadata(rootfs.join("normal"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            normal_mode & 0o7777,
+            0o644,
+            "normal mode should be preserved"
+        );
     }
 }

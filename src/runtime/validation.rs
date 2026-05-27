@@ -56,5 +56,19 @@ pub(crate) fn validate_resource_limits(request: &RuntimeStartRequest) -> Result<
             reason: "memory_bytes must be greater than zero".to_string(),
         });
     }
+    if let Some(pids) = request.pids_max
+        && pids == 0
+    {
+        return Err(RuntimeError::InvalidResourceLimit {
+            reason: "pids_max must be greater than zero".to_string(),
+        });
+    }
+    if let Some(weight) = request.io_weight
+        && (weight == 0 || weight > 10000)
+    {
+        return Err(RuntimeError::InvalidResourceLimit {
+            reason: "io_weight must be between 1 and 10000".to_string(),
+        });
+    }
     Ok(())
 }

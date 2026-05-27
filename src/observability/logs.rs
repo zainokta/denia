@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::runtime::validation::validate_service_name;
+
 #[derive(Debug, Clone)]
 pub struct LogStore {
     dir: PathBuf,
@@ -17,6 +19,8 @@ impl LogStore {
     }
 
     pub fn append(&self, service_name: &str, line: &str) -> std::io::Result<()> {
+        validate_service_name(service_name)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         fs::create_dir_all(&self.dir)?;
         let mut file = OpenOptions::new()
             .create(true)
@@ -26,6 +30,8 @@ impl LogStore {
     }
 
     pub fn read_recent(&self, service_name: &str, limit: usize) -> std::io::Result<Vec<String>> {
+        validate_service_name(service_name)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         let mut content = String::new();
         OpenOptions::new()
             .read(true)

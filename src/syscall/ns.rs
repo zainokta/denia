@@ -9,7 +9,7 @@ use std::{
 
 use rustix::process::Signal;
 
-use crate::syscall::{SyscallError, caps, signal};
+use crate::syscall::{SyscallError, caps, seccomp, signal};
 
 /// Configuration for a namespaced one-shot or long-running process launch.
 ///
@@ -41,6 +41,12 @@ pub struct NamespaceConfig {
     pub mount_proc: bool,
     pub no_new_privs: bool,
     pub drop_bounding_caps: bool,
+    pub mask_proc: bool,
+    pub setup_dev: bool,
+    pub seccomp: bool,
+    pub max_pids: Option<u64>,
+    pub max_fds: Option<u64>,
+    pub max_procs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +80,12 @@ pub struct NativeLaunchPlan {
     pub proc_fs_type: CString,
     pub stdout_path: Option<CString>,
     pub stderr_path: Option<CString>,
+    pub mask_proc: bool,
+    pub setup_dev: bool,
+    pub seccomp: bool,
+    pub max_pids: Option<u64>,
+    pub max_fds: Option<u64>,
+    pub max_procs: Option<u64>,
 }
 
 impl NamespaceSetupPlan {
@@ -116,6 +128,12 @@ impl Default for NamespaceConfig {
             mount_proc: true,
             no_new_privs: true,
             drop_bounding_caps: true,
+            mask_proc: true,
+            setup_dev: true,
+            seccomp: true,
+            max_pids: Some(1024),
+            max_fds: Some(65536),
+            max_procs: Some(1024),
         }
     }
 }
@@ -171,6 +189,37 @@ impl NamespaceConfig {
     pub fn with_deferred_hardening(mut self) -> Self {
         self.no_new_privs = false;
         self.drop_bounding_caps = false;
+        self.seccomp = false;
+        self
+    }
+
+    pub fn with_mask_proc(mut self, mask: bool) -> Self {
+        self.mask_proc = mask;
+        self
+    }
+
+    pub fn with_setup_dev(mut self, setup: bool) -> Self {
+        self.setup_dev = setup;
+        self
+    }
+
+    pub fn with_seccomp(mut self, enable: bool) -> Self {
+        self.seccomp = enable;
+        self
+    }
+
+    pub fn with_max_pids(mut self, max: Option<u64>) -> Self {
+        self.max_pids = max;
+        self
+    }
+
+    pub fn with_max_fds(mut self, max: Option<u64>) -> Self {
+        self.max_fds = max;
+        self
+    }
+
+    pub fn with_max_procs(mut self, max: Option<u64>) -> Self {
+        self.max_procs = max;
         self
     }
 
@@ -261,6 +310,12 @@ impl NamespaceConfig {
             proc_fs_type,
             stdout_path,
             stderr_path,
+            mask_proc: self.mask_proc,
+            setup_dev: self.setup_dev,
+            seccomp: self.seccomp,
+            max_pids: self.max_pids,
+            max_fds: self.max_fds,
+            max_procs: self.max_procs,
         })
     }
 
@@ -619,8 +674,12 @@ fn child_setup_stage(stage: u8) -> &'static str {
         b'R' => "chroot",
         b'W' => "chdir workdir",
         b'p' => "mount proc",
+        b'D' => "setup /dev tmpfs",
+        b'm' => "mask /proc paths",
         b'N' => "set no_new_privs",
         b'B' => "drop capability bounding set",
+        b'L' => "apply resource limits",
+        b'S' => "install seccomp filter",
         b'E' => "execve",
         _ => "unknown setup stage",
     }
@@ -791,6 +850,14 @@ unsafe fn child_exec(
         unsafe { child_setup_fail(pipes, b'p') };
     }
 
+    if plan.setup_dev && unsafe { setup_dev_tmpfs() } < 0 {
+        unsafe { child_setup_fail(pipes, b'D') };
+    }
+
+    if plan.mask_proc && unsafe { mask_proc_paths() } < 0 {
+        unsafe { child_setup_fail(pipes, b'm') };
+    }
+
     if plan.setup.no_new_privs && !caps::try_set_no_new_privs() {
         unsafe { child_setup_fail(pipes, b'N') };
     }
@@ -798,8 +865,107 @@ unsafe fn child_exec(
         unsafe { child_setup_fail(pipes, b'B') };
     }
 
+    if unsafe { apply_rlimits(plan.max_pids, plan.max_fds, plan.max_procs) } < 0 {
+        unsafe { child_setup_fail(pipes, b'L') };
+    }
+
+    if plan.seccomp && seccomp::install_filter().is_err() {
+        unsafe { child_setup_fail(pipes, b'S') };
+    }
+
     unsafe { libc::execve(plan.program.as_ptr(), argv.as_ptr(), env.as_ptr()) };
     unsafe { child_setup_fail(pipes, b'E') };
+}
+
+unsafe fn setup_dev_tmpfs() -> libc::c_int {
+    unsafe {
+        if libc::mount(
+            c"tmpfs".as_ptr(),
+            c"/dev".as_ptr(),
+            c"tmpfs".as_ptr(),
+            libc::MS_NOSUID | libc::MS_NOEXEC,
+            c"mode=755,size=65536".as_ptr().cast(),
+        ) < 0
+        {
+            return -1;
+        }
+        create_dev_node(c"/dev/null", 1, 3, 0o666);
+        create_dev_node(c"/dev/zero", 1, 5, 0o666);
+        create_dev_node(c"/dev/full", 1, 7, 0o666);
+        create_dev_node(c"/dev/random", 1, 8, 0o666);
+        create_dev_node(c"/dev/urandom", 1, 9, 0o666);
+        create_dev_node(c"/dev/tty", 5, 0, 0o666);
+        let _ = libc::mkdir(c"/dev/pts".as_ptr(), 0o755);
+        let _ = libc::mkdir(c"/dev/shm".as_ptr(), 0o1777);
+    }
+    0
+}
+
+unsafe fn create_dev_node(path: &std::ffi::CStr, major: u32, minor: u32, mode: libc::mode_t) {
+    unsafe {
+        let dev = libc::makedev(major, minor);
+        if libc::mknod(path.as_ptr(), libc::S_IFCHR | mode, dev) < 0 {
+            let _ = libc::symlink(c"/dev/null".as_ptr(), path.as_ptr());
+        }
+    }
+}
+
+unsafe fn mask_proc_paths() -> libc::c_int {
+    let targets: &[&std::ffi::CStr] = &[
+        c"/proc/sys",
+        c"/proc/sysrq-trigger",
+        c"/proc/irq",
+        c"/proc/bus",
+        c"/proc/fs",
+        c"/proc/latency_stats",
+        c"/proc/timer_list",
+        c"/proc/sched_debug",
+    ];
+    unsafe {
+        for &target in targets {
+            let _ = libc::mount(
+                c"/dev/null".as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND | libc::MS_REC,
+                std::ptr::null(),
+            );
+        }
+    }
+    0
+}
+
+unsafe fn apply_rlimits(
+    _max_pids: Option<u64>,
+    max_fds: Option<u64>,
+    max_procs: Option<u64>,
+) -> libc::c_int {
+    unsafe {
+        if let Some(max) = max_fds {
+            let rlim = libc::rlimit {
+                rlim_cur: max,
+                rlim_max: max,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) < 0 {
+                return -1;
+            }
+        }
+        if let Some(max) = max_procs {
+            let rlim = libc::rlimit {
+                rlim_cur: max,
+                rlim_max: max,
+            };
+            if libc::setrlimit(libc::RLIMIT_NPROC, &rlim) < 0 {
+                return -1;
+            }
+        }
+        let core_rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        let _ = libc::setrlimit(libc::RLIMIT_CORE, &core_rlim);
+    }
+    0
 }
 
 struct ChildStdio {

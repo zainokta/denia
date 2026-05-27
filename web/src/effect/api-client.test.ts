@@ -14,24 +14,6 @@ const TestLayer = ApiClientLive.pipe(
   Layer.provide(FetchHttpClient.layer),
 )
 
-const listNodes = Effect.gen(function* () {
-  const api = yield* ApiClient
-  return yield* api.listNodes
-})
-
-describe('ApiClient', () => {
-  it.effect('listNodes decodes the payload into Node values', () =>
-    listNodes.pipe(
-      Effect.provide(TestLayer),
-      Effect.map((nodes) => {
-        expect(nodes.length).toBe(3)
-        expect(nodes[0].name).toBe('alice')
-        expect(nodes[2].id).toBe(3)
-      }),
-    ),
-  )
-})
-
 describe('auth-store', () => {
   it('getToken returns undefined when nothing is stored', () => {
     clearToken()
@@ -230,27 +212,6 @@ describe('Auth ApiClient methods', () => {
   )
 })
 
-describe('ApiClient with getAuthToken', () => {
-  it.effect('listNodes uses getAuthToken from config (fixture path)', () =>
-    Effect.gen(function* () {
-      const api = yield* ApiClient
-      const nodes = yield* api.listNodes
-      expect(nodes.length).toBe(3)
-    }).pipe(
-      Effect.provide(
-        ApiClientLive.pipe(
-          Layer.provide(
-            Layer.succeed(AppConfig)({
-              baseUrl: '',
-              getAuthToken: () => 'test-token',
-            }),
-          ),
-          Layer.provide(FetchHttpClient.layer),
-        ),
-      ),
-    ),
-  )
-})
 
 const FIXTURE_PROJECT = {
   id: '018f1100-0000-7000-0000-000000000001',

@@ -33,9 +33,11 @@ pub async fn challenge_handler(
     State(state): State<AppState>,
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
-    match state.domains.get_service_domain_by_token(&token)? {
-        Some(_) => Ok(([(header::CONTENT_TYPE, "text/plain")], token).into_response()),
-        None => Err(ApiError::NotFound("challenge token not found".into())),
+    let found = state.domains.get_service_domain_by_token(&token)?;
+    if found.is_some() {
+        Ok(([(header::CONTENT_TYPE, "text/plain")], token).into_response())
+    } else {
+        Err(ApiError::NotFound("not found".into()))
     }
 }
 

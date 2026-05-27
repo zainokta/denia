@@ -1,4 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
@@ -10,6 +9,8 @@ use crate::repo::error::RepoError;
 pub enum StateError {
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("uuid error: {0}")]
@@ -73,12 +74,24 @@ pub struct SqliteStore {
 impl SqliteStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, StateError> {
         let path = path.as_ref();
-        let connection = Connection::open(path)?;
-        apply_sqlite_pragmas(&connection)?;
         #[cfg(unix)]
         {
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            use std::os::unix::fs::OpenOptionsExt;
+            let _file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(path)?;
         }
+        #[cfg(not(unix))]
+        {
+            if !path.exists() {
+                std::fs::File::create(path)?;
+            }
+        }
+        let connection = Connection::open(path)?;
+        apply_sqlite_pragmas(&connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -103,10 +116,11 @@ impl SqliteStore {
 
     pub fn schema_version(&self) -> Result<i64, StateError> {
         let connection = self.connection()?;
-        let v = connection
-            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
-            .unwrap_or(0);
-        Ok(v)
+        match connection.query_row("SELECT version FROM schema_version", [], |row| row.get(0)) {
+            Ok(v) => Ok(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(e) => Err(StateError::Sqlite(e)),
+        }
     }
 
     pub(crate) fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StateError> {

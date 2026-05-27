@@ -4,7 +4,7 @@ mod fs_helpers;
 mod linux;
 mod plan;
 mod runtime_trait;
-mod validation;
+pub(crate) mod validation;
 
 pub use error::RuntimeError;
 pub use fake::FakeRuntime;

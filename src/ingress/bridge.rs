@@ -7,6 +7,7 @@ use tokio::{
     net::{TcpListener, UnixStream},
     sync::{Mutex, oneshot},
     task::JoinHandle,
+    time::{Duration, timeout},
 };
 
 use crate::access_log::{AccessEntry, AccessLogStore, parse_request_line, parse_status_line};
@@ -151,7 +152,11 @@ pub struct LoopbackBridge {
     socket_path: PathBuf,
     service_name: String,
     access_log: AccessLogStore,
+    connection_sem: Arc<tokio::sync::Semaphore>,
 }
+
+const BRIDGE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_CONCURRENT_PER_BRIDGE: usize = 256;
 
 impl LoopbackBridge {
     pub async fn bind(port: u16, socket_path: impl Into<PathBuf>) -> Result<Self, BridgeError> {
@@ -170,6 +175,7 @@ impl LoopbackBridge {
             socket_path: socket_path.into(),
             service_name,
             access_log,
+            connection_sem: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PER_BRIDGE)),
         })
     }
 
@@ -181,11 +187,18 @@ impl LoopbackBridge {
     }
 
     pub async fn serve_one(&self) -> Result<(), BridgeError> {
+        let permit = self
+            .connection_sem
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| BridgeError::Io(std::io::Error::other("semaphore closed")))?;
         let (tcp, _) = self.listener.accept().await?;
         let unix = UnixStream::connect(&self.socket_path).await?;
         let log = self.access_log.clone();
         let service = self.service_name.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             let _ = tee_proxy(tcp, unix, service, log).await;
         });
         Ok(())
@@ -222,7 +235,10 @@ async fn tee_proxy(
     let req_done = async {
         loop {
             let mut byte = [0u8; 1];
-            let n = tcp_read.read(&mut byte).await?;
+            let n = match timeout(BRIDGE_IDLE_TIMEOUT, tcp_read.read(&mut byte)).await {
+                Ok(Ok(n)) => n,
+                _ => break,
+            };
             if n == 0 {
                 break;
             }
@@ -241,7 +257,10 @@ async fn tee_proxy(
         }
         let mut rest = [0u8; 8192];
         loop {
-            let n = tcp_read.read(&mut rest).await?;
+            let n = match timeout(BRIDGE_IDLE_TIMEOUT, tcp_read.read(&mut rest)).await {
+                Ok(Ok(n)) => n,
+                _ => break,
+            };
             if n == 0 {
                 break;
             }
@@ -258,7 +277,10 @@ async fn tee_proxy(
     let resp_done = async {
         loop {
             let mut byte = [0u8; 1];
-            let n = unix_read.read(&mut byte).await?;
+            let n = match timeout(BRIDGE_IDLE_TIMEOUT, unix_read.read(&mut byte)).await {
+                Ok(Ok(n)) => n,
+                _ => break,
+            };
             if n == 0 {
                 break;
             }
@@ -277,7 +299,10 @@ async fn tee_proxy(
         }
         let mut rest = [0u8; 8192];
         loop {
-            let n = unix_read.read(&mut rest).await?;
+            let n = match timeout(BRIDGE_IDLE_TIMEOUT, unix_read.read(&mut rest)).await {
+                Ok(Ok(n)) => n,
+                _ => break,
+            };
             if n == 0 {
                 break;
             }

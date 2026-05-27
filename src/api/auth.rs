@@ -18,6 +18,10 @@ pub fn public_router() -> Router<AppState> {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/auth/logout", post(logout_handler))
+        .route(
+            "/auth/sessions",
+            get(list_sessions_handler).delete(revoke_all_sessions_handler),
+        )
         .route("/me", get(me_handler))
 }
 
@@ -89,4 +93,40 @@ async fn me_handler(
         is_super_admin: principal.is_super_admin,
         memberships,
     }))
+}
+
+async fn list_sessions_handler(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let user_id = principal
+        .user_id
+        .ok_or(ApiError::Conflict("no user".to_string()))?;
+    let sessions = state.users.list_sessions(user_id)?;
+    let list: Vec<_> = sessions
+        .into_iter()
+        .map(|s| {
+            let prefix = if s.token.len() > 8 {
+                &s.token[..8]
+            } else {
+                &s.token
+            };
+            serde_json::json!({
+                "id": prefix,
+                "expires_at": s.expires_at.to_rfc3339(),
+            })
+        })
+        .collect();
+    Ok(Json(list))
+}
+
+async fn revoke_all_sessions_handler(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = principal
+        .user_id
+        .ok_or(ApiError::Conflict("no user".to_string()))?;
+    let count = state.users.delete_all_sessions(user_id)?;
+    Ok(Json(serde_json::json!({"revoked": count})))
 }

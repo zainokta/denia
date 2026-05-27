@@ -18,7 +18,7 @@ use crate::{
     config::AppConfig,
     deploy::{DeploymentRepos, SharedRoutes},
     health::{FakeHealthChecker, HealthChecker},
-    rate_limit::{LoginRateLimiter, rate_limit_login},
+    rate_limit::{AdminRateLimiter, LoginRateLimiter, rate_limit_admin, rate_limit_login},
     repo::sqlite::{
         SqliteCredentialRepo, SqliteDeploymentRepo, SqliteDomainRepo, SqliteJobRepo,
         SqliteProjectRepo, SqliteRegistryRepo, SqliteServiceRepo, SqliteTokenRepo, SqliteUserRepo,
@@ -261,6 +261,8 @@ impl AppState {
 
 pub fn build_router(state: AppState) -> Router {
     let rate_limiter = LoginRateLimiter::default();
+    let admin_rate_limiter = AdminRateLimiter::default();
+    let challenge_rate_limiter = LoginRateLimiter::new(20, 60);
     let auth_public = api::auth::public_router().route_layer(middleware::from_fn_with_state(
         rate_limiter,
         rate_limit_login,
@@ -279,15 +281,23 @@ pub fn build_router(state: AppState) -> Router {
         .merge(api::registries::router())
         .merge(api::observability::router())
         .merge(api::ingress::router())
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .route_layer(middleware::from_fn_with_state(
+            admin_rate_limiter,
+            rate_limit_admin,
+        ));
 
     Router::new()
         .route("/healthz", get(api::health::healthz))
         .route(
             "/.well-known/denia-challenge/{token}",
-            get(api::domains::challenge_handler),
+            get(api::domains::challenge_handler).route_layer(middleware::from_fn_with_state(
+                challenge_rate_limiter,
+                rate_limit_login,
+            )),
         )
         .nest("/v1", auth_public.merge(authed))
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(security_headers))
         .fallback(crate::web::static_handler)
         .with_state(state)
@@ -307,6 +317,20 @@ async fn security_headers(request: Request, next: Next) -> Response {
     headers.insert(
         header::REFERRER_POLICY,
         header::HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    headers.insert(
+        header::STRICT_TRANSPORT_SECURITY,
+        header::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        ),
+    );
+    headers.insert(
+        header::HeaderName::from_static("cross-origin-resource-policy"),
+        header::HeaderValue::from_static("same-origin"),
     );
     response
 }

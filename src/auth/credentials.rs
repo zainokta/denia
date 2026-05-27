@@ -8,8 +8,8 @@ use thiserror::Error;
 
 use crate::state::StateError;
 
-const ARGON2_MEMORY: u32 = 19456;
-const ARGON2_ITERATIONS: u32 = 2;
+const ARGON2_MEMORY: u32 = 47104;
+const ARGON2_ITERATIONS: u32 = 1;
 const ARGON2_PARALLELISM: u32 = 1;
 
 #[derive(Debug, Error)]

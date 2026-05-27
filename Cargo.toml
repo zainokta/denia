@@ -17,7 +17,7 @@ oci-client = "0.17.0"
 rand = "0.10.1"
 rusqlite = { version = "0.39", features = ["bundled"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
-rustix = { version = "1.1.4", features = ["fs", "mount", "pipe", "process", "thread"] }
+rustix = { version = "1.1.4", features = ["event", "fs", "io", "mount", "net", "pipe", "process", "thread"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11.0"
@@ -29,7 +29,7 @@ tokio-stream = "0.1"
 tower = "0.5"
 uuid = { version = "1", features = ["serde", "v7"] }
 zstd = "0.13.3"
-reqwest = { version = "0.13.3", default-features = false, features = ["http2"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["http2", "rustls"] }
 subtle = "2"
 
 [features]

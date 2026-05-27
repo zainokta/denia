@@ -141,6 +141,9 @@ where
                 cpu_millis: limits.cpu_millis,
                 memory_bytes: limits.memory_bytes,
                 env,
+                pids_max: None,
+                memory_swap_max: None,
+                io_weight: None,
             })
             .await?;
 
