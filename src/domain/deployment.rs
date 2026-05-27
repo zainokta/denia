@@ -68,6 +68,27 @@ pub struct RuntimeStartRequest {
     pub memory_swap_max: Option<u64>,
     #[serde(default)]
     pub io_weight: Option<u64>,
+    #[serde(default)]
+    pub replica_index: u32,
+}
+
+impl RuntimeStartRequest {
+    pub fn instance_id(&self) -> RuntimeInstanceId {
+        RuntimeInstanceId {
+            service_name: self.service_name.clone(),
+            replica_index: self.replica_index,
+        }
+    }
+}
+
+/// Identity of a single running replica of a service.
+///
+/// A service may run multiple replicas (autoscaling); each replica is keyed by
+/// its `service_name` and zero-based `replica_index`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RuntimeInstanceId {
+    pub service_name: String,
+    pub replica_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,4 +99,6 @@ pub struct RuntimeStatus {
     pub pid: Option<u32>,
     pub cgroup_path: std::path::PathBuf,
     pub socket_path: std::path::PathBuf,
+    #[serde(default)]
+    pub replica_index: u32,
 }

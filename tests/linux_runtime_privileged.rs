@@ -1,6 +1,6 @@
 use denia::{
     artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource},
-    domain::RuntimeStartRequest,
+    domain::{RuntimeInstanceId, RuntimeStartRequest},
     runtime::{LinuxRuntime, LinuxRuntimeProcessSpec, Runtime},
     syscall::{
         self,
@@ -397,6 +397,7 @@ async fn linux_runtime_start_uses_native_namespace_and_cgroup_gate() {
             pids_max: None,
             memory_swap_max: None,
             io_weight: None,
+            replica_index: 0,
         })
         .await
         .expect("runtime start");
@@ -414,7 +415,10 @@ async fn linux_runtime_start_uses_native_namespace_and_cgroup_gate() {
     );
     wait_for_path(&status.socket_path);
     runtime
-        .stop("true-service")
+        .stop(&RuntimeInstanceId {
+            service_name: "true-service".to_string(),
+            replica_index: 0,
+        })
         .await
         .expect("stop runtime process");
     assert!(

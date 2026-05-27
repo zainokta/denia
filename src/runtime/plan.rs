@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::runtime::error::RuntimeError;
 use crate::syscall::ns::NamespaceConfig;
@@ -20,8 +21,15 @@ pub struct LinuxRuntimePlan {
     pub socket_path: PathBuf,
     pub guest_socket_path: String,
     pub cgroup_path: PathBuf,
+    pub deployment_id: Uuid,
     pub service_dir: PathBuf,
     pub deployment_dir: PathBuf,
+    /// Per-replica overlay root (`{service_id}/{deployment_id}/{replica_index}`).
+    /// Holds the writable `upper`, overlay `work`, and `merged` mountpoint.
+    pub replica_dir: PathBuf,
+    pub upper: PathBuf,
+    pub work: PathBuf,
+    pub merged: PathBuf,
 }
 
 #[derive(Debug)]

@@ -5,7 +5,7 @@ use denia::{
     deploy::{DeploymentCoordinator, DeploymentPlan, DeploymentRepos},
     domain::{
         DeploymentStatus, DomainStatus, ExternalImageSource, HealthCheck, ResourceLimits,
-        RuntimeStartRequest, ServiceConfig, ServiceDomain, ServiceSource,
+        RuntimeInstanceId, RuntimeStartRequest, ServiceConfig, ServiceDomain, ServiceSource,
     },
     health::FakeHealthChecker,
     repo::sqlite::{SqliteDeploymentRepo, SqliteDomainRepo, SqliteProjectRepo, SqliteRegistryRepo},
@@ -89,6 +89,7 @@ async fn fake_runtime_starts_and_stops_service() {
             pids_max: None,
             memory_swap_max: None,
             io_weight: None,
+            replica_index: 0,
         })
         .await
         .expect("started");
@@ -96,7 +97,13 @@ async fn fake_runtime_starts_and_stops_service() {
     assert_eq!(status.service_name, "web");
     assert_eq!(status.state, "running");
 
-    runtime.stop(&status.service_name).await.expect("stopped");
+    runtime
+        .stop(&RuntimeInstanceId {
+            service_name: status.service_name.clone(),
+            replica_index: 0,
+        })
+        .await
+        .expect("stopped");
     assert_eq!(runtime.stopped_services(), vec!["web"]);
 }
 
