@@ -39,11 +39,13 @@ separated internally so they can split later if a multi-node ADR is accepted.
   keyed off the globally-unique `service_id`, so the same service name across
   projects is isolated on disk. Host root is the trust boundary; agent runs
   rootful.
-- **Ingress** — Traefik file provider. Denia owns the loopback-bridge listeners
-  that forward Traefik traffic to per-workload Unix sockets. Per-service TLS
-  (`tls_enabled`) emits ACME-resolved `websecure` routers with HTTP→HTTPS
-  redirect (ADR-007). The bridge tees the first HTTP request line and response
-  status into an in-process access log (ADR-009).
+- **Ingress** — Denia runs and supervises its own Traefik (OCI-pulled, host
+  process) via the file provider; see [Managed Traefik](#managed-traefik) below.
+  Denia owns the loopback-bridge listeners that forward Traefik traffic to
+  per-workload Unix sockets. Per-service TLS (`tls_enabled`) emits
+  ACME-resolved `websecure` routers with HTTP→HTTPS redirect (ADR-007). The
+  bridge tees the first HTTP request line and response status into an in-process
+  access log (ADR-009).
 - **RBAC** — Users, sessions, API tokens, and project-scoped roles
   (Viewer/Operator/Admin) plus a bootstrap super-admin. Every `/v1` route
   resolves a `Principal` and enforces a project-scoped role minimum (ADR-008).
@@ -183,7 +185,11 @@ All configuration is environment-driven (`src/config.rs`).
 | `DENIA_SOCKET_PROXY_BINARY` | current executable | Binary injected into workload rootfs as the socket proxy |
 | `DENIA_CGROUP_ROOT` | `/sys/fs/cgroup/denia` | Root for Denia-owned workload cgroups |
 | `DENIA_BRIDGE_START_PORT` | `19000` | First loopback bridge port allocated for Traefik targets |
-| `DENIA_TRAEFIK_DYNAMIC_CONFIG` | `/etc/traefik/dynamic/denia.yml` | Generated Traefik file-provider config |
+| `DENIA_TRAEFIK_IMAGE` | `docker.io/library/traefik:v3.3` | OCI image Denia pulls and runs as the edge proxy |
+| `DENIA_ACME_EMAIL` | — (required when any service uses TLS) | Email for the ACME `le` resolver; omit on nodes with no TLS service |
+| `DENIA_HTTP_PORT` | `80` | Traefik `web` entrypoint port |
+| `DENIA_HTTPS_PORT` | `443` | Traefik `websecure` entrypoint port |
+| `DENIA_TRAEFIK_DYNAMIC_CONFIG` | `<data_dir>/traefik/dynamic/denia.yml` | Generated Traefik file-provider config (override for advanced setups) |
 | `DENIA_ACME_RESOLVER` | `le` | Traefik certResolver name used for `tls_enabled` services |
 | `DENIA_CONTROL_DOMAIN` | — | Optional Traefik router for the control plane itself |
 | `DENIA_CONTROL_TLS` | `false` | TLS on the control-plane router |
@@ -196,6 +202,29 @@ Derived paths: `runtime/`, `artifacts/`, `logs/`, and SOPS files under
 as project-scoped `/v1/projects/{project_id}/registries` records that point at
 SOPS secret refs; Denia no longer has `ecr`/`gar` Cargo features or
 `DENIA_ECR_*` / `DENIA_GAR_*` process-wide registry auth variables.
+
+The dynamic Traefik config path default moved from `/etc/traefik/dynamic/denia.yml`
+to `<data_dir>/traefik/dynamic/denia.yml`. `DENIA_TRAEFIK_DYNAMIC_CONFIG` still
+overrides the path for advanced setups.
+
+## Managed Traefik
+
+Denia pulls the Traefik OCI image in-process at boot, runs the binary as a
+supervised host child process (no namespaces) on `:80`/`:443`, generates
+Traefik's static config (entrypoints, file provider, ACME resolver `le`), and
+keeps the dynamic config current via the file provider. Crash-restart uses
+exponential backoff; graceful shutdown sends SIGTERM.
+
+Management is unconditional — there is no opt-out flag and no external-Traefik
+mode. The operator must not run a separate Traefik on the same node.
+
+**Upgrade note:** If you previously installed Traefik manually, **stop it before
+starting this version of Denia.** Denia now owns `:80` and `:443`; a conflicting
+Traefik process causes a fatal port-in-use error logged to
+`<log_dir>/traefik.log`. The dynamic-config path also moves from
+`/etc/traefik/dynamic/denia.yml` to `<data_dir>/traefik/dynamic/denia.yml`.
+
+See ADR-016 for the full design rationale and known v1 limitations.
 
 ## API
 
@@ -289,7 +318,8 @@ per-aggregate SQLite repositories.
   `006` projects + versioned migrations, `007` ingress + TLS, `008`
   project-scoped RBAC, `009` observability, `010` jobs scheduler, `011`
   in-process OCI acquisition, `012` `src/` modularization, `013` domain
-  verification, `014` per-service registry, `015` streaming OCI layer staging.
+  verification, `014` per-service registry, `015` streaming OCI layer staging,
+  `016` managed Traefik.
 - `docs/superpowers/specs/` and `docs/superpowers/plans/` — design specs and
   implementation plans used to track active backend and console work.
 - `CLAUDE.md` — agent/contributor guidelines.
