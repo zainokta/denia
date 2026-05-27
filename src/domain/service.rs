@@ -13,6 +13,34 @@ pub struct ResourceLimits {
     pub memory_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutoscalePolicy {
+    pub min_replicas: u32,
+    pub max_replicas: u32,
+    pub target_cpu_pct: u8,
+    pub target_mem_pct: Option<u8>,
+    pub scale_down_cooldown_s: u32,
+    pub idle_timeout_s: u32,
+}
+
+impl AutoscalePolicy {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if self.max_replicas < 1 || self.min_replicas > self.max_replicas {
+            return Err(DomainError::InvalidAutoscale("replica bounds".into()));
+        }
+        let pct_ok = |p: u8| (1..=100).contains(&p);
+        if !pct_ok(self.target_cpu_pct) || self.target_mem_pct.is_some_and(|p| !pct_ok(p)) {
+            return Err(DomainError::InvalidAutoscale("target percent".into()));
+        }
+        if self.idle_timeout_s < self.scale_down_cooldown_s {
+            return Err(DomainError::InvalidAutoscale(
+                "idle_timeout < cooldown".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
@@ -161,6 +189,8 @@ pub struct ServiceConfig {
     pub env: Vec<(String, String)>,
     #[serde(default)]
     pub tls_enabled: bool,
+    #[serde(default)]
+    pub autoscale: Option<AutoscalePolicy>,
 }
 
 impl ServiceConfig {
@@ -207,6 +237,7 @@ impl ServiceConfig {
             resource_limits,
             env,
             tls_enabled: false,
+            autoscale: None,
         })
     }
 
@@ -259,6 +290,45 @@ mod tests {
         );
         let cfg: ServiceConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg.id, id);
+    }
+
+    #[test]
+    fn autoscale_policy_validates_bounds() {
+        let ok = AutoscalePolicy {
+            min_replicas: 0,
+            max_replicas: 3,
+            target_cpu_pct: 80,
+            target_mem_pct: Some(75),
+            scale_down_cooldown_s: 300,
+            idle_timeout_s: 600,
+        };
+        assert!(ok.validate().is_ok());
+        assert!(
+            AutoscalePolicy {
+                min_replicas: 5,
+                max_replicas: 2,
+                ..ok.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            AutoscalePolicy {
+                idle_timeout_s: 100,
+                scale_down_cooldown_s: 300,
+                ..ok.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            AutoscalePolicy {
+                target_cpu_pct: 0,
+                ..ok.clone()
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
