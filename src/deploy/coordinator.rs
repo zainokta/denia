@@ -339,10 +339,14 @@ where
                 .lock()
                 .map_err(|_| DeployError::RoutesLockPoisoned)?;
             routes.insert(
-                route_key,
+                route_key.clone(),
                 RouteSpec {
                     route_key: format!("svc-{}", service.id),
                     service_name: service.name.clone(),
+                    // Proxy pool lookup key — MUST equal the `add_replica` key
+                    // above (`service.id.to_string()`) so the Pingora hot path
+                    // resolves Host -> route.service_id -> pool hit (C1).
+                    service_id: route_key,
                     domains: hostnames,
                     tls: service.tls_enabled,
                 },

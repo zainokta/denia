@@ -254,6 +254,7 @@ fn route_table_resolves_verified_host_to_service() {
         .try_upsert(RouteSpec {
             route_key: "svc-web".to_string(),
             service_name: "web".to_string(),
+            service_id: "svc-web".to_string(),
             domains: vec!["web.example.test".to_string()],
             tls: false,
         })

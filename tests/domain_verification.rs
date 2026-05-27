@@ -398,6 +398,7 @@ async fn verify_applies_routes_when_entry_exists() {
             RouteSpec {
                 route_key: format!("svc-{}", service.id),
                 service_name: service.name.clone(),
+                service_id: service.id.to_string(),
                 domains: vec![],
                 tls: false,
             },
