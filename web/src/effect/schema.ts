@@ -46,6 +46,7 @@ export const ProjectMembers = Schema.Array(ProjectMember)
 export class Me extends Schema.Class<Me>('Me')({
   principal: PrincipalView,
   is_super_admin: Schema.Boolean,
+  admin_initialized: Schema.Boolean,
   memberships: Schema.Array(Membership),
 }) {}
 

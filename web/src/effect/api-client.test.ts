@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from '@effect/vitest'
 import { Effect, Layer, Schema } from 'effect'
-import { FetchHttpClient } from 'effect/unstable/http'
+import { FetchHttpClient, HttpClient, HttpClientResponse } from 'effect/unstable/http'
 import { ApiClient, ApiClientLive } from './api-client'
 import { AppConfig } from './config'
 import { ApiError } from './errors'
@@ -129,6 +129,7 @@ describe('Auth schema', () => {
         user: { id: 1, username: 'alice', created_at: '2026-01-01T00:00:00Z' },
       },
       is_super_admin: false,
+      admin_initialized: true,
       memberships: [{ project_id: 'p1', role: 'operator' }],
     }).pipe(
       Effect.map((me) => {
@@ -147,6 +148,7 @@ describe('Auth schema', () => {
     Schema.decodeUnknownEffect(Me)({
       principal: { kind: 'bootstrap' },
       is_super_admin: true,
+      admin_initialized: false,
       memberships: [],
     }).pipe(
       Effect.map((me) => {
@@ -272,6 +274,7 @@ const mockApi = (success = true) =>
     me: emptyApi() as never,
     listUsers: emptyApi() as never,
     createUser: ((_u: string, _p: string) => emptyApi()) as never,
+    bootstrap: ((_u: string, _p: string) => emptyApi()) as never,
     deleteUser: ((_id: number) => emptyApi()) as never,
     listApiTokens: emptyApi() as never,
     createApiToken: ((_n: string) => emptyApi()) as never,
@@ -420,6 +423,7 @@ describe('ApiClient jobs', () => {
     me: emptyApi() as never,
     listUsers: emptyApi() as never,
     createUser: ((_u: string, _p: string) => emptyApi()) as never,
+    bootstrap: ((_u: string, _p: string) => emptyApi()) as never,
     deleteUser: ((_id: number) => emptyApi()) as never,
     listApiTokens: emptyApi() as never,
     createApiToken: ((_n: string) => emptyApi()) as never,
@@ -721,6 +725,7 @@ const mockIngressApi = () =>
     me: emptyApi() as never,
     listUsers: emptyApi() as never,
     createUser: ((_u: string, _p: string) => emptyApi()) as never,
+    bootstrap: ((_u: string, _p: string) => emptyApi()) as never,
     deleteUser: ((_id: number) => emptyApi()) as never,
     listApiTokens: emptyApi() as never,
     createApiToken: ((_n: string) => emptyApi()) as never,
@@ -784,6 +789,47 @@ describe('Ingress ApiClient methods', () => {
   )
 })
 
+describe('ApiClient bootstrap', () => {
+  const BOOTSTRAP_USER = {
+    id: 1,
+    username: 'root',
+    created_at: '2026-05-27T00:00:00Z',
+  }
+
+  // Stub HttpClient that answers POST /v1/bootstrap with a 201 + User JSON.
+  const StubHttp = Layer.succeed(HttpClient.HttpClient)(
+    HttpClient.make((request) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(JSON.stringify(BOOTSTRAP_USER), {
+            status: 201,
+            headers: { 'content-type': 'application/json' },
+          }),
+        ),
+      ),
+    ),
+  )
+
+  const BootstrapLayer = ApiClientLive.pipe(
+    Layer.provide(
+      Layer.succeed(AppConfig)({
+        baseUrl: 'http://denia.test',
+        getAuthToken: () => undefined,
+      }),
+    ),
+    Layer.provide(StubHttp),
+  )
+
+  it.effect('bootstrap POSTs and decodes the created User', () =>
+    Effect.gen(function* () {
+      const api = yield* ApiClient
+      const user = yield* api.bootstrap('root', 'supersecret')
+      expect(user.username).toBe('root')
+    }).pipe(Effect.provide(BootstrapLayer)),
+  )
+})
+
 describe('putService', () => {
   const FIXTURE_SVC = {
     id: 1,
@@ -809,6 +855,7 @@ describe('putService', () => {
           me: emptyApi() as never,
           listUsers: emptyApi() as never,
           createUser: ((_u: string, _p: string) => emptyApi()) as never,
+          bootstrap: ((_u: string, _p: string) => emptyApi()) as never,
           deleteUser: ((_id: number) => emptyApi()) as never,
           listApiTokens: emptyApi() as never,
           createApiToken: ((_n: string) => emptyApi()) as never,
