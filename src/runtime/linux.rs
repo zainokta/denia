@@ -9,7 +9,9 @@ use std::{
 use async_trait::async_trait;
 
 use crate::artifacts::ArtifactKind;
-use crate::domain::{JobOutcome, JobRunRequest, RuntimeStartRequest, RuntimeStatus};
+use crate::domain::{
+    JobOutcome, JobRunRequest, RuntimeInstanceId, RuntimeStartRequest, RuntimeStatus,
+};
 use crate::runtime::error::RuntimeError;
 use crate::runtime::fs_helpers::{
     cpu_max, create_dir_all, create_runtime_directory, exit_code_from_process_status, path_io,
@@ -25,7 +27,7 @@ use crate::runtime::validation::{
     validate_process_spec, validate_resource_limits, validate_service_name,
 };
 use crate::syscall::chown;
-use crate::syscall::ns::{NamespaceConfig, spawn_namespaced_process};
+use crate::syscall::ns::{NamespaceConfig, OverlaySpec, RoBind, spawn_namespaced_process};
 use crate::syscall::signal;
 
 #[derive(Debug, Clone)]
@@ -37,7 +39,7 @@ pub struct LinuxRuntime {
     socket_proxy_source: PathBuf,
     userns_base: u32,
     userns_size: u32,
-    children: Arc<Mutex<HashMap<String, TrackedChild>>>,
+    children: Arc<Mutex<HashMap<RuntimeInstanceId, TrackedChild>>>,
 }
 
 pub(crate) const SOCKET_PROXY_TARGET: &str = "/.denia/socket-proxy";
@@ -131,11 +133,21 @@ impl LinuxRuntime {
 
         let service_dir = self.runtime_dir.join(request.service_id.to_string());
         let deployment_dir = service_dir.join(request.deployment_id.to_string());
-        let socket_path = rootfs_path.join(GUEST_SERVICE_SOCKET.trim_start_matches('/'));
+        let replica_dir = deployment_dir.join(request.replica_index.to_string());
+        let upper = replica_dir.join("upper");
+        let work = replica_dir.join("work");
+        let merged = replica_dir.join("merged");
+        // The socket-proxy creates the guest socket at GUEST_SERVICE_SOCKET, which
+        // lives inside the overlay. Overlay writes land in `upper` (host-visible),
+        // whereas `merged` is private to the child's mount namespace. The host-side
+        // socket path used by readiness waits, status, and the bridge must therefore
+        // be the upper-side path, not rootfs/ nor merged/.
+        let socket_path = upper.join(GUEST_SERVICE_SOCKET.trim_start_matches('/'));
         let cgroup_path = self
             .cgroup_root
             .join(request.service_id.to_string())
-            .join(request.deployment_id.to_string());
+            .join(request.deployment_id.to_string())
+            .join(request.replica_index.to_string());
         let mut child_argv = vec![
             SOCKET_PROXY_TARGET.to_string(),
             "--listen".to_string(),
@@ -145,7 +157,26 @@ impl LinuxRuntime {
             "--".to_string(),
         ];
         child_argv.extend(process.argv);
-        let namespace = NamespaceConfig::new(rootfs_path.clone(), child_argv.clone())
+        let overlay = OverlaySpec {
+            lower: rootfs_path.clone(),
+            upper: upper.clone(),
+            work: work.clone(),
+            merged: merged.clone(),
+        };
+        let socket_proxy_src = resolve_host_binary(&self.socket_proxy_source).ok_or_else(|| {
+            RuntimeError::SocketProxyUnavailable {
+                path: self.socket_proxy_source.clone(),
+            }
+        })?;
+        let ro_bind = RoBind {
+            src: socket_proxy_src,
+            dest: PathBuf::from(SOCKET_PROXY_TARGET),
+        };
+        // The overlay's `merged` mountpoint becomes the new root (8a pivots into it
+        // when an overlay is set), so the namespace root must be `merged`.
+        let namespace = NamespaceConfig::new(merged.clone(), child_argv.clone())
+            .with_overlay(overlay)
+            .with_ro_bind(ro_bind)
             .with_uid_map(self.userns_base, self.userns_size)
             .with_cgroup_path(cgroup_path.clone())
             .with_workdir(process.workdir.clone())
@@ -158,8 +189,13 @@ impl LinuxRuntime {
             socket_path,
             guest_socket_path: GUEST_SERVICE_SOCKET.to_string(),
             cgroup_path,
+            deployment_id: request.deployment_id,
             service_dir,
             deployment_dir,
+            replica_dir,
+            upper,
+            work,
+            merged,
         })
     }
 
@@ -169,9 +205,12 @@ impl LinuxRuntime {
         request: &RuntimeStartRequest,
     ) -> Result<(), RuntimeError> {
         validate_resource_limits(request)?;
-        self.inject_socket_proxy(&plan.rootfs_path)?;
+        // The artifact rootfs is the read-only overlay lower; never write into it.
+        // The writable layer and overlay mountpoint are per-replica.
+        create_dir_all("create replica upper directory", &plan.upper)?;
+        create_dir_all("create replica work directory", &plan.work)?;
+        create_dir_all("create replica merged directory", &plan.merged)?;
         self.prepare_socket_directory(plan)?;
-        create_dir_all("create deployment runtime directory", &plan.deployment_dir)?;
         prepare_cgroup_directory(&self.cgroup_root, &plan.cgroup_path, CGROUP_CONTROLLERS)?;
         std::fs::write(
             plan.cgroup_path.join("cpu.max"),
@@ -212,12 +251,10 @@ impl LinuxRuntime {
 
     pub fn cleanup(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
         remove_cgroup_dir_if_exists(&plan.cgroup_path)?;
-        remove_dir_if_exists(&plan.deployment_dir)?;
+        // The upper layer is ephemeral: wiping the replica dir removes
+        // upper/work/merged so a relaunch starts from a clean writable layer.
+        remove_dir_if_exists(&plan.replica_dir)?;
         Ok(())
-    }
-
-    fn inject_socket_proxy(&self, rootfs: &Path) -> Result<(), RuntimeError> {
-        self.inject_runtime_binary(rootfs, SOCKET_PROXY_TARGET)
     }
 
     fn inject_workload_launcher(&self, rootfs: &Path) -> Result<(), RuntimeError> {
@@ -246,8 +283,10 @@ impl LinuxRuntime {
     }
 
     fn prepare_socket_directory(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
-        let run_dir = plan.rootfs_path.join("run");
-        let socket_dir = plan.rootfs_path.join("run/denia");
+        // The socket lives in the writable upper layer (host-visible) so the
+        // host-side socket path resolves once the guest socket-proxy binds it.
+        let run_dir = plan.upper.join("run");
+        let socket_dir = plan.upper.join("run/denia");
         create_runtime_directory(&run_dir)?;
         create_runtime_directory(&socket_dir)?;
         self.chown_socket_directory(&run_dir)?;
@@ -301,11 +340,10 @@ impl Runtime for LinuxRuntime {
             return Err(error);
         }
         let tracked_child = TrackedChild { process, plan };
+        let instance_id = request.instance_id();
         let insert_result = {
             match self.children.lock() {
-                Ok(mut children) => {
-                    Ok(children.insert(request.service_name.clone(), tracked_child))
-                }
+                Ok(mut children) => Ok(children.insert(instance_id.clone(), tracked_child)),
                 Err(_) => Err(tracked_child),
             }
         };
@@ -329,6 +367,7 @@ impl Runtime for LinuxRuntime {
             pid,
             cgroup_path: status_cgroup_path,
             socket_path: status_socket_path,
+            replica_index: request.replica_index,
         })
     }
 
@@ -451,20 +490,44 @@ impl Runtime for LinuxRuntime {
         })
     }
 
-    async fn stop(&self, service_name: &str) -> Result<(), RuntimeError> {
-        validate_service_name(service_name)?;
+    async fn stop(&self, instance: &RuntimeInstanceId) -> Result<(), RuntimeError> {
+        validate_service_name(&instance.service_name)?;
         self.reap_exited_children()?;
         let mut tracked = {
             self.children
                 .lock()
                 .map_err(|_| RuntimeError::LockPoisoned)?
-                .remove(service_name)
+                .remove(instance)
         };
         if let Some(tracked) = tracked.as_mut() {
             terminate_tracked_child(tracked).await?;
             self.cleanup(&tracked.plan)?;
         }
         Ok(())
+    }
+
+    async fn list_running(&self) -> Result<Vec<RuntimeStatus>, RuntimeError> {
+        self.reap_exited_children()?;
+        let children = self
+            .children
+            .lock()
+            .map_err(|_| RuntimeError::LockPoisoned)?;
+        let statuses = children
+            .iter()
+            .map(|(instance, tracked)| {
+                let TrackedProcess::NativePid(pid) = tracked.process;
+                RuntimeStatus {
+                    service_name: instance.service_name.clone(),
+                    deployment_id: tracked.plan.deployment_id,
+                    state: "running".to_string(),
+                    pid: Some(pid),
+                    cgroup_path: tracked.plan.cgroup_path.clone(),
+                    socket_path: tracked.plan.socket_path.clone(),
+                    replica_index: instance.replica_index,
+                }
+            })
+            .collect();
+        Ok(statuses)
     }
 }
 
@@ -475,15 +538,15 @@ impl LinuxRuntime {
                 .children
                 .lock()
                 .map_err(|_| RuntimeError::LockPoisoned)?;
-            let mut service_names = Vec::new();
-            for (service_name, tracked) in children.iter_mut() {
+            let mut exited_instances = Vec::new();
+            for (instance, tracked) in children.iter_mut() {
                 if tracked.process.try_wait()? {
-                    service_names.push(service_name.clone());
+                    exited_instances.push(instance.clone());
                 }
             }
-            service_names
+            exited_instances
                 .into_iter()
-                .filter_map(|service_name| children.remove(&service_name))
+                .filter_map(|instance| children.remove(&instance))
                 .collect::<Vec<_>>()
         };
         for tracked in exited {
@@ -564,7 +627,59 @@ mod tests {
             pids_max: None,
             memory_swap_max: None,
             io_weight: None,
+            replica_index: 0,
         }
+    }
+
+    #[test]
+    fn plan_distinct_per_replica_paths_with_upper_side_socket() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let runtime_dir = tmp.path().join("runtime");
+        let artifact_dir = tmp.path().join("artifacts");
+        let cgroup_dir = tmp.path().join("cgroup");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+
+        let runtime =
+            LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir.clone(), cgroup_dir);
+        let (artifact, _, _) = write_process_bundle(&artifact_dir, "sha256:replica");
+
+        // Same service + deployment, two replica indices.
+        let mut req0 = runtime_request(&runtime_dir, artifact, "replica-svc");
+        let mut req1 = req0.clone();
+        req0.replica_index = 0;
+        req1.replica_index = 1;
+
+        let plan0 = runtime.plan(&req0).expect("plan replica 0");
+        let plan1 = runtime.plan(&req1).expect("plan replica 1");
+
+        // Per-replica overlay layers, cgroup, and host socket path are all distinct.
+        assert_ne!(plan0.upper, plan1.upper);
+        assert_ne!(plan0.work, plan1.work);
+        assert_ne!(plan0.merged, plan1.merged);
+        assert_ne!(plan0.cgroup_path, plan1.cgroup_path);
+        assert_ne!(plan0.socket_path, plan1.socket_path);
+
+        // Host-side socket path is the upper-side path, not rootfs/ nor merged/.
+        assert!(
+            plan0.socket_path.starts_with(&plan0.upper),
+            "socket path {} must be under upper {}",
+            plan0.socket_path.display(),
+            plan0.upper.display()
+        );
+        assert!(
+            plan0.socket_path.ends_with("upper/run/denia/service.sock"),
+            "unexpected socket path: {}",
+            plan0.socket_path.display()
+        );
+        assert!(
+            !plan0.socket_path.starts_with(&plan0.rootfs_path),
+            "socket path must not be inside the read-only rootfs"
+        );
+        assert!(
+            !plan0.socket_path.starts_with(&plan0.merged),
+            "socket path must not be the namespace-private merged mount"
+        );
     }
 
     #[test]
@@ -585,7 +700,14 @@ mod tests {
 
         let plan = runtime.plan(&request).expect("plan");
 
-        assert_eq!(plan.namespace.rootfs, plan.rootfs_path);
+        // With overlay, the namespace root is the merged mountpoint; the lower is
+        // the read-only artifact rootfs.
+        assert_eq!(plan.namespace.rootfs, plan.merged);
+        let overlay = plan.namespace.overlay.as_ref().expect("overlay set");
+        assert_eq!(overlay.lower, plan.rootfs_path);
+        assert_eq!(overlay.upper, plan.upper);
+        assert_eq!(overlay.work, plan.work);
+        assert_eq!(overlay.merged, plan.merged);
         assert_eq!(plan.namespace.workdir, "/");
         assert_eq!(
             plan.namespace.env,
@@ -644,7 +766,10 @@ mod tests {
     }
 
     #[test]
-    fn prepare_rejects_denia_directory_symlink() {
+    fn prepare_does_not_write_into_readonly_rootfs() {
+        // The artifact rootfs is the overlay lower (read-only). prepare must not
+        // create `.denia`, `run/denia`, or copy the socket-proxy into it; those
+        // now live in the per-replica upper layer and a read-only bind mount.
         let tmp = tempfile::tempdir().expect("temp dir");
         let runtime_dir = tmp.path().join("runtime");
         let artifact_dir = tmp.path().join("artifacts");
@@ -653,26 +778,24 @@ mod tests {
         std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
 
         let (artifact, _bundle_dir, rootfs) =
-            write_process_bundle(&artifact_dir, "sha256:denia-link");
-        let outside_dir = tmp.path().join("outside-denia");
-        std::fs::create_dir_all(&outside_dir).expect("outside dir");
-        symlink(&outside_dir, rootfs.join(".denia")).expect(".denia symlink");
-
+            write_process_bundle(&artifact_dir, "sha256:ro-rootfs");
         let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
         let request = runtime_request(&runtime_dir, artifact, "test-svc");
         let plan = runtime.plan(&request).expect("plan");
 
-        let error = runtime
-            .prepare(&plan, &request)
-            .expect_err(".denia symlink rejected");
+        runtime.prepare(&plan, &request).expect("prepare");
 
         assert!(
-            matches!(error, RuntimeError::UnsafeRuntimePath { ref path } if path == &rootfs.join(".denia")),
-            "expected unsafe .denia path, got: {error:?}"
+            !rootfs.join(".denia").exists(),
+            "prepare must not inject helpers into the read-only rootfs"
         );
         assert!(
-            !outside_dir.join("socket-proxy").exists(),
-            "prepare must not copy runtime helpers outside the rootfs"
+            !rootfs.join("run/denia").exists(),
+            "prepare must not create the socket directory in the read-only rootfs"
+        );
+        assert!(
+            plan.upper.join("run/denia").is_dir(),
+            "prepare must create the socket directory in the per-replica upper layer"
         );
     }
 
@@ -685,27 +808,28 @@ mod tests {
         std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
         std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
 
-        let (artifact, _bundle_dir, rootfs) =
+        let (artifact, _bundle_dir, _rootfs) =
             write_process_bundle(&artifact_dir, "sha256:run-link");
-        let outside_run = tmp.path().join("outside-run");
-        std::fs::create_dir_all(&outside_run).expect("outside run dir");
-        symlink(&outside_run, rootfs.join("run")).expect("run symlink");
-
         let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
         let request = runtime_request(&runtime_dir, artifact, "test-svc");
         let plan = runtime.plan(&request).expect("plan");
+        // Pre-plant a symlink at the upper-side run dir before prepare runs.
+        std::fs::create_dir_all(&plan.upper).expect("upper dir");
+        let outside_run = tmp.path().join("outside-run");
+        std::fs::create_dir_all(&outside_run).expect("outside run dir");
+        symlink(&outside_run, plan.upper.join("run")).expect("run symlink");
 
         let error = runtime
             .prepare(&plan, &request)
             .expect_err("socket run symlink rejected");
 
         assert!(
-            matches!(error, RuntimeError::UnsafeRuntimePath { ref path } if path == &rootfs.join("run")),
+            matches!(error, RuntimeError::UnsafeRuntimePath { ref path } if path == &plan.upper.join("run")),
             "expected unsafe run path, got: {error:?}"
         );
         assert!(
             !outside_run.join("denia").exists(),
-            "prepare must not create socket directories outside the rootfs"
+            "prepare must not create socket directories outside the upper layer"
         );
     }
 
@@ -718,12 +842,12 @@ mod tests {
         std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
         std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
 
-        let (artifact, _bundle_dir, rootfs) =
+        let (artifact, _bundle_dir, _rootfs) =
             write_process_bundle(&artifact_dir, "sha256:stale-socket");
         let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
         let request = runtime_request(&runtime_dir, artifact, "test-svc");
         let plan = runtime.plan(&request).expect("plan");
-        std::fs::create_dir_all(rootfs.join("run/denia")).expect("socket dir");
+        std::fs::create_dir_all(plan.upper.join("run/denia")).expect("socket dir");
         std::fs::write(&plan.socket_path, "stale").expect("stale socket marker");
 
         runtime.prepare(&plan, &request).expect("prepare");
@@ -743,13 +867,13 @@ mod tests {
         std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
         std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
 
-        let (artifact, _bundle_dir, rootfs) =
+        let (artifact, _bundle_dir, _rootfs) =
             write_process_bundle(&artifact_dir, "sha256:socket-link");
         let outside_socket = tmp.path().join("outside-socket");
         let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
         let request = runtime_request(&runtime_dir, artifact, "test-svc");
         let plan = runtime.plan(&request).expect("plan");
-        std::fs::create_dir_all(rootfs.join("run/denia")).expect("socket dir");
+        std::fs::create_dir_all(plan.upper.join("run/denia")).expect("socket dir");
         symlink(&outside_socket, &plan.socket_path).expect("socket symlink");
 
         let error = runtime
@@ -762,46 +886,14 @@ mod tests {
         );
         assert!(
             !outside_socket.exists(),
-            "prepare must not remove or write through a rootfs socket symlink"
+            "prepare must not remove or write through a socket symlink"
         );
     }
 
     #[test]
-    fn prepare_rejects_socket_proxy_target_symlink() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let runtime_dir = tmp.path().join("runtime");
-        let artifact_dir = tmp.path().join("artifacts");
-        let cgroup_dir = tmp.path().join("cgroup");
-        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
-        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
-
-        let (artifact, _bundle_dir, rootfs) =
-            write_process_bundle(&artifact_dir, "sha256:proxy-link");
-        let denia_dir = rootfs.join(".denia");
-        std::fs::create_dir_all(&denia_dir).expect(".denia dir");
-        let outside_target = tmp.path().join("outside-proxy");
-        symlink(&outside_target, denia_dir.join("socket-proxy")).expect("socket proxy symlink");
-
-        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
-        let request = runtime_request(&runtime_dir, artifact, "test-svc");
-        let plan = runtime.plan(&request).expect("plan");
-
-        let error = runtime
-            .prepare(&plan, &request)
-            .expect_err("socket proxy target symlink rejected");
-
-        assert!(
-            matches!(error, RuntimeError::UnsafeRuntimePath { ref path } if path == &rootfs.join(".denia/socket-proxy")),
-            "expected unsafe socket proxy target path, got: {error:?}"
-        );
-        assert!(
-            !outside_target.exists(),
-            "prepare must not write socket proxy through a rootfs symlink"
-        );
-    }
-
-    #[test]
-    fn prepare_rejects_missing_socket_proxy_source() {
+    fn plan_rejects_missing_socket_proxy_source() {
+        // The socket-proxy is resolved at plan time (it is bound read-only into
+        // the guest), so a missing source surfaces from `plan`, not `prepare`.
         let tmp = tempfile::tempdir().expect("temp dir");
         let runtime_dir = tmp.path().join("runtime");
         let artifact_dir = tmp.path().join("artifacts");
@@ -816,10 +908,9 @@ mod tests {
         let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir)
             .with_socket_proxy(&missing_proxy);
         let request = runtime_request(&runtime_dir, artifact, "test-svc");
-        let plan = runtime.plan(&request).expect("plan");
 
         let error = runtime
-            .prepare(&plan, &request)
+            .plan(&request)
             .expect_err("missing socket proxy rejected");
 
         assert!(
@@ -900,11 +991,16 @@ mod tests {
                 .with_uid_map(100000, 65536)
                 .with_cgroup_path(cgroup_path.clone()),
                 rootfs_path: tmp.path().join("rootfs"),
-                socket_path: tmp.path().join("rootfs/run/denia/service.sock"),
+                socket_path: tmp.path().join("replica/upper/run/denia/service.sock"),
                 guest_socket_path: GUEST_SERVICE_SOCKET.to_string(),
                 cgroup_path: cgroup_path.clone(),
+                deployment_id: uuid::Uuid::now_v7(),
                 service_dir: tmp.path().join("runtime/test-svc"),
                 deployment_dir: tmp.path().join("runtime/test-svc/deployment"),
+                replica_dir: tmp.path().join("runtime/test-svc/deployment/0"),
+                upper: tmp.path().join("runtime/test-svc/deployment/0/upper"),
+                work: tmp.path().join("runtime/test-svc/deployment/0/work"),
+                merged: tmp.path().join("runtime/test-svc/deployment/0/merged"),
             },
         };
 

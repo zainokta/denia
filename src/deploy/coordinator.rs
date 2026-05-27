@@ -12,7 +12,8 @@ use crate::deploy::error::DeployError;
 use crate::deploy::routes::{SharedRoutes, default_ingress_options};
 use crate::domain::ServiceSource;
 use crate::domain::{
-    Deployment, DeploymentRequest, DeploymentStatus, RuntimeStartRequest, ServiceConfig,
+    Deployment, DeploymentRequest, DeploymentStatus, RuntimeInstanceId, RuntimeStartRequest,
+    ServiceConfig,
 };
 use crate::health::HealthChecker;
 use crate::oci::RegistryAuth;
@@ -144,6 +145,7 @@ where
                 pids_max: None,
                 memory_swap_max: None,
                 io_weight: None,
+                replica_index: 0,
             })
             .await?;
 
@@ -268,7 +270,12 @@ where
     pub async fn stop_service(&self, service: &ServiceConfig) -> Result<(), DeployError> {
         let promoted_deployment = self.repos.deployments.promoted_deployment(service.id)?;
 
-        self.runtime.stop(&service.name).await?;
+        self.runtime
+            .stop(&RuntimeInstanceId {
+                service_name: service.name.clone(),
+                replica_index: 0,
+            })
+            .await?;
         if let Some(routing) = &self.routing {
             routing.manager.deactivate(&service.name).await?;
             let yaml = {
