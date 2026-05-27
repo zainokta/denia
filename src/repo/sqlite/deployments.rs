@@ -162,6 +162,39 @@ pub(super) fn put_artifact_q(
     Ok(artifact)
 }
 
+pub(super) fn set_deployment_artifact_q(
+    conn: &Connection,
+    deployment_id: Uuid,
+    digest: &str,
+) -> Result<(), RepoError> {
+    conn.execute(
+        "UPDATE deployments SET artifact_digest = ?1 WHERE id = ?2",
+        params![digest, deployment_id.to_string()],
+    )?;
+    Ok(())
+}
+
+pub(super) fn get_deployment_artifact_q(
+    conn: &Connection,
+    deployment_id: Uuid,
+) -> Result<Option<ArtifactRecord>, RepoError> {
+    let record_json: Option<String> = conn
+        .query_row(
+            r#"
+            SELECT a.record_json FROM deployments d
+            JOIN artifacts a ON a.digest = d.artifact_digest
+            WHERE d.id = ?1
+            "#,
+            params![deployment_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    record_json
+        .map(|json| serde_json::from_str(&json))
+        .transpose()
+        .map_err(Into::into)
+}
+
 pub(super) fn list_artifacts_q(conn: &Connection) -> Result<Vec<ArtifactRecord>, RepoError> {
     let mut statement =
         conn.prepare("SELECT record_json FROM artifacts ORDER BY created_at DESC")?;
@@ -215,6 +248,23 @@ impl SqliteStore {
     pub fn put_artifact(&self, artifact: ArtifactRecord) -> Result<ArtifactRecord, StateError> {
         let connection = self.connection()?;
         put_artifact_q(&connection, artifact).map_err(StateError::from)
+    }
+
+    pub fn set_deployment_artifact(
+        &self,
+        deployment_id: Uuid,
+        digest: &str,
+    ) -> Result<(), StateError> {
+        let connection = self.connection()?;
+        set_deployment_artifact_q(&connection, deployment_id, digest).map_err(StateError::from)
+    }
+
+    pub fn get_deployment_artifact(
+        &self,
+        deployment_id: Uuid,
+    ) -> Result<Option<ArtifactRecord>, StateError> {
+        let connection = self.connection()?;
+        get_deployment_artifact_q(&connection, deployment_id).map_err(StateError::from)
     }
 
     pub fn list_artifacts(&self) -> Result<Vec<ArtifactRecord>, StateError> {
@@ -278,8 +328,79 @@ impl SqliteDeploymentRepo {
         put_artifact_q(&conn, artifact)
     }
 
+    pub fn set_deployment_artifact(
+        &self,
+        deployment_id: Uuid,
+        digest: &str,
+    ) -> Result<(), RepoError> {
+        let conn = self.pool.connection()?;
+        set_deployment_artifact_q(&conn, deployment_id, digest)
+    }
+
+    pub fn get_deployment_artifact(
+        &self,
+        deployment_id: Uuid,
+    ) -> Result<Option<ArtifactRecord>, RepoError> {
+        let conn = self.pool.connection()?;
+        get_deployment_artifact_q(&conn, deployment_id)
+    }
+
     pub fn list_artifacts(&self) -> Result<Vec<ArtifactRecord>, RepoError> {
         let conn = self.pool.connection()?;
         list_artifacts_q(&conn)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifacts::{ArtifactKind, ArtifactSource};
+    use crate::state::SqliteStore;
+
+    #[test]
+    fn deployment_artifact_link_round_trips() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+
+        let service_id = Uuid::now_v7();
+        let deployment = store
+            .create_deployment(DeploymentRequest::external_image(service_id, "img"))
+            .unwrap();
+
+        let record = ArtifactRecord::new(
+            "sha256:abc",
+            ArtifactKind::RootfsBundle,
+            ArtifactSource::ExternalRegistry {
+                image: "img".to_string(),
+            },
+        )
+        .unwrap();
+
+        store.put_artifact(record.clone()).unwrap();
+        store
+            .set_deployment_artifact(deployment.id, &record.digest)
+            .unwrap();
+
+        let linked = store.get_deployment_artifact(deployment.id).unwrap();
+        assert!(linked.is_some());
+        assert_eq!(linked.unwrap().digest, record.digest);
+    }
+
+    #[test]
+    fn get_deployment_artifact_none_when_unlinked() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+
+        let service_id = Uuid::now_v7();
+        let deployment = store
+            .create_deployment(DeploymentRequest::external_image(service_id, "img"))
+            .unwrap();
+
+        assert!(
+            store
+                .get_deployment_artifact(deployment.id)
+                .unwrap()
+                .is_none()
+        );
     }
 }

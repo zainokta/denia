@@ -121,6 +121,11 @@ where
             .deployments
             .create_deployment(deployment_request(&plan.service, &plan.artifact))?;
 
+        self.repos.deployments.put_artifact(plan.artifact.clone())?;
+        self.repos
+            .deployments
+            .set_deployment_artifact(deployment.id, &plan.artifact.digest)?;
+
         let project = self
             .repos
             .projects

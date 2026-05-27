@@ -361,5 +361,15 @@ pub fn run_migrations(pool: &SqlitePool) -> Result<(), RepoError> {
         connection.execute("INSERT INTO schema_version (version) VALUES (8)", [])?;
     }
 
+    if current < 9 {
+        connection.execute_batch(
+            r#"
+            ALTER TABLE deployments ADD COLUMN artifact_digest TEXT;
+            "#,
+        )?;
+        connection.execute("DELETE FROM schema_version", [])?;
+        connection.execute("INSERT INTO schema_version (version) VALUES (9)", [])?;
+    }
+
     Ok(())
 }
