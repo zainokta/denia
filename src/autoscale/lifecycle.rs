@@ -8,7 +8,7 @@ use crate::autoscale::ledger::ResourceLedger;
 use crate::autoscale::registry::{ReplicaRegistry, ReplicaState};
 use crate::domain::{HealthCheck, ResourceLimits, RuntimeInstanceId, RuntimeStartRequest};
 use crate::health::HealthChecker;
-use crate::ingress::bridge::LoopbackBridgeSupervisor;
+use crate::ingress::pingora::IngressState;
 use crate::runtime::Runtime;
 
 /// Everything needed to bring up a single replica of a service.
@@ -42,7 +42,7 @@ pub async fn launch_replica(
     registry: &mut ReplicaRegistry,
     ledger: &mut ResourceLedger,
     runtime: &dyn Runtime,
-    bridge: &LoopbackBridgeSupervisor,
+    bridge: &IngressState,
     health: &dyn HealthChecker,
 ) -> Result<Uuid, LifecycleError> {
     // 1. Reserve before spawning so concurrent scale-ups can't double-spend.
@@ -128,7 +128,7 @@ pub async fn drain_replica(
     registry: &mut ReplicaRegistry,
     ledger: &mut ResourceLedger,
     runtime: &dyn Runtime,
-    bridge: &LoopbackBridgeSupervisor,
+    bridge: &IngressState,
 ) -> Result<(), LifecycleError> {
     // 1. Stop directing new connections at this replica.
     registry.set_state(replica_id, ReplicaState::Draining);
@@ -216,7 +216,7 @@ mod tests {
         let mut registry = ReplicaRegistry::default();
         let mut ledger = ledger();
         let runtime = FakeRuntime::default();
-        let bridge = LoopbackBridgeSupervisor::default();
+        let bridge = IngressState::default();
         let health = FakeHealthChecker::healthy();
 
         let id = launch_replica(
@@ -248,7 +248,7 @@ mod tests {
         let mut registry = ReplicaRegistry::default();
         let mut ledger = ledger();
         let runtime = FakeRuntime::default();
-        let bridge = LoopbackBridgeSupervisor::default();
+        let bridge = IngressState::default();
         let health = FailingHealthChecker;
 
         let err = launch_replica(
@@ -291,7 +291,7 @@ mod tests {
         ledger.try_reserve(&spec.limits).expect("prefill");
 
         let runtime = FakeRuntime::default();
-        let bridge = LoopbackBridgeSupervisor::default();
+        let bridge = IngressState::default();
         let health = FakeHealthChecker::healthy();
 
         let err = launch_replica(
@@ -316,7 +316,7 @@ mod tests {
         let mut registry = ReplicaRegistry::default();
         let mut ledger = ledger();
         let runtime = FakeRuntime::default();
-        let bridge = LoopbackBridgeSupervisor::default();
+        let bridge = IngressState::default();
         let health = FakeHealthChecker::healthy();
 
         let id = launch_replica(

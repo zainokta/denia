@@ -347,6 +347,10 @@ impl IngressState {
     }
 
     /// Atomically replace the routing table. Lock-free for readers.
+    ///
+    /// Single-writer / last-writer-wins (audit A8): only the control plane
+    /// (deploy/verify/delete paths) calls this, so the whole-table swap is safe;
+    /// it is NOT safe under concurrent writers.
     pub fn swap_routes(&self, table: RouteTable) {
         self.routes.store(Arc::new(table));
     }
@@ -365,6 +369,10 @@ impl IngressState {
     }
 
     /// Atomically replace the cert store. Lock-free for readers.
+    ///
+    /// Single-writer / last-writer-wins (audit A8): only the control plane (boot
+    /// load + the ACME issuance/renewal task) calls this; it is NOT safe under
+    /// concurrent writers.
     pub fn swap_certs(&self, store: CertStore) {
         self.certs.store(Arc::new(store));
     }
