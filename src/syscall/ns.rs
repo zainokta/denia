@@ -47,6 +47,17 @@ pub struct NamespaceConfig {
     pub max_pids: Option<u64>,
     pub max_fds: Option<u64>,
     pub max_procs: Option<u64>,
+    /// Optional private overlay filesystem to use as the new root.
+    ///
+    /// When set, `child_exec` mounts an overlay (shared read-only `lower`,
+    /// per-replica writable `upper`/`work`) at `merged` and pivots into it
+    /// instead of bind-mounting `rootfs` onto itself. Used by autoscaling so
+    /// each replica gets an isolated writable layer over the shared artifact
+    /// rootfs.
+    pub overlay: Option<OverlaySpec>,
+    /// Read-only bind mounts (e.g. helper binaries) injected into the new root
+    /// after `pivot_root`, before proc is mounted.
+    pub ro_binds: Vec<RoBind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +65,29 @@ pub struct UidMap {
     pub inside: u32,
     pub outside: u32,
     pub size: u32,
+}
+
+/// Private overlay filesystem for a replica's root.
+///
+/// `lower` is the shared read-only artifact rootfs; `upper` and `work` are the
+/// per-replica writable layer and overlay workdir; `merged` is the mountpoint
+/// that becomes the new root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlaySpec {
+    pub lower: PathBuf,
+    pub upper: PathBuf,
+    pub work: PathBuf,
+    pub merged: PathBuf,
+}
+
+/// A read-only bind mount injected into the guest root.
+///
+/// `src` is the host source path; `dest` is an absolute path inside the new
+/// root (e.g. `/.denia/socket-proxy`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoBind {
+    pub src: PathBuf,
+    pub dest: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +120,35 @@ pub struct NativeLaunchPlan {
     pub max_pids: Option<u64>,
     pub max_fds: Option<u64>,
     pub max_procs: Option<u64>,
+    pub overlay: Option<OverlayPlan>,
+    pub ro_binds: Vec<RoBindPlan>,
+}
+
+/// CString-ized overlay paths and mount data for the post-fork child.
+///
+/// All allocation happens in the parent so the post-fork child never allocates
+/// fallibly. `overlay_fs_type` is the literal `"overlay"` filesystem name and
+/// `data` is the `lowerdir=...,upperdir=...,workdir=...` mount option string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayPlan {
+    pub lower: CString,
+    pub upper: CString,
+    pub work: CString,
+    pub merged: CString,
+    pub overlay_fs_type: CString,
+    pub data: CString,
+}
+
+/// CString-ized read-only bind mount for the post-fork child.
+///
+/// `dest` is absolute within the new root. `dest_is_file` selects whether the
+/// child creates an empty file (true) or a directory (false) as the mountpoint
+/// before binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoBindPlan {
+    pub src: CString,
+    pub dest: CString,
+    pub dest_is_file: bool,
 }
 
 impl NamespaceSetupPlan {
@@ -134,6 +197,8 @@ impl Default for NamespaceConfig {
             max_pids: Some(1024),
             max_fds: Some(65536),
             max_procs: Some(1024),
+            overlay: None,
+            ro_binds: Vec::new(),
         }
     }
 }
@@ -183,6 +248,16 @@ impl NamespaceConfig {
     ) -> Self {
         self.stdout_path = Some(stdout_path.into());
         self.stderr_path = Some(stderr_path.into());
+        self
+    }
+
+    pub fn with_overlay(mut self, overlay: OverlaySpec) -> Self {
+        self.overlay = Some(overlay);
+        self
+    }
+
+    pub fn with_ro_bind(mut self, ro_bind: RoBind) -> Self {
+        self.ro_binds.push(ro_bind);
         self
     }
 
@@ -298,6 +373,12 @@ impl NamespaceConfig {
             .as_deref()
             .map(|path| path_cstring("stderr path", path))
             .transpose()?;
+        let overlay = self.overlay.as_ref().map(overlay_plan).transpose()?;
+        let ro_binds = self
+            .ro_binds
+            .iter()
+            .map(ro_bind_plan)
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(NativeLaunchPlan {
             setup,
@@ -316,6 +397,8 @@ impl NamespaceConfig {
             max_pids: self.max_pids,
             max_fds: self.max_fds,
             max_procs: self.max_procs,
+            overlay,
+            ro_binds,
         })
     }
 
@@ -345,6 +428,70 @@ impl NamespaceConfig {
 
 fn uid_map_line(map: UidMap) -> String {
     format!("{} {} {}\n", map.inside, map.outside, map.size)
+}
+
+fn overlay_plan(spec: &OverlaySpec) -> Result<OverlayPlan, SyscallError> {
+    let lower = path_cstring("overlay lower", &spec.lower)?;
+    let upper = path_cstring("overlay upper", &spec.upper)?;
+    let work = path_cstring("overlay work", &spec.work)?;
+    let merged = path_cstring("overlay merged", &spec.merged)?;
+    let overlay_fs_type = string_cstring("overlay fs type", "overlay")?;
+    let data = overlay_data_cstring(&spec.lower, &spec.upper, &spec.work)?;
+    Ok(OverlayPlan {
+        lower,
+        upper,
+        work,
+        merged,
+        overlay_fs_type,
+        data,
+    })
+}
+
+fn overlay_data_cstring(lower: &Path, upper: &Path, work: &Path) -> Result<CString, SyscallError> {
+    reject_overlay_separator("overlay lower", lower)?;
+    reject_overlay_separator("overlay upper", upper)?;
+    reject_overlay_separator("overlay work", work)?;
+    let mut data = Vec::new();
+    data.extend_from_slice(b"lowerdir=");
+    data.extend_from_slice(lower.as_os_str().as_bytes());
+    data.extend_from_slice(b",upperdir=");
+    data.extend_from_slice(upper.as_os_str().as_bytes());
+    data.extend_from_slice(b",workdir=");
+    data.extend_from_slice(work.as_os_str().as_bytes());
+    CString::new(data).map_err(|_| {
+        SyscallError::Capability("overlay mount data contains an interior NUL byte".to_string())
+    })
+}
+
+fn reject_overlay_separator(label: &'static str, path: &Path) -> Result<(), SyscallError> {
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.contains(&b',') || bytes.contains(&b':') {
+        return Err(SyscallError::Capability(format!(
+            "{label} must not contain ',' or ':' overlay option separators: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn ro_bind_plan(bind: &RoBind) -> Result<RoBindPlan, SyscallError> {
+    if !bind.dest.is_absolute() {
+        return Err(SyscallError::Capability(format!(
+            "ro bind dest must be absolute, got {}",
+            bind.dest.display()
+        )));
+    }
+    let src = path_cstring("ro bind src", &bind.src)?;
+    let dest = path_cstring("ro bind dest", &bind.dest)?;
+    // A file source is bound onto a file mountpoint; a directory source needs a
+    // directory mountpoint. The decision is made here in the parent so the
+    // post-fork child only performs the corresponding mkdir/creat.
+    let dest_is_file = bind.src.is_file();
+    Ok(RoBindPlan {
+        src,
+        dest,
+        dest_is_file,
+    })
 }
 
 fn write_proc_setup_file(
@@ -670,6 +817,7 @@ fn child_setup_stage(stage: u8) -> &'static str {
         b'P' => "make mount propagation private",
         b'O' => "open stdio",
         b'R' => "chroot",
+        b'b' => "read-only bind mount",
         b'W' => "chdir workdir",
         b'p' => "mount proc",
         b'D' => "setup /dev tmpfs",
@@ -777,13 +925,41 @@ unsafe fn child_exec(
         redirect_stdio_fd(pipes, stderr_fd, libc::STDERR_FILENO);
     }
 
-    if rustix::mount::mount_bind_recursive(&plan.rootfs, &plan.rootfs).is_err() {
-        unsafe { child_setup_fail(pipes, b'R') };
-    }
+    // Select the path that becomes the new root. With an overlay, mount the
+    // private overlay at `merged` and pivot into it; otherwise bind-mount the
+    // shared `rootfs` onto itself (the existing behavior) so it is a mount
+    // point that `pivot_root` accepts.
+    let new_root = if let Some(overlay) = &plan.overlay {
+        if unsafe {
+            libc::mount(
+                overlay.overlay_fs_type.as_ptr(),
+                overlay.merged.as_ptr(),
+                overlay.overlay_fs_type.as_ptr(),
+                0,
+                overlay.data.as_ptr().cast(),
+            )
+        } < 0
+        {
+            unsafe { child_setup_fail(pipes, b'R') };
+        }
+        overlay.merged.as_c_str()
+    } else {
+        if unsafe {
+            libc::mount(
+                plan.rootfs.as_ptr(),
+                plan.rootfs.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND | libc::MS_REC,
+                std::ptr::null(),
+            )
+        } < 0
+        {
+            unsafe { child_setup_fail(pipes, b'R') };
+        }
+        plan.rootfs.as_c_str()
+    };
 
-    let old_root = plan.rootfs.to_bytes_with_nul().to_vec();
-    let mut old_root_buf = old_root.clone();
-    old_root_buf.truncate(old_root_buf.len() - 1);
+    let mut old_root_buf = new_root.to_bytes().to_vec();
     old_root_buf.extend_from_slice(b"/.old_root\0");
     let old_root_target =
         std::ffi::CStr::from_bytes_with_nul(&old_root_buf).expect("old_root path has valid NUL");
@@ -795,7 +971,14 @@ unsafe fn child_exec(
         }
     }
 
-    if rustix::process::pivot_root(&plan.rootfs, old_root_target).is_err() {
+    if unsafe {
+        libc::syscall(
+            libc::SYS_pivot_root,
+            new_root.as_ptr(),
+            old_root_target.as_ptr(),
+        )
+    } < 0
+    {
         unsafe { child_setup_fail(pipes, b'R') };
     }
 
@@ -808,7 +991,13 @@ unsafe fn child_exec(
     }
     let _ = unsafe { libc::rmdir(c"/.old_root".as_ptr()) };
 
-    if rustix::process::chdir(&plan.workdir).is_err() {
+    // Inject read-only bind mounts now that the new root is in place and the
+    // upper layer is writable. Each dest is absolute within the new root.
+    for bind in &plan.ro_binds {
+        unsafe { child_apply_ro_bind(pipes, bind) };
+    }
+
+    if unsafe { libc::chdir(plan.workdir.as_ptr()) } < 0 {
         unsafe { child_setup_fail(pipes, b'W') };
     }
 
@@ -933,6 +1122,82 @@ fn apply_rlimits(
         },
     );
     Ok(())
+}
+
+/// Apply a single read-only bind mount inside the freshly pivoted root.
+///
+/// Creates `dest`'s parent directory chain and the mountpoint itself (an empty
+/// file when `dest_is_file`, otherwise a directory), bind-mounts `src` onto it,
+/// then remounts read-only. On any failure the child reports stage `b'b'`.
+unsafe fn child_apply_ro_bind(pipes: &SyncPipes, bind: &RoBindPlan) {
+    let dest_bytes = bind.dest.to_bytes();
+
+    // Create each parent directory component of dest. `dest` is absolute, so
+    // the first byte is '/'; skip it and mkdir at every subsequent slash.
+    let mut index = 1;
+    while index < dest_bytes.len() {
+        if dest_bytes[index] == b'/' {
+            let mut component = dest_bytes[..index].to_vec();
+            component.push(0);
+            let component = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(&component) };
+            if unsafe { libc::mkdir(component.as_ptr(), 0o755) } < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::EEXIST) {
+                    unsafe { child_setup_fail(pipes, b'b') };
+                }
+            }
+        }
+        index += 1;
+    }
+
+    if bind.dest_is_file {
+        let fd = unsafe {
+            libc::open(
+                bind.dest.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+                0o644,
+            )
+        };
+        if fd < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EEXIST) {
+                unsafe { child_setup_fail(pipes, b'b') };
+            }
+        } else {
+            let _ = unsafe { libc::close(fd) };
+        }
+    } else if unsafe { libc::mkdir(bind.dest.as_ptr(), 0o755) } < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EEXIST) {
+            unsafe { child_setup_fail(pipes, b'b') };
+        }
+    }
+
+    if unsafe {
+        libc::mount(
+            bind.src.as_ptr(),
+            bind.dest.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND,
+            std::ptr::null(),
+        )
+    } < 0
+    {
+        unsafe { child_setup_fail(pipes, b'b') };
+    }
+
+    if unsafe {
+        libc::mount(
+            std::ptr::null(),
+            bind.dest.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID,
+            std::ptr::null(),
+        )
+    } < 0
+    {
+        unsafe { child_setup_fail(pipes, b'b') };
+    }
 }
 
 struct ChildStdio {
@@ -1166,6 +1431,173 @@ mod tests {
                 .expect("stderr path"),
             "/var/log/denia/stderr.log"
         );
+    }
+
+    #[test]
+    fn with_overlay_and_ro_bind_populate_config() {
+        let cfg = NamespaceConfig::new("/var/lib/denia/rootfs", vec!["/bin/sh".to_string()])
+            .with_uid_map(100000, 65536)
+            .with_cgroup_path("/sys/fs/cgroup/denia/test")
+            .with_overlay(OverlaySpec {
+                lower: PathBuf::from("/var/lib/denia/artifacts/sha256-abc/rootfs"),
+                upper: PathBuf::from("/var/lib/denia/replicas/r1/upper"),
+                work: PathBuf::from("/var/lib/denia/replicas/r1/work"),
+                merged: PathBuf::from("/var/lib/denia/replicas/r1/merged"),
+            })
+            .with_ro_bind(RoBind {
+                src: PathBuf::from("/usr/lib/denia/socket-proxy"),
+                dest: PathBuf::from("/.denia/socket-proxy"),
+            })
+            .with_ro_bind(RoBind {
+                src: PathBuf::from("/usr/lib/denia/other"),
+                dest: PathBuf::from("/.denia/other"),
+            });
+
+        assert_eq!(
+            cfg.overlay,
+            Some(OverlaySpec {
+                lower: PathBuf::from("/var/lib/denia/artifacts/sha256-abc/rootfs"),
+                upper: PathBuf::from("/var/lib/denia/replicas/r1/upper"),
+                work: PathBuf::from("/var/lib/denia/replicas/r1/work"),
+                merged: PathBuf::from("/var/lib/denia/replicas/r1/merged"),
+            })
+        );
+        assert_eq!(
+            cfg.ro_binds,
+            vec![
+                RoBind {
+                    src: PathBuf::from("/usr/lib/denia/socket-proxy"),
+                    dest: PathBuf::from("/.denia/socket-proxy"),
+                },
+                RoBind {
+                    src: PathBuf::from("/usr/lib/denia/other"),
+                    dest: PathBuf::from("/.denia/other"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn default_config_has_no_overlay_or_ro_binds() {
+        let cfg = NamespaceConfig::default();
+        assert_eq!(cfg.overlay, None);
+        assert!(cfg.ro_binds.is_empty());
+    }
+
+    #[test]
+    fn native_launch_plan_omits_overlay_and_ro_binds_by_default() {
+        let cfg = NamespaceConfig::new("/var/lib/denia/rootfs", vec!["/bin/sh".to_string()])
+            .with_uid_map(100000, 65536)
+            .with_cgroup_path("/sys/fs/cgroup/denia/test");
+
+        let plan = cfg.native_launch_plan().expect("native launch plan");
+
+        assert_eq!(plan.overlay, None);
+        assert!(plan.ro_binds.is_empty());
+    }
+
+    #[test]
+    fn native_launch_plan_materializes_overlay_data_and_ro_binds() {
+        let cfg = NamespaceConfig::new("/var/lib/denia/rootfs", vec!["/bin/sh".to_string()])
+            .with_uid_map(100000, 65536)
+            .with_cgroup_path("/sys/fs/cgroup/denia/test")
+            .with_overlay(OverlaySpec {
+                lower: PathBuf::from("/lower"),
+                upper: PathBuf::from("/upper"),
+                work: PathBuf::from("/work"),
+                merged: PathBuf::from("/merged"),
+            })
+            .with_ro_bind(RoBind {
+                src: PathBuf::from("/usr/lib/denia/socket-proxy"),
+                dest: PathBuf::from("/.denia/socket-proxy"),
+            });
+
+        let plan = cfg.native_launch_plan().expect("native launch plan");
+
+        let overlay = plan.overlay.expect("overlay plan");
+        assert_eq!(overlay.merged.to_str().expect("merged"), "/merged");
+        assert_eq!(
+            overlay.overlay_fs_type.to_str().expect("fs type"),
+            "overlay"
+        );
+        assert_eq!(
+            overlay.data.to_str().expect("data"),
+            "lowerdir=/lower,upperdir=/upper,workdir=/work"
+        );
+
+        assert_eq!(plan.ro_binds.len(), 1);
+        let bind = &plan.ro_binds[0];
+        assert_eq!(
+            bind.src.to_str().expect("src"),
+            "/usr/lib/denia/socket-proxy"
+        );
+        assert_eq!(bind.dest.to_str().expect("dest"), "/.denia/socket-proxy");
+        // The host source does not exist in the test environment, so it is not
+        // a regular file and the mountpoint is created as a directory.
+        assert!(!bind.dest_is_file);
+    }
+
+    #[test]
+    fn native_launch_plan_marks_existing_file_ro_bind_as_file() {
+        let src = tempfile::NamedTempFile::new().expect("temp file");
+        let cfg = NamespaceConfig::new("/var/lib/denia/rootfs", vec!["/bin/sh".to_string()])
+            .with_uid_map(100000, 65536)
+            .with_cgroup_path("/sys/fs/cgroup/denia/test")
+            .with_ro_bind(RoBind {
+                src: src.path().to_path_buf(),
+                dest: PathBuf::from("/.denia/socket-proxy"),
+            });
+
+        let plan = cfg.native_launch_plan().expect("native launch plan");
+
+        assert!(plan.ro_binds[0].dest_is_file);
+    }
+
+    #[test]
+    fn native_launch_plan_rejects_relative_ro_bind_dest() {
+        let cfg = NamespaceConfig::new("/var/lib/denia/rootfs", vec!["/bin/sh".to_string()])
+            .with_uid_map(100000, 65536)
+            .with_cgroup_path("/sys/fs/cgroup/denia/test")
+            .with_ro_bind(RoBind {
+                src: PathBuf::from("/usr/lib/denia/socket-proxy"),
+                dest: PathBuf::from("relative/socket-proxy"),
+            });
+
+        let error = cfg
+            .native_launch_plan()
+            .expect_err("relative ro bind dest must be rejected");
+
+        assert!(
+            matches!(error, SyscallError::Capability(ref reason) if reason.contains("ro bind dest must be absolute")),
+            "expected ro bind dest error, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn native_launch_plan_rejects_overlay_separator_in_paths() {
+        let cfg = NamespaceConfig::new("/var/lib/denia/rootfs", vec!["/bin/sh".to_string()])
+            .with_uid_map(100000, 65536)
+            .with_cgroup_path("/sys/fs/cgroup/denia/test")
+            .with_overlay(OverlaySpec {
+                lower: PathBuf::from("/low,er"),
+                upper: PathBuf::from("/upper"),
+                work: PathBuf::from("/work"),
+                merged: PathBuf::from("/merged"),
+            });
+
+        let error = cfg
+            .native_launch_plan()
+            .expect_err("overlay separator must be rejected");
+
+        assert!(
+            matches!(error, SyscallError::Capability(ref reason) if reason.contains("overlay option separators")),
+            "expected overlay separator error, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn child_setup_stage_names_ro_bind_failure() {
+        assert_eq!(child_setup_stage(b'b'), "read-only bind mount");
     }
 
     #[test]
