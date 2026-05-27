@@ -69,10 +69,12 @@ async fn me_handler(
     State(state): State<AppState>,
     principal: Principal,
 ) -> Result<Json<Me>, ApiError> {
+    let admin_initialized = state.users.is_admin_initialized()?;
     if principal.is_super_admin && !principal.is_authenticated() {
         return Ok(Json(Me {
             principal: PrincipalView::Bootstrap,
             is_super_admin: true,
+            admin_initialized,
             memberships: vec![],
         }));
     }
@@ -87,6 +89,7 @@ async fn me_handler(
     Ok(Json(Me {
         principal: PrincipalView::User { user },
         is_super_admin: principal.is_super_admin,
+        admin_initialized,
         memberships,
     }))
 }
