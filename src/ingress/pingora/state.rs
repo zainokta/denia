@@ -33,6 +33,59 @@ pub enum IngressError {
     InvalidDomain(String),
 }
 
+/// Maximum length of a DNS name (RFC 1035 presentation form, excluding the
+/// trailing root dot).
+const MAX_DOMAIN_LEN: usize = 253;
+/// Maximum length of a single DNS label.
+const MAX_LABEL_LEN: usize = 63;
+
+/// Validate and normalize a routing/SNI hostname.
+///
+/// Domains validated here flow into routing keys, ACME order identifiers, and
+/// TLS SNI selection (audit A1/A5), so this is the single ingest chokepoint.
+///
+/// Rejects: empty / whitespace-only, total length > 253, any control character
+/// or ASCII whitespace, backtick / CR / LF (the legacy Traefik check), a
+/// leading or trailing dot, an empty label (`..`), any label > 63 chars,
+/// `*` wildcards, and any non-ASCII byte. Non-ASCII is rejected deliberately:
+/// callers must pass already-punycode-encoded (`xn--`) ASCII so IDN homoglyphs
+/// cannot produce routing/SNI confusion.
+///
+/// On success returns the ASCII-lowercased hostname (audit A2): lookups use
+/// exact `BTreeMap::get`, so a mixed-case `Host`/SNI would otherwise 404.
+pub fn validate_domain(domain: &str) -> Result<String, IngressError> {
+    let reject = || IngressError::InvalidDomain(domain.to_string());
+
+    if domain.trim().is_empty() {
+        return Err(reject());
+    }
+    if domain.len() > MAX_DOMAIN_LEN {
+        return Err(reject());
+    }
+    // Non-ASCII (covers homoglyphs), control chars, whitespace, backtick, CR/LF,
+    // and wildcards are all forbidden bytes.
+    for b in domain.bytes() {
+        if !b.is_ascii()
+            || b.is_ascii_control()
+            || (b as char).is_ascii_whitespace()
+            || b == b'`'
+            || b == b'*'
+        {
+            return Err(reject());
+        }
+    }
+    if domain.starts_with('.') || domain.ends_with('.') {
+        return Err(reject());
+    }
+    for label in domain.split('.') {
+        if label.is_empty() || label.len() > MAX_LABEL_LEN {
+            return Err(reject());
+        }
+    }
+
+    Ok(domain.to_ascii_lowercase())
+}
+
 /// A single service's routing entry.
 ///
 /// This is the Pingora-era successor to `traefik::RouteSpec`. It drops the
@@ -61,12 +114,45 @@ pub struct RouteTable {
 impl RouteTable {
     /// Insert or replace `spec`, indexing it under each of its domains.
     ///
+    /// Each domain is validated and lowercased via [`validate_domain`] before
+    /// insertion, so the table never holds an unvalidated or mixed-case host
+    /// (audit A1/A2). Any domain that fails validation is skipped; callers that
+    /// need to surface rejection should use [`RouteTable::try_upsert`].
+    ///
     /// If a domain previously pointed at a different `route_key`, the most
     /// recent `upsert` wins for that host.
     pub fn upsert(&mut self, spec: RouteSpec) {
         for domain in &spec.domains {
-            self.by_host.insert(domain.clone(), spec.clone());
+            if let Ok(host) = validate_domain(domain) {
+                self.by_host.insert(host, spec.clone());
+            }
         }
+    }
+
+    /// Validating insert: rejects an empty `service_name` ([`IngressError::EmptyServiceName`]),
+    /// an empty `domains` list ([`IngressError::MissingDomain`]), and any domain
+    /// that fails [`validate_domain`] ([`IngressError::InvalidDomain`]).
+    ///
+    /// Insertion is all-or-nothing: if any domain is invalid, nothing is
+    /// inserted. Valid domains are normalized to lowercase before insertion.
+    pub fn try_upsert(&mut self, spec: RouteSpec) -> Result<(), IngressError> {
+        if spec.service_name.trim().is_empty() {
+            return Err(IngressError::EmptyServiceName);
+        }
+        if spec.domains.is_empty() {
+            return Err(IngressError::MissingDomain);
+        }
+        // Validate everything before mutating so a later invalid domain cannot
+        // leave a partial entry behind.
+        let hosts = spec
+            .domains
+            .iter()
+            .map(|d| validate_domain(d))
+            .collect::<Result<Vec<_>, _>>()?;
+        for host in hosts {
+            self.by_host.insert(host, spec.clone());
+        }
+        Ok(())
     }
 
     /// Remove every host entry owned by `route_key`.
@@ -74,9 +160,10 @@ impl RouteTable {
         self.by_host.retain(|_, spec| spec.route_key != route_key);
     }
 
-    /// Resolve a request `Host` to its owning route, if any.
+    /// Resolve a request `Host` to its owning route, if any. The lookup key is
+    /// lowercased so a mixed-case `Host` header still matches (audit A2).
     pub fn resolve(&self, host: &str) -> Option<&RouteSpec> {
-        self.by_host.get(host)
+        self.by_host.get(&host.to_ascii_lowercase())
     }
 
     /// Number of distinct host entries (for diagnostics/tests).
@@ -111,14 +198,24 @@ pub struct CertStore {
 }
 
 impl CertStore {
-    /// Insert or replace the certificate served for `sni`.
-    pub fn insert(&mut self, sni: impl Into<String>, cert: ParsedCert) {
-        self.by_sni.insert(sni.into(), cert);
+    /// Insert or replace the certificate served for `sni`, validating and
+    /// lowercasing the SNI key via [`validate_domain`] (audit A2/A5). Returns
+    /// [`IngressError::InvalidDomain`] for a malformed SNI so unsanitized hosts
+    /// never become handshake-selection keys.
+    pub fn try_insert(
+        &mut self,
+        sni: impl AsRef<str>,
+        cert: ParsedCert,
+    ) -> Result<(), IngressError> {
+        let key = validate_domain(sni.as_ref())?;
+        self.by_sni.insert(key, cert);
+        Ok(())
     }
 
-    /// Look up the certificate for an exact SNI, if present.
+    /// Look up the certificate for an SNI, if present. The lookup key is
+    /// lowercased so case-variant SNI still matches (audit A2).
     pub fn get(&self, sni: &str) -> Option<&ParsedCert> {
-        self.by_sni.get(sni)
+        self.by_sni.get(&sni.to_ascii_lowercase())
     }
 
     /// Number of certificates held (for diagnostics/tests).
@@ -405,6 +502,25 @@ impl IngressState {
             return Ok(Some(socket));
         }
 
+        // Bound the whole activation + post-activation wait so a hung
+        // `ActivationHook::activate()` cannot block the proxy hot path forever
+        // (audit A4). On elapse we drop the gate guard and return `Timeout`,
+        // letting a later request retry fresh.
+        match tokio::time::timeout(ACTIVATION_WAIT, self.activate_and_wait(service, &activator))
+            .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(ActivationError::Timeout),
+        }
+    }
+
+    /// Run the activation hook then poll for a healthy socket. Wrapped by
+    /// `resolve_or_activate` in an overall `ACTIVATION_WAIT` timeout.
+    async fn activate_and_wait(
+        &self,
+        service: &str,
+        activator: &Arc<dyn ActivationHook>,
+    ) -> Result<Option<PathBuf>, ActivationError> {
         activator.activate(service).await?;
 
         for attempt in 0..POST_ACTIVATION_RETRIES {
@@ -477,6 +593,199 @@ mod route_table_tests {
         let resolved = t.resolve("app.example.com").expect("resolved");
         assert_eq!(resolved.service_name, "new");
         assert!(resolved.tls);
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn validate_domain_accepts_normal_domain() {
+        assert_eq!(
+            validate_domain("api.example.com").unwrap(),
+            "api.example.com"
+        );
+    }
+
+    #[test]
+    fn validate_domain_normalizes_uppercase_to_lower() {
+        assert_eq!(
+            validate_domain("API.Example.COM").unwrap(),
+            "api.example.com"
+        );
+    }
+
+    #[test]
+    fn validate_domain_rejects_empty_and_whitespace() {
+        assert!(matches!(
+            validate_domain(""),
+            Err(IngressError::InvalidDomain(_))
+        ));
+        assert!(matches!(
+            validate_domain("   "),
+            Err(IngressError::InvalidDomain(_))
+        ));
+    }
+
+    #[test]
+    fn validate_domain_rejects_backtick_and_crlf() {
+        assert!(validate_domain("ev`il.com").is_err());
+        assert!(validate_domain("evil.com\r").is_err());
+        assert!(validate_domain("evil.com\n").is_err());
+        assert!(validate_domain("ev il.com").is_err());
+        assert!(validate_domain("ev\til.com").is_err());
+    }
+
+    #[test]
+    fn validate_domain_rejects_non_ascii() {
+        // Cyrillic homoglyph "а" (U+0430) — must be rejected, not silently routed.
+        assert!(validate_domain("exаmple.com").is_err());
+        assert!(validate_domain("xn--mnchen-3ya.de").is_ok()); // punycode ASCII OK
+    }
+
+    #[test]
+    fn validate_domain_rejects_wildcards() {
+        assert!(validate_domain("*.example.com").is_err());
+        assert!(validate_domain("foo.*.com").is_err());
+    }
+
+    #[test]
+    fn validate_domain_rejects_overlong_total_and_label() {
+        let long_total = format!("{}.com", "a".repeat(252));
+        assert!(validate_domain(&long_total).is_err());
+        let long_label = format!("{}.com", "a".repeat(64));
+        assert!(validate_domain(&long_label).is_err());
+    }
+
+    #[test]
+    fn validate_domain_rejects_dot_edges_and_empty_labels() {
+        assert!(validate_domain(".example.com").is_err());
+        assert!(validate_domain("example.com.").is_err());
+        assert!(validate_domain("a..b.com").is_err());
+    }
+
+    #[test]
+    fn try_upsert_rejects_empty_service_name() {
+        let mut t = RouteTable::default();
+        assert_eq!(
+            t.try_upsert(RouteSpec {
+                route_key: "k".into(),
+                service_name: "  ".into(),
+                domains: vec!["a.example.com".into()],
+                tls: false,
+            }),
+            Err(IngressError::EmptyServiceName)
+        );
+        assert_eq!(t.host_count(), 0);
+    }
+
+    #[test]
+    fn try_upsert_rejects_missing_domains() {
+        let mut t = RouteTable::default();
+        assert_eq!(
+            t.try_upsert(RouteSpec {
+                route_key: "k".into(),
+                service_name: "api".into(),
+                domains: vec![],
+                tls: false,
+            }),
+            Err(IngressError::MissingDomain)
+        );
+    }
+
+    #[test]
+    fn try_upsert_rejects_invalid_domain_and_inserts_nothing() {
+        let mut t = RouteTable::default();
+        assert!(matches!(
+            t.try_upsert(RouteSpec {
+                route_key: "k".into(),
+                service_name: "api".into(),
+                domains: vec!["good.example.com".into(), "ev`il.com".into()],
+                tls: false,
+            }),
+            Err(IngressError::InvalidDomain(_))
+        ));
+        // Reject is all-or-nothing: no partial insertion.
+        assert_eq!(t.host_count(), 0);
+    }
+
+    #[test]
+    fn try_upsert_normalizes_domains_to_lowercase() {
+        let mut t = RouteTable::default();
+        t.try_upsert(RouteSpec {
+            route_key: "k".into(),
+            service_name: "api".into(),
+            domains: vec!["API.Example.COM".into()],
+            tls: false,
+        })
+        .unwrap();
+        assert!(t.resolve("api.example.com").is_some());
+    }
+
+    #[test]
+    fn resolve_lowercases_lookup_argument() {
+        let mut t = RouteTable::default();
+        t.try_upsert(RouteSpec {
+            route_key: "k".into(),
+            service_name: "api".into(),
+            domains: vec!["api.example.com".into()],
+            tls: false,
+        })
+        .unwrap();
+        assert!(t.resolve("API.EXAMPLE.COM").is_some());
+    }
+
+    /// Throwaway self-signed EC test material (NOT a secret; generated solely
+    /// for parsing in unit tests, never used on the wire).
+    const TEST_KEY_PEM: &[u8] = b"-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgZFwD6luyekuuSrp6\n\
+jir4r0J1o+Lb2L1YFBR7HBJHCE2hRANCAATBJ6iTtPrDFPLnqcNA/87722/N255n\n\
+xDZ2oRsDFpP735ud77NSPM8v0nRsW9nBm0C4JsOfznUnNCFfbQBs/3Rn\n\
+-----END PRIVATE KEY-----\n";
+    const TEST_CERT_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----\n\
+MIIBfzCCASWgAwIBAgIUT2TFIC8WbUryUcwKjixECF5vQoswCgYIKoZIzj0EAwIw\n\
+FTETMBEGA1UEAwwKZGVuaWEtdGVzdDAeFw0yNjA1MjcxODQ1MjNaFw0zNjA1MjQx\n\
+ODQ1MjNaMBUxEzARBgNVBAMMCmRlbmlhLXRlc3QwWTATBgcqhkjOPQIBBggqhkjO\n\
+PQMBBwNCAATBJ6iTtPrDFPLnqcNA/87722/N255nxDZ2oRsDFpP735ud77NSPM8v\n\
+0nRsW9nBm0C4JsOfznUnNCFfbQBs/3Rno1MwUTAdBgNVHQ4EFgQUQ+pPRiWYnXOs\n\
+F7Gt+6mn7TM+MOYwHwYDVR0jBBgwFoAUQ+pPRiWYnXOsF7Gt+6mn7TM+MOYwDwYD\n\
+VR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiEA7rINC49fiLX2DYAE06Cm\n\
+7WYc7cctlyaUC0Nr9HUIgkQCIDQkV/AqQqzeDIL0B1zFwp8gttKI+dcUY0EOFPnf\n\
+/bBZ\n\
+-----END CERTIFICATE-----\n";
+
+    /// Build a throwaway `ParsedCert` for cert-store tests by parsing the
+    /// embedded test PEMs via the re-exported boring modules.
+    fn fake_cert() -> ParsedCert {
+        let key = PKey::private_key_from_pem(TEST_KEY_PEM).unwrap();
+        let cert = X509::from_pem(TEST_CERT_PEM).unwrap();
+        ParsedCert {
+            chain: vec![cert],
+            key,
+        }
+    }
+
+    #[test]
+    fn cert_store_insert_validates_and_lowercases_sni() {
+        let mut store = CertStore::default();
+        store
+            .try_insert("API.Example.COM", fake_cert())
+            .expect("valid sni");
+        // Stored lowercased.
+        assert!(store.get("api.example.com").is_some());
+        // Lookup is also case-insensitive.
+        assert!(store.get("API.EXAMPLE.COM").is_some());
+    }
+
+    #[test]
+    fn cert_store_insert_rejects_invalid_sni() {
+        let mut store = CertStore::default();
+        assert!(matches!(
+            store.try_insert("ev`il.com", fake_cert()),
+            Err(IngressError::InvalidDomain(_))
+        ));
+        assert!(store.is_empty());
     }
 }
 
@@ -659,5 +968,83 @@ mod pool_tests {
         let resolved = state.resolve_or_activate("svc").await.expect("resolve");
         assert!(resolved.is_some());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Hook that blocks far longer than `ACTIVATION_WAIT`, simulating a hung
+    /// controller, to prove the hot path is bounded (A4).
+    struct HangingActivator;
+
+    #[async_trait]
+    impl ActivationHook for HangingActivator {
+        async fn activate(&self, _service: &str) -> Result<(), ActivationError> {
+            // Far longer than the (paused) ACTIVATION_WAIT clock will advance.
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn activation_times_out_when_hook_hangs() {
+        let state = IngressState::default();
+        state.set_activator(Arc::new(HangingActivator)).await;
+
+        let result = state.resolve_or_activate("svc").await;
+        assert!(
+            matches!(result, Err(ActivationError::Timeout)),
+            "a hung activation must elapse ACTIVATION_WAIT and return Timeout, got {result:?}"
+        );
+    }
+
+    /// Hook that counts calls and, after a small delay, registers a healthy
+    /// replica. The delay widens the race window so concurrent waiters pile up
+    /// on the single-flight gate.
+    struct SlowCountingActivator {
+        state: Arc<IngressState>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ActivationHook for SlowCountingActivator {
+        async fn activate(&self, service: &str) -> Result<(), ActivationError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let id = Uuid::now_v7();
+            self.state
+                .add_replica(service, id, PathBuf::from("/run/denia/sf.sock"))
+                .await;
+            self.state.set_replica_healthy(service, id, true).await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_resolves_trigger_single_activation() {
+        let state = Arc::new(IngressState::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        state
+            .set_activator(Arc::new(SlowCountingActivator {
+                state: state.clone(),
+                calls: calls.clone(),
+            }))
+            .await;
+
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..16 {
+            let state = state.clone();
+            set.spawn(async move { state.resolve_or_activate("svc").await });
+        }
+
+        let mut resolved = 0usize;
+        while let Some(joined) = set.join_next().await {
+            let socket = joined.expect("task join").expect("resolve");
+            assert_eq!(socket, Some(PathBuf::from("/run/denia/sf.sock")));
+            resolved += 1;
+        }
+        assert_eq!(resolved, 16);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "single-flight: exactly one activation for N concurrent cold-service requests"
+        );
     }
 }
