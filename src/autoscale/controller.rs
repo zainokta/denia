@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::artifacts::ArtifactRecord;
 use crate::autoscale::ledger::ResourceLedger;
 use crate::autoscale::lifecycle::{LaunchSpec, LifecycleError, drain_replica, launch_replica};
-use crate::autoscale::registry::{Replica, ReplicaRegistry};
+use crate::autoscale::registry::{Replica, ReplicaRegistry, ReplicaState};
 use crate::autoscale::scaler::{CooldownState, clamp_loop, desired_down, desired_up};
 use crate::autoscale::usage::{ServiceUsage, UsageSampler};
 use crate::domain::{AutoscalePolicy, HealthCheck, ResourceLimits, RuntimeInstanceId};
@@ -49,6 +49,18 @@ pub enum AutoscaleEvent {
     RolloutStep {
         service: String,
         to_deployment: Uuid,
+    },
+    /// A pre-existing running replica (survived a restart) was re-adopted into
+    /// the in-memory registry during boot reconcile.
+    Adopted {
+        service: String,
+        replica_index: u32,
+    },
+    /// A running workload with no managing service (unknown service or stale
+    /// deployment) was stopped during boot reconcile.
+    OrphanRemoved {
+        service: String,
+        replica_index: u32,
     },
 }
 
@@ -186,6 +198,127 @@ impl Controller {
             Err(LifecycleError::Health) => Err(ActivationError::Failed("health".into())),
             Err(LifecycleError::Runtime(e)) => Err(ActivationError::Failed(e)),
         }
+    }
+
+    /// Boot reconcile (ADR-016). On control-plane startup the in-memory
+    /// [`ReplicaRegistry`] is empty, but workloads may still be running from
+    /// before a crash or restart. This:
+    ///
+    /// 1. enumerates running workloads via the runtime,
+    /// 2. ADOPTS any whose service is still managed AND whose `deployment_id`
+    ///    matches the service's active deployment (registers them Healthy, adds
+    ///    them to the bridge, reserves their budget in the ledger),
+    /// 3. KILLs + cleans the rest (orphans: unknown service, or stale
+    ///    deployment), and
+    /// 4. TOPS UP each managed service to its persisted desired count.
+    pub async fn reconcile_boot(&mut self, services: &[ManagedService]) -> Vec<AutoscaleEvent> {
+        let mut events = Vec::new();
+        let running = self.runtime.list_running().await.unwrap_or_default();
+
+        for status in &running {
+            let managed = services
+                .iter()
+                .find(|m| m.service_name == status.service_name);
+            // ADOPT only when the service is still managed, its deployment
+            // matches, AND the ledger has budget. Otherwise (unknown service,
+            // stale deployment, or no budget) the workload is an orphan.
+            let adopt = match managed {
+                Some(ms)
+                    if status.deployment_id == ms.deployment_id
+                        && self.ledger.try_reserve(&ms.limits).is_ok() =>
+                {
+                    let id = self.registry.add(
+                        ms.service_id,
+                        status.deployment_id,
+                        status.replica_index,
+                        status.socket_path.clone(),
+                    );
+                    self.registry.set_state(id, ReplicaState::Healthy);
+                    self.bridge
+                        .add_replica(&ms.service_name, id, status.socket_path.clone())
+                        .await;
+                    self.bridge
+                        .set_replica_healthy(&ms.service_name, id, true)
+                        .await;
+                    events.push(AutoscaleEvent::Adopted {
+                        service: ms.service_name.clone(),
+                        replica_index: status.replica_index,
+                    });
+                    true
+                }
+                _ => false,
+            };
+
+            if !adopt {
+                let instance = RuntimeInstanceId {
+                    service_name: status.service_name.clone(),
+                    replica_index: status.replica_index,
+                };
+                let _ = self.runtime.stop(&instance).await;
+                events.push(AutoscaleEvent::OrphanRemoved {
+                    service: status.service_name.clone(),
+                    replica_index: status.replica_index,
+                });
+            }
+        }
+
+        // Top up each managed service to its persisted desired count, clamped to
+        // the policy bounds. A `min_replicas==0` service with no persisted
+        // desired stays at 0 (the activator wakes it on the first request).
+        for ms in services {
+            let desired = self
+                .store
+                .get_desired_replicas(ms.service_id)
+                .ok()
+                .flatten()
+                .unwrap_or(ms.policy.min_replicas);
+            let target = desired.clamp(ms.policy.min_replicas, ms.policy.max_replicas);
+            let start = self.registry.replica_count(ms.service_id) as u32;
+            let mut current = start;
+
+            while current < target {
+                let index = self.next_replica_index(ms.service_id);
+                let spec = launch_spec(ms, index);
+                match launch_replica(
+                    &spec,
+                    &mut self.registry,
+                    &mut self.ledger,
+                    self.runtime.as_ref(),
+                    self.bridge.as_ref(),
+                    self.health.as_ref(),
+                )
+                .await
+                {
+                    Ok(_) => current += 1,
+                    Err(LifecycleError::Capacity) => {
+                        events.push(AutoscaleEvent::ScaleUpDenied {
+                            service: ms.service_name.clone(),
+                            reason: "insufficient_capacity".to_string(),
+                        });
+                        break;
+                    }
+                    Err(e) => {
+                        events.push(AutoscaleEvent::ScaleUpDenied {
+                            service: ms.service_name.clone(),
+                            reason: e.to_string(),
+                        });
+                        break;
+                    }
+                }
+            }
+
+            if current > start {
+                events.push(AutoscaleEvent::ScaledUp {
+                    service: ms.service_name.clone(),
+                    from: start,
+                    to: current,
+                });
+            }
+
+            self.store.set_desired_replicas(ms.service_id, current).ok();
+        }
+
+        events
     }
 
     /// Drive each service one step toward its desired replica count.
@@ -1161,6 +1294,151 @@ mod tests {
             ActivationError::Failed(reason) => assert_eq!(reason, "unknown service"),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// Pre-start a workload directly in a [`FakeRuntime`] so its `list_running`
+    /// reports it, simulating a replica that survived a control-plane restart.
+    async fn prestart(
+        runtime: &FakeRuntime,
+        service_name: &str,
+        deployment_id: Uuid,
+        replica_index: u32,
+    ) {
+        use crate::domain::RuntimeStartRequest;
+        runtime
+            .start(RuntimeStartRequest {
+                service_name: service_name.to_string(),
+                service_id: Uuid::now_v7(),
+                deployment_id,
+                artifact: artifact(),
+                internal_port: 8080,
+                socket_path: format!("/run/denia/{service_name}-{replica_index}.sock").into(),
+                cpu_millis: 0,
+                memory_bytes: 0,
+                env: Vec::new(),
+                replica_index,
+            })
+            .await
+            .expect("prestart");
+    }
+
+    #[tokio::test]
+    async fn reconcile_adopts_matching_and_kills_stale() {
+        let svc = Uuid::now_v7();
+        let d_active = Uuid::now_v7();
+        let d_old = Uuid::now_v7();
+        let mut ms = managed(svc);
+        ms.deployment_id = d_active;
+
+        let runtime = Arc::new(FakeRuntime::default());
+        // One replica at the active deployment -> ADOPT.
+        prestart(&runtime, "web", d_active, 0).await;
+        // One replica at a stale deployment -> ORPHAN (stop).
+        prestart(&runtime, "web", d_old, 1).await;
+        // One replica for an unknown service -> ORPHAN (stop).
+        prestart(&runtime, "ghost", d_active, 0).await;
+
+        let mut ctrl = controller_full(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::with(ms.clone())),
+            runtime.clone(),
+        );
+
+        let events = ctrl.reconcile_boot(std::slice::from_ref(&ms)).await;
+
+        // Adopted replica is registered Healthy at index 0.
+        let replicas = ctrl.registry.replicas(svc);
+        let adopted = replicas
+            .iter()
+            .find(|r| r.index == 0 && r.deployment_id == d_active)
+            .expect("adopted replica present");
+        assert_eq!(adopted.state, ReplicaState::Healthy);
+        assert_eq!(ctrl.bridge.healthy_count("web").await, 1);
+        assert!(events.contains(&AutoscaleEvent::Adopted {
+            service: "web".to_string(),
+            replica_index: 0,
+        }));
+
+        // The stale and unknown replicas were stopped and reported as orphans.
+        let stopped = runtime.stopped_instances();
+        assert!(
+            stopped
+                .iter()
+                .any(|i| i.service_name == "web" && i.replica_index == 1),
+            "stale web replica stopped"
+        );
+        assert!(
+            stopped
+                .iter()
+                .any(|i| i.service_name == "ghost" && i.replica_index == 0),
+            "unknown ghost replica stopped"
+        );
+        assert!(events.contains(&AutoscaleEvent::OrphanRemoved {
+            service: "web".to_string(),
+            replica_index: 1,
+        }));
+        assert!(events.contains(&AutoscaleEvent::OrphanRemoved {
+            service: "ghost".to_string(),
+            replica_index: 0,
+        }));
+
+        // The stale replica index 1 must not survive in the registry.
+        assert!(replicas.iter().all(|r| r.index != 1));
+    }
+
+    #[tokio::test]
+    async fn reconcile_tops_up_to_persisted_desired() {
+        let svc = Uuid::now_v7();
+        let ms = managed(svc);
+        let runtime = Arc::new(FakeRuntime::default());
+        let mut ctrl = controller_full(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::with(ms.clone())),
+            runtime.clone(),
+        );
+        // Persisted desired of 2, no orphans running.
+        ctrl.store.set_desired_replicas(svc, 2).unwrap();
+
+        let events = ctrl.reconcile_boot(std::slice::from_ref(&ms)).await;
+
+        assert_eq!(ctrl.registry.replica_count(svc), 2);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AutoscaleEvent::Adopted { .. }))
+        );
+        assert_eq!(ctrl.store.get_desired_replicas(svc).unwrap(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn reconcile_min_zero_stays_zero() {
+        let svc = Uuid::now_v7();
+        let mut ms = managed(svc);
+        ms.policy = scale_to_zero_policy();
+        let runtime = Arc::new(FakeRuntime::default());
+        let mut ctrl = controller_full(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::with(ms.clone())),
+            runtime.clone(),
+        );
+
+        // No persisted desired, min_replicas == 0, no orphans.
+        let _events = ctrl.reconcile_boot(std::slice::from_ref(&ms)).await;
+
+        assert_eq!(ctrl.registry.replica_count(svc), 0);
+        assert!(runtime.started_requests().is_empty());
     }
 
     #[tokio::test]
