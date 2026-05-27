@@ -69,6 +69,24 @@ should not install or configure Traefik separately.
    `tls.certResolver: le` (`acme_resolver`, default `le`). The generated static
    config defines a matching `le` resolver so the two halves line up.
 
+6. **We consume only the Traefik binary, and require it to be statically
+   linked.** The official Traefik release binary is pure-Go, `CGO_ENABLED=0`
+   (statically linked); it needs no dynamic loader and reads the *host* CA trust
+   store (`/etc/ssl/certs`) via Go's `crypto/x509`. Denia therefore execs
+   `rootfs/usr/local/bin/traefik` directly on the host without chroot and does
+   **not** depend on the rest of the unpacked Alpine rootfs (so the unpacker's
+   rejection of absolute symlink targets — `src/oci/unpack.rs` — is irrelevant
+   here; only the single binary is used). A startup smoke-test (`traefik
+   version`) verifies the binary actually executes on this host before entering
+   the serve loop; if it fails (e.g. a future non-static image), the supervisor
+   surfaces a fatal error with guidance instead of crash-looping. A
+   chroot-into-rootfs fallback is explicitly out of scope for v1.
+
+7. **ACME (`/.well-known/acme-challenge`) and Denia domain verification
+   (`/.well-known/denia-challenge`) are distinct and coexist.** They occupy
+   different path prefixes and serve different purposes; see "ACME vs Denia
+   domain verification" below. Neither replaces the other.
+
 ## Configuration (`src/config.rs`)
 
 New fields on `AppConfig`:
@@ -91,6 +109,20 @@ Derived:
   - **External mode:** unchanged default `/etc/traefik/dynamic/denia.yml`.
   - `DENIA_TRAEFIK_DYNAMIC_CONFIG` overrides in both modes.
 
+### Upgrade path (default-on caveat)
+
+Managed mode is default-on, so an existing node upgrading to this version
+switches behavior on next boot: (a) the dynamic-config path moves from
+`/etc/traefik/dynamic/denia.yml` to `traefik_dir/dynamic/denia.yml`, and (b)
+Denia starts its own Traefik on `:80`/`:443`. If an operator-installed Traefik is
+already bound to those ports, the managed child will hit `EADDRINUSE`. The
+supervisor treats `EADDRINUSE` on the listen ports as a **fatal, non-retried**
+error with an explicit message ("port already in use; stop the external Traefik
+or set `DENIA_MANAGE_TRAEFIK=0`") rather than entering infinite backoff.
+Operators who intend to keep their own edge set `DENIA_MANAGE_TRAEFIK=0`, which
+restores the legacy path and disables supervision. This caveat is called out in
+the README upgrade notes.
+
 New `ConfigError` variant: `AcmeEmailRequired` (managed + TLS-in-use + no email).
 Note: "TLS in use" is determined at startup from existing services
 (`tls_enabled`); if none yet, missing email is allowed until the first TLS
@@ -104,14 +136,26 @@ Add a helper (e.g. `pull_image_to_dir(image, dest_rootfs) -> Result<digest>`):
 
 1. Pull manifest + layers via the existing `RegistryImagePuller` (anonymous auth
    for Docker Hub public image).
-2. Unpack layers into `traefik_dir/rootfs` via `OciRootfsUnpacker`.
-3. Write the resolved manifest digest to `traefik_dir/.image-digest`.
+2. Unpack layers into a **temp dir** under `traefik_dir`, then atomically rename
+   to `traefik_dir/rootfs` (avoids a half-unpacked rootfs being treated as
+   valid if the process crashes mid-extraction).
+3. Verify the binary exists at `rootfs/usr/local/bin/traefik` and passes the
+   `traefik version` smoke-test (Decision 6).
+4. Only after (2)+(3) succeed, write the resolved manifest digest to
+   `traefik_dir/.image-digest`.
 
 Digest cache: on boot, if `.image-digest` matches the configured image's resolved
-digest, skip pull/unpack. (For a digest-pinned ref the comparison is local; for a
-tag, a lightweight manifest HEAD resolves the digest first.)
+digest **and** the binary is present, skip pull/unpack. For a digest-pinned ref
+the comparison is local. For a tag, resolving the remote digest may require a full
+manifest GET if `oci-client`/`RegistryImagePuller` cannot do a HEAD-only resolve —
+the helper falls back to GET; this is acceptable (boot-time, infrequent).
+
+The supervisor is the **sole writer** of `traefik_dir` (single task), so no
+concurrent-pull locking is needed.
 
 Binary path: `traefik_dir/rootfs/usr/local/bin/traefik` (official image layout).
+Only this binary is consumed; the rest of the rootfs is not relied upon
+(Decision 6). CA trust comes from the host (`/etc/ssl/certs`).
 
 ## Static Config Generation (`src/ingress/traefik_supervisor.rs`, new)
 
@@ -154,13 +198,20 @@ A `TraefikSupervisor` with an async run loop, spawned at boot independently of
    `traefik_dir`. No namespaces; inherits root (binds privileged ports).
 4. Pipe child stdout/stderr → `log_dir/traefik.log`.
 5. Watchdog: on child exit, restart with exponential backoff (1s → cap 30s; reset
-   after stable uptime).
+   after stable uptime). **Exception:** if the child fails to bind a listen port
+   (`EADDRINUSE`), treat it as fatal and stop retrying (see Upgrade path) — log a
+   clear message rather than crash-looping.
 6. Shutdown: on control-plane `ctrl_c`, send SIGTERM to the child, await exit with
    a timeout, then SIGKILL fallback.
 
 Failure isolation: if acquisition fails, log + retry with backoff. The control
 plane keeps serving on `bind_addr` (admin reaches `IP:7180` directly), so a
 Traefik problem never deadlocks management.
+
+**Restart drops in-flight connections.** A binary restart is not graceful for
+active connections (no socket handoff / `SO_REUSEPORT`). Config changes are hot
+(file-provider `watch: true`) and do not restart the process; only crashes and
+shutdown do. This is an accepted v1 limitation.
 
 Inject a spawn abstraction (trait or fn pointer) so restart/backoff logic is
 unit-testable without pulling a real image or binding ports.
@@ -175,6 +226,29 @@ unchanged except for the path they write to, which already comes from
 `config.traefik_dynamic_config_path`. In managed mode that path resolves under
 `traefik_dir/dynamic/`. Traefik's file provider (`watch: true`) hot-reloads on
 write — same contract as today.
+
+## ACME vs Denia domain verification (coexistence)
+
+Two distinct `/.well-known/` flows run on the `web` (`:80`) entrypoint; they do
+not collide because they own different path prefixes:
+
+- **`/.well-known/acme-challenge/…`** — served **internally by Traefik's own
+  HTTP-01 solver** (configured via `httpChallenge.entryPoint: web`). No dynamic
+  router is generated for this; Traefik intercepts the prefix itself when issuing
+  a cert for the `le` resolver. This is new with managed mode.
+- **`/.well-known/denia-challenge/…`** — Denia's existing per-service **domain
+  ownership verification** (ADR-013). `render_file_provider_config`
+  (`src/ingress/traefik.rs`) emits a high-priority router on `web` that forwards
+  this prefix to `control_backend_addr`. This is **retained unchanged**: it
+  verifies that a domain points at this node *before* the domain is added to the
+  routable set — a separate concern from issuing the TLS cert.
+
+Sequencing for a TLS-enabled custom domain: (1) operator adds the domain → Denia
+verifies ownership via `denia-challenge`; (2) once verified, the domain enters
+the dynamic config with `tls.certResolver: le`; (3) Traefik then obtains the cert
+via `acme-challenge`. The spec keeps both routers; the implementation must NOT
+remove or remap the `denia-challenge` router, and must NOT add a `denia` router
+for `acme-challenge` (Traefik owns it).
 
 ## Privileges / Isolation
 
@@ -217,12 +291,28 @@ Traefik) at far lower architectural cost.
 - Supervisor restart: injected fake spawner that "exits" triggers backoff +
   restart; backoff schedule monotonic up to the cap and resets after stable
   uptime; shutdown signal stops the loop and terminates the child.
+- `EADDRINUSE` from the fake spawner → fatal, no retry (not backoff).
+- Acquisition atomicity: a fake unpacker that fails mid-way leaves no
+  `.image-digest` and no `rootfs` (temp-dir rename not performed); next boot
+  re-pulls. Binary-presence/smoke-test failure → fatal with guidance.
 - `acme.json` created `0600` when absent.
 
 ### Manual / integration
 
 - On a host with cgroup v2: managed boot pulls Traefik, serves `:80`, issues a
   cert for a verified domain via HTTP-01, hot-reloads on a new deployment.
+
+## Operational Notes / Known Limitations
+
+- **SELinux/AppArmor:** a rootful host process exec'ing a binary from `data_dir`
+  may be denied under enforcing SELinux (wrong file context) or an AppArmor
+  profile. Document a relabel/exception step; surface exec-permission errors with
+  guidance. Not solved in-code for v1.
+- **`traefik.log` growth:** the supervisor appends child stdout/stderr to
+  `log_dir/traefik.log` with no rotation in v1. Note size-cap/rotation as a
+  follow-up (or rely on the operator's logrotate).
+- **Restart drops in-flight connections** (see Supervisor) — accepted v1
+  limitation.
 
 ## Verification Commands
 
