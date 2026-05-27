@@ -9,8 +9,56 @@ use tokio::{
     task::JoinHandle,
     time::{Duration, timeout},
 };
+use uuid::Uuid;
 
 use crate::access_log::{AccessEntry, AccessLogStore, parse_request_line, parse_status_line};
+
+/// A single replica's loopback Unix endpoint within a service's bridge pool.
+#[derive(Debug, Clone)]
+pub struct ReplicaEndpoint {
+    pub replica_id: Uuid,
+    pub socket_path: PathBuf,
+    pub healthy: bool,
+}
+
+/// Per-service fan-out state: the set of replica endpoints, a round-robin
+/// cursor over the healthy ones, and the last time a connection was proxied.
+struct ServicePool {
+    endpoints: Vec<ReplicaEndpoint>,
+    cursor: usize,
+    last_activity: Instant,
+}
+
+impl ServicePool {
+    fn new() -> Self {
+        Self {
+            endpoints: Vec::new(),
+            cursor: 0,
+            last_activity: Instant::now(),
+        }
+    }
+
+    fn healthy_count(&self) -> usize {
+        self.endpoints.iter().filter(|e| e.healthy).count()
+    }
+
+    /// Round-robin over `healthy == true` endpoints, advancing the cursor.
+    /// Returns `None` if no healthy endpoint exists.
+    fn next_socket(&mut self) -> Option<PathBuf> {
+        let len = self.endpoints.len();
+        if len == 0 {
+            return None;
+        }
+        for offset in 0..len {
+            let idx = (self.cursor + offset) % len;
+            if self.endpoints[idx].healthy {
+                self.cursor = (idx + 1) % len;
+                return Some(self.endpoints[idx].socket_path.clone());
+            }
+        }
+        None
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeTarget {
@@ -116,6 +164,11 @@ impl BridgeManager for FakeBridgeManager {
     }
 }
 
+/// Stable replica id used for the single endpoint registered by `activate`.
+/// `activate` carries no replica identity, so a fixed nil-derived id keeps the
+/// initial endpoint addressable (and replaceable) for single-instance services.
+const ACTIVATE_REPLICA_ID: Uuid = Uuid::nil();
+
 #[derive(Default, Clone)]
 pub struct LoopbackBridgeSupervisor {
     inner: Arc<LoopbackBridgeInner>,
@@ -124,7 +177,19 @@ pub struct LoopbackBridgeSupervisor {
 #[derive(Default)]
 struct LoopbackBridgeInner {
     tasks: Mutex<BTreeMap<String, BridgeTask>>,
+    pools: Mutex<BTreeMap<String, ServicePool>>,
     access_log: AccessLogStore,
+}
+
+impl LoopbackBridgeInner {
+    /// Round-robin the next healthy socket for `service` and record activity.
+    async fn next_socket(&self, service: &str) -> Option<PathBuf> {
+        let mut pools = self.pools.lock().await;
+        let pool = pools.get_mut(service)?;
+        let socket = pool.next_socket()?;
+        pool.last_activity = Instant::now();
+        Some(socket)
+    }
 }
 
 impl LoopbackBridgeSupervisor {
@@ -132,6 +197,7 @@ impl LoopbackBridgeSupervisor {
         Self {
             inner: Arc::new(LoopbackBridgeInner {
                 tasks: Mutex::new(BTreeMap::new()),
+                pools: Mutex::new(BTreeMap::new()),
                 access_log,
             }),
         }
@@ -139,6 +205,85 @@ impl LoopbackBridgeSupervisor {
 
     pub fn access_log(&self) -> AccessLogStore {
         self.inner.access_log.clone()
+    }
+
+    /// Insert or replace a replica endpoint (default `healthy = false`),
+    /// creating the service pool if it does not yet exist.
+    pub async fn add_replica(&self, service: &str, replica_id: Uuid, socket_path: PathBuf) {
+        self.add_replica_with_health(service, replica_id, socket_path, false)
+            .await;
+    }
+
+    async fn add_replica_with_health(
+        &self,
+        service: &str,
+        replica_id: Uuid,
+        socket_path: PathBuf,
+        healthy: bool,
+    ) {
+        let mut pools = self.inner.pools.lock().await;
+        let pool = pools
+            .entry(service.to_string())
+            .or_insert_with(ServicePool::new);
+        let endpoint = ReplicaEndpoint {
+            replica_id,
+            socket_path,
+            healthy,
+        };
+        if let Some(existing) = pool
+            .endpoints
+            .iter_mut()
+            .find(|e| e.replica_id == replica_id)
+        {
+            *existing = endpoint;
+        } else {
+            pool.endpoints.push(endpoint);
+        }
+    }
+
+    /// Mark a replica endpoint healthy or unhealthy. No-op if absent.
+    pub async fn set_replica_healthy(&self, service: &str, replica_id: Uuid, healthy: bool) {
+        let mut pools = self.inner.pools.lock().await;
+        if let Some(pool) = pools.get_mut(service)
+            && let Some(endpoint) = pool
+                .endpoints
+                .iter_mut()
+                .find(|e| e.replica_id == replica_id)
+        {
+            endpoint.healthy = healthy;
+        }
+    }
+
+    /// Remove a replica endpoint. No-op if absent.
+    pub async fn remove_replica(&self, service: &str, replica_id: Uuid) {
+        let mut pools = self.inner.pools.lock().await;
+        if let Some(pool) = pools.get_mut(service) {
+            pool.endpoints.retain(|e| e.replica_id != replica_id);
+            if pool.cursor >= pool.endpoints.len() {
+                pool.cursor = 0;
+            }
+        }
+    }
+
+    /// Number of healthy endpoints for `service`.
+    pub async fn healthy_count(&self, service: &str) -> usize {
+        let pools = self.inner.pools.lock().await;
+        pools
+            .get(service)
+            .map(ServicePool::healthy_count)
+            .unwrap_or(0)
+    }
+
+    /// Last time a connection was proxied for `service`, if the pool exists.
+    pub async fn last_activity(&self, service: &str) -> Option<Instant> {
+        let pools = self.inner.pools.lock().await;
+        pools.get(service).map(|pool| pool.last_activity)
+    }
+
+    /// Round-robin the next healthy socket for `service`, advancing the cursor
+    /// and updating `last_activity`. `None` if no healthy endpoint exists.
+    pub async fn next_socket(&self, service: &str) -> Option<PathBuf> {
+        self.inner.next_socket(service).await
     }
 }
 
@@ -149,33 +294,32 @@ struct BridgeTask {
 
 pub struct LoopbackBridge {
     listener: TcpListener,
-    socket_path: PathBuf,
     service_name: String,
     access_log: AccessLogStore,
     connection_sem: Arc<tokio::sync::Semaphore>,
+    pools: Arc<LoopbackBridgeInner>,
 }
 
 const BRIDGE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONCURRENT_PER_BRIDGE: usize = 256;
 
 impl LoopbackBridge {
-    pub async fn bind(port: u16, socket_path: impl Into<PathBuf>) -> Result<Self, BridgeError> {
-        Self::bind_with_log(port, socket_path, String::new(), AccessLogStore::new()).await
-    }
-
-    pub async fn bind_with_log(
+    /// Bind a per-service TCP listener that fans out across the supervisor's
+    /// replica pool for `service_name`. The target Unix socket is resolved per
+    /// connection via the pool's round-robin selection.
+    async fn bind_with_pool(
         port: u16,
-        socket_path: impl Into<PathBuf>,
         service_name: String,
-        access_log: AccessLogStore,
+        pools: Arc<LoopbackBridgeInner>,
     ) -> Result<Self, BridgeError> {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
+        let access_log = pools.access_log.clone();
         Ok(Self {
             listener,
-            socket_path: socket_path.into(),
             service_name,
             access_log,
             connection_sem: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PER_BRIDGE)),
+            pools,
         })
     }
 
@@ -194,7 +338,20 @@ impl LoopbackBridge {
             .await
             .map_err(|_| BridgeError::Io(std::io::Error::other("semaphore closed")))?;
         let (tcp, _) = self.listener.accept().await?;
-        let unix = UnixStream::connect(&self.socket_path).await?;
+        // Resolve a healthy replica socket per connection. With zero healthy
+        // endpoints, close the connection cleanly (the activator/cold-start
+        // path is a separate, later task).
+        let Some(socket_path) = self.pools.next_socket(&self.service_name).await else {
+            drop(tcp);
+            return Ok(());
+        };
+        let unix = match UnixStream::connect(&socket_path).await {
+            Ok(unix) => unix,
+            Err(_) => {
+                drop(tcp);
+                return Ok(());
+            }
+        };
         let log = self.access_log.clone();
         let service = self.service_name.clone();
         tokio::spawn(async move {
@@ -338,11 +495,22 @@ async fn tee_proxy(
 #[async_trait]
 impl BridgeManager for LoopbackBridgeSupervisor {
     async fn activate(&self, target: BridgeTarget) -> Result<(), BridgeError> {
-        let bridge = LoopbackBridge::bind_with_log(
-            target.port,
+        // Register the target socket as the service's first (healthy) replica
+        // endpoint, preserving single-instance behavior: one listener fans out
+        // to one healthy socket. A stable nil-derived replica id keeps this
+        // endpoint replaceable on re-activation.
+        self.add_replica_with_health(
+            &target.service_name,
+            ACTIVATE_REPLICA_ID,
             target.socket_path.clone(),
+            true,
+        )
+        .await;
+
+        let bridge = LoopbackBridge::bind_with_pool(
+            target.port,
             target.service_name.clone(),
-            self.inner.access_log.clone(),
+            self.inner.clone(),
         )
         .await?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -366,6 +534,211 @@ impl BridgeManager for LoopbackBridgeSupervisor {
             let _ = task.shutdown.send(());
             task.join.abort();
         }
+        self.inner.pools.lock().await.remove(service_name);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpStream, UnixListener};
+
+    fn socket_path(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir();
+        let unique = format!(
+            "denia-bridge-{tag}-{}-{}.sock",
+            std::process::id(),
+            Uuid::now_v7()
+        );
+        dir.join(unique)
+    }
+
+    #[tokio::test]
+    async fn pool_round_robin_over_healthy() {
+        let sup = LoopbackBridgeSupervisor::default();
+        let a = Uuid::now_v7();
+        let b = Uuid::now_v7();
+        let path_a = PathBuf::from("/run/denia/a.sock");
+        let path_b = PathBuf::from("/run/denia/b.sock");
+
+        sup.add_replica("svc", a, path_a.clone()).await;
+        sup.add_replica("svc", b, path_b.clone()).await;
+        // Added unhealthy by default → no selection yet.
+        assert_eq!(sup.healthy_count("svc").await, 0);
+        assert_eq!(sup.next_socket("svc").await, None);
+
+        sup.set_replica_healthy("svc", a, true).await;
+        sup.set_replica_healthy("svc", b, true).await;
+        assert_eq!(sup.healthy_count("svc").await, 2);
+
+        // Round-robin alternates across the two healthy endpoints.
+        let first = sup.next_socket("svc").await.expect("first");
+        let second = sup.next_socket("svc").await.expect("second");
+        let third = sup.next_socket("svc").await.expect("third");
+        assert_ne!(first, second);
+        assert_eq!(first, third);
+        assert!(first == path_a || first == path_b);
+
+        // Mark one unhealthy → only the other is returned.
+        sup.set_replica_healthy("svc", a, false).await;
+        assert_eq!(sup.healthy_count("svc").await, 1);
+        assert_eq!(sup.next_socket("svc").await, Some(path_b.clone()));
+        assert_eq!(sup.next_socket("svc").await, Some(path_b.clone()));
+
+        // Remove the remaining healthy endpoint → None.
+        sup.remove_replica("svc", b).await;
+        assert_eq!(sup.healthy_count("svc").await, 0);
+        assert_eq!(sup.next_socket("svc").await, None);
+    }
+
+    #[tokio::test]
+    async fn next_socket_none_when_no_healthy() {
+        let sup = LoopbackBridgeSupervisor::default();
+        sup.add_replica("svc", Uuid::now_v7(), PathBuf::from("/run/denia/x.sock"))
+            .await;
+        sup.add_replica("svc", Uuid::now_v7(), PathBuf::from("/run/denia/y.sock"))
+            .await;
+        assert_eq!(sup.healthy_count("svc").await, 0);
+        assert_eq!(sup.next_socket("svc").await, None);
+        // Unknown service has no pool.
+        assert_eq!(sup.next_socket("missing").await, None);
+        assert_eq!(sup.last_activity("missing").await, None);
+    }
+
+    #[tokio::test]
+    async fn next_socket_advances_last_activity() {
+        let sup = LoopbackBridgeSupervisor::default();
+        let id = Uuid::now_v7();
+        sup.add_replica("svc", id, PathBuf::from("/run/denia/z.sock"))
+            .await;
+        sup.set_replica_healthy("svc", id, true).await;
+
+        let before = sup.last_activity("svc").await.expect("activity");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let _ = sup.next_socket("svc").await.expect("socket");
+        let after = sup.last_activity("svc").await.expect("activity");
+        assert!(after > before);
+    }
+
+    /// Spawn a Unix listener that replies with a fixed body tagged per socket,
+    /// recording how many connections it served.
+    fn spawn_echo_socket(path: PathBuf, tag: &'static str) -> Arc<std::sync::atomic::AtomicUsize> {
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = UnixListener::bind(&path).expect("bind unix socket");
+        let count = counter.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let tag = tag.to_string();
+                tokio::spawn(async move {
+                    // Drain the request head, then reply with a tagged response.
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    let body = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{tag}",
+                        tag.len()
+                    );
+                    let _ = stream.write_all(body.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        counter
+    }
+
+    async fn send_request(port: u16) -> String {
+        let mut tcp = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        tcp.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .expect("write");
+        tcp.shutdown().await.ok();
+        let mut resp = String::new();
+        tcp.read_to_string(&mut resp).await.expect("read");
+        resp
+    }
+
+    #[tokio::test]
+    async fn listener_fans_out_round_robin_across_two_sockets() {
+        let sup = LoopbackBridgeSupervisor::default();
+
+        let path_a = socket_path("a");
+        let path_b = socket_path("b");
+        let count_a = spawn_echo_socket(path_a.clone(), "AAA");
+        let count_b = spawn_echo_socket(path_b.clone(), "BBB");
+
+        let id_a = Uuid::now_v7();
+        let id_b = Uuid::now_v7();
+        sup.add_replica("svc", id_a, path_a.clone()).await;
+        sup.add_replica("svc", id_b, path_b.clone()).await;
+        sup.set_replica_healthy("svc", id_a, true).await;
+        sup.set_replica_healthy("svc", id_b, true).await;
+
+        // Bind a listener on an ephemeral port that fans out via the pool.
+        let bridge = LoopbackBridge::bind_with_pool(0, "svc".to_string(), sup.inner.clone())
+            .await
+            .expect("bind");
+        let port = bridge.local_port();
+        let (_tx, rx) = oneshot::channel();
+        tokio::spawn(bridge.serve_until_shutdown(rx));
+
+        let before = sup.last_activity("svc").await.expect("activity");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let r1 = send_request(port).await;
+        let r2 = send_request(port).await;
+
+        // Two connections reached two different sockets (one each).
+        assert!(r1.ends_with("AAA") || r1.ends_with("BBB"));
+        assert!(r2.ends_with("AAA") || r2.ends_with("BBB"));
+        assert_ne!(
+            r1.split("\r\n\r\n").nth(1),
+            r2.split("\r\n\r\n").nth(1),
+            "round-robin should hit distinct sockets"
+        );
+        assert_eq!(count_a.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(count_b.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let after = sup.last_activity("svc").await.expect("activity");
+        assert!(
+            after > before,
+            "last_activity must advance on proxied conns"
+        );
+
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
+    #[tokio::test]
+    async fn listener_closes_connection_when_no_healthy_replica() {
+        let sup = LoopbackBridgeSupervisor::default();
+        sup.add_replica("svc", Uuid::now_v7(), PathBuf::from("/run/denia/none.sock"))
+            .await; // unhealthy
+
+        let bridge = LoopbackBridge::bind_with_pool(0, "svc".to_string(), sup.inner.clone())
+            .await
+            .expect("bind");
+        let port = bridge.local_port();
+        let (_tx, rx) = oneshot::channel();
+        tokio::spawn(bridge.serve_until_shutdown(rx));
+
+        let mut tcp = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        tcp.write_all(b"GET / HTTP/1.1\r\n\r\n").await.ok();
+        let mut resp = String::new();
+        // Connection should be closed with no body: either clean EOF (empty
+        // read) or a reset, both acceptable for a dropped connection.
+        match tcp.read_to_string(&mut resp).await {
+            Ok(_) => assert!(resp.is_empty(), "expected closed connection, got: {resp:?}"),
+            Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset),
+        }
     }
 }
