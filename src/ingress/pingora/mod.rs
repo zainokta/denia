@@ -12,4 +12,7 @@ pub mod server;
 pub mod state;
 
 pub use server::{IngressServerConfig, build_server};
-pub use state::IngressError;
+pub use state::{
+    ActivationError, ActivationHook, CertStore, IngressError, IngressState, ParsedCert,
+    ReplicaEndpoint, RouteSpec, RouteTable,
+};
