@@ -49,6 +49,9 @@ pub fn rerender_traefik(state: &crate::app::AppState) -> Result<(), DeployError>
         &routes_guard.values().cloned().collect::<Vec<_>>(),
         &state.ingress_options,
     )?;
+    if let Some(parent) = state.config.traefik_dynamic_config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(&state.config.traefik_dynamic_config_path, yaml)?;
     Ok(())
 }
