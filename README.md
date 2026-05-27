@@ -11,7 +11,8 @@ cgroup/procfs runtime metrics. The goal is a tool you trust enough to forget
 about, opening it only to do a thing and leave.
 
 > Status: **v1, single-node.** Multi-node scheduling, hosted registry push, and
-> rootless operation are intentionally deferred. See the ADRs.
+> rootless operation are intentionally deferred. See the ADRs and the active
+> specs/plans under `docs/superpowers/`.
 
 ## Architecture
 
@@ -27,8 +28,11 @@ separated internally so they can split later if a multi-node ADR is accepted.
   root-only permissions.
 - **Artifacts** — two v1 sources: Git over SSH built via BuildKit, and external
   OCI image pulls performed **in-process** via `oci-client` +
-  `TarRootfsUnpacker` (no `skopeo`/`umoci` host binaries). Optional ECR/GAR
-  credential providers ship behind `--features ecr,gar`. See ADR-011.
+  `TarRootfsUnpacker` (no `skopeo`/`umoci` host binaries). Registry pulls stream
+  layer blobs into temporary files under the artifact directory before verified
+  extraction (ADR-015). Private registry auth is project-scoped through
+  `Registry` records and SOPS `SecretRef`s, including Basic, bearer token,
+  ECR-token, and GAR-token mappings (ADR-014).
 - **Runtime** — `LinuxRuntime` launches workloads under `cgroup_v2 +
   unshare(user|pid|mount|uts|ipc) + no_new_privs + bounded-caps` and places
   them in `<cgroup_root>/<service_id>/<deployment_id>` cgroups. Host paths are
@@ -53,11 +57,12 @@ separated internally so they can split later if a multi-node ADR is accepted.
   request log + workload roll-up (ADR-009).
 - **Metrics** — cgroup v2 + procfs, read by `service_id`.
 
-Source modules (`src/`): `app`, `domain`, `state`, `secrets`, `artifacts`,
-`oci` (in-process puller/unpacker + credentials), `runtime`, `deploy`,
-`bridge` (with request-tee), `traefik`, `logs`, `metrics`, `node_metrics`,
-`access_log`, `scheduler`, `auth`, `command`, `config`, `syscall` (rustix
-chown/caps/ns + signal), `web`.
+Source modules (`src/`): `api`, `app`, `auth`, `command`, `config`, `deploy`,
+`domain`, `repo`, `state`, `secrets`, `artifacts`, `oci` (in-process
+puller/unpacker + credentials), `runtime`, `ingress` (bridge, socket proxy,
+Traefik rendering), `observability` (access logs, service logs, service metrics,
+node metrics), `scheduler`, `verification`, `syscall` (rustix chown/caps/ns +
+signal), `web`, and `workload_launcher`.
 
 Deployments are **health-gated**: Denia starts the new deployment, waits for the
 configured HTTP health-check path and timeout, then atomically promotes routing
@@ -79,17 +84,18 @@ flowchart TB
   Edge["Traefik<br/>:80 / :443 + ACME"]:::edge
   Challenge["GET /.well-known/<br/>denia-challenge/{token}"]
 
-  Client -- "Bearer token" --> Auth["require_auth<br/>src/app.rs:953"]
-  Auth -- "Principal + project role" --> API["/v1 handlers<br/>src/app.rs:157"]
+  Client -- "Bearer token" --> Auth["require_auth<br/>src/auth/middleware.rs"]
+  Auth -- "Principal + project role" --> API["/v1 handlers<br/>src/api/*"]
 
-  API --> Store[("SQLite<br/>services · deployments · users<br/>jobs · routes · domains")]:::store
+  API --> Store[("SQLite<br/>services · deployments · users<br/>jobs · routes · domains · registries")]:::store
   API -. "secret_ref only" .-> SOPS[("SOPS files<br/>data_dir/secrets/*.sops.yaml")]:::store
 
-  API -- "POST /v1/deployments" --> Coord["DeploymentCoordinator<br/>src/deploy.rs"]
+  API -- "POST /v1/deployments" --> Coord["DeploymentCoordinator<br/>src/deploy/coordinator.rs"]
 
   Coord --> Acq{"artifact source"}
   Acq -- "Git" --> BK["BuildKit (buildctl)<br/>→ OCI layout"]
-  Acq -- "OCI image" --> Pull["oci-client pull<br/>+ TarRootfsUnpacker<br/>(in-process, ADR-011)"]
+  Acq -- "OCI image" --> Pull["oci-client manifest/blob stream<br/>+ staged layers + TarRootfsUnpacker<br/>(ADR-011, ADR-015)"]
+  Store -. "Registry auth kind + SecretRef" .-> Pull
   BK --> Bundle["rootfs + process.json<br/>chown to userns_base"]
   Pull --> Bundle
 
@@ -118,12 +124,15 @@ flowchart TB
   JobRun --> Spawn
 ```
 
-Key stage transitions in code: `create_deployment` (`src/state.rs:524`) →
-`runtime.plan` (`src/runtime.rs:243`) → `runtime.prepare` (`src/runtime.rs:308`)
-→ `spawn_namespaced_process` (`src/syscall/ns.rs:342`) →
-`wait_for_service_socket` (`src/runtime.rs:831`) → `health.check` →
-`promote_deployment` (`src/state.rs:596`) → `write_routing_config`
-(`src/deploy.rs:307`).
+Key stage transitions in code: `create_deployment`
+(`src/api/deployments.rs`) → `deploy_external_image_source` /
+`deploy_git_source` (`src/deploy/coordinator.rs`) →
+`ArtifactAcquirer::acquire_rootfs_bundle_from_image_config`
+(`src/artifacts/acquirer.rs`) → `LinuxRuntime::plan` / `prepare`
+(`src/runtime/linux.rs`) → `spawn_namespaced_process` (`src/syscall/ns.rs`) →
+`wait_for_service_socket` (`src/runtime/fs_helpers.rs`) → `health.check` →
+`promote_deployment` (`src/repo/sqlite/deployments.rs`) →
+`write_routing_config` (`src/deploy/coordinator.rs`).
 
 ## Requirements
 
@@ -165,12 +174,15 @@ All configuration is environment-driven (`src/config.rs`).
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `DENIA_ADMIN_TOKEN` | — (**required**) | Bearer token for `/v1` |
+| `DENIA_ADMIN_TOKEN` | — (**required**) | Bootstrap bearer token for `/v1`; minimum 32 chars |
 | `DENIA_BIND_ADDR` | `127.0.0.1:7180` | Listen address |
 | `DENIA_DATA_DIR` | `/var/lib/denia` | Root for state, artifacts, runtime, logs |
 | `DENIA_DATABASE_PATH` | `<data_dir>/denia.sqlite3` | SQLite path |
 | `DENIA_BUILDKIT_BINARY` | `buildctl` | BuildKit client binary |
 | `DENIA_SOPS_BINARY` | `sops` | SOPS binary |
+| `DENIA_SOCKET_PROXY_BINARY` | current executable | Binary injected into workload rootfs as the socket proxy |
+| `DENIA_CGROUP_ROOT` | `/sys/fs/cgroup/denia` | Root for Denia-owned workload cgroups |
+| `DENIA_BRIDGE_START_PORT` | `19000` | First loopback bridge port allocated for Traefik targets |
 | `DENIA_TRAEFIK_DYNAMIC_CONFIG` | `/etc/traefik/dynamic/denia.yml` | Generated Traefik file-provider config |
 | `DENIA_ACME_RESOLVER` | `le` | Traefik certResolver name used for `tls_enabled` services |
 | `DENIA_CONTROL_DOMAIN` | — | Optional Traefik router for the control plane itself |
@@ -178,10 +190,12 @@ All configuration is environment-driven (`src/config.rs`).
 | `DENIA_USERNS_BASE` | `100000` | uid/gid base for the workload user namespace |
 | `DENIA_USERNS_SIZE` | `65536` | uid/gid range size for the workload user namespace |
 | `DENIA_NODE_DISK_PATH` | `<data_dir>` | Path used for `statvfs` disk metrics |
-| `DENIA_ECR_USERNAME` / `DENIA_ECR_PASSWORD` | — | ECR registry auth (with `--features ecr`) |
-| `DENIA_GAR_ACCESS_TOKEN` | — | GAR registry auth (with `--features gar`) |
 
-Derived paths: `runtime/`, `artifacts/`, and `logs/` under `DENIA_DATA_DIR`.
+Derived paths: `runtime/`, `artifacts/`, `logs/`, and SOPS files under
+`secrets/*.sops.yaml` below `DENIA_DATA_DIR`. Registry credentials are configured
+as project-scoped `/v1/projects/{project_id}/registries` records that point at
+SOPS secret refs; Denia no longer has `ecr`/`gar` Cargo features or
+`DENIA_ECR_*` / `DENIA_GAR_*` process-wide registry auth variables.
 
 ## API
 
@@ -202,6 +216,8 @@ user session / API token issued by `/v1/auth/login` (ADR-008).
 | `GET` | `/v1/projects/{id}` | viewer | Project detail |
 | `DELETE` | `/v1/projects/{id}` | admin | Delete (only when empty) |
 | `GET` / `POST` / `DELETE` | `/v1/projects/{id}/members{,/...}` | admin | Project membership |
+| `GET` / `POST` | `/v1/projects/{id}/registries` | admin | List / create project registry auth config |
+| `GET` / `PATCH` / `DELETE` | `/v1/projects/{id}/registries/{registry_id}` | admin | Registry detail / update / delete |
 | `POST` | `/v1/credentials/{git,registry}` | super-admin | Register a SOPS-referenced credential |
 | `GET` | `/v1/services` | viewer (membership-filtered) | List services |
 | `POST` | `/v1/services` | operator | Create/update a service config |
@@ -252,6 +268,9 @@ DENIA_RUN_PRIVILEGED_TESTS=1 cargo test --test linux_runtime_privileged -- --ign
 Privileged runtime tests are gated because they require root and mutate
 namespaces, mounts, and cgroups. Normal CI stays unprivileged and covers
 planning, path safety, and cgroup-file preparation against temp directories.
+For narrower contract checks, `cargo test --test backend_contract` covers API
+and deployment behavior, while `cargo test --test repo_contract` covers the
+per-aggregate SQLite repositories.
 
 ## Security
 
@@ -270,7 +289,9 @@ planning, path safety, and cgroup-file preparation against temp directories.
   `006` projects + versioned migrations, `007` ingress + TLS, `008`
   project-scoped RBAC, `009` observability, `010` jobs scheduler, `011`
   in-process OCI acquisition, `012` `src/` modularization, `013` domain
-  verification, `014` per-service registry.
+  verification, `014` per-service registry, `015` streaming OCI layer staging.
+- `docs/superpowers/specs/` and `docs/superpowers/plans/` — design specs and
+  implementation plans used to track active backend and console work.
 - `CLAUDE.md` — agent/contributor guidelines.
 - [Rust](https://www.rust-lang.org/) · [Axum](https://docs.rs/axum/) ·
   [SOPS](https://getsops.io/) ·
