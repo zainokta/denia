@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+arc-swap = "1"
 argon2 = "0.5.3"
 async-trait = "0.1"
 axum = "0.8"
@@ -14,6 +15,8 @@ flate2 = "1.1.9"
 hex = "0.4.3"
 libc = "0.2"
 oci-client = "0.17.0"
+pingora = { version = "0.8", default-features = false, features = ["boringssl"] }
+pingora-proxy = { version = "0.8", default-features = false, features = ["boringssl"] }
 rand = "0.10.1"
 rusqlite = { version = "0.39", features = ["bundled"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
