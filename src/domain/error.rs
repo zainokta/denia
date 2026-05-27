@@ -26,4 +26,6 @@ pub enum DomainError {
     RegistrySourceMissing,
     #[error("invalid git build path field '{field}': {reason}")]
     InvalidGitBuildPath { field: String, reason: String },
+    #[error("invalid autoscale policy: {0}")]
+    InvalidAutoscale(String),
 }
