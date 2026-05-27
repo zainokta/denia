@@ -22,5 +22,5 @@ pub mod verification;
 pub mod web;
 pub mod workload_launcher;
 
-pub use ingress::{bridge, socket_proxy, traefik};
+pub use ingress::socket_proxy;
 pub use observability::{access_log, logs, metrics, node_metrics};

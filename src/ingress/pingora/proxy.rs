@@ -240,6 +240,12 @@ impl ProxyHttp for DeniaProxy {
         };
         ctx.service_name = Some(service.clone());
 
+        // Unauthenticated cold-start trigger (audit B2/A3): a request on the
+        // public `:80`/`:443` can wake any scaled-to-zero *routed* service. This
+        // is bounded by the per-service single-flight gate (one activation for N
+        // concurrent waiters) and `ACTIVATION_WAIT`, so it cannot fan out into
+        // unbounded launches. Cross-service abuse rate-limiting is intentionally
+        // out of scope (documented in ADR-020); do NOT add a rate limiter here.
         let resolved = self.state.resolve_or_activate(&service).await;
         match classify_resolution(resolved) {
             UpstreamChoice::Uds(socket) => {

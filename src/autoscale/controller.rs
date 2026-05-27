@@ -21,7 +21,7 @@ use crate::autoscale::scaler::{CooldownState, clamp_loop, desired_down, desired_
 use crate::autoscale::usage::{ServiceUsage, UsageSampler};
 use crate::domain::{AutoscalePolicy, HealthCheck, ResourceLimits, RuntimeInstanceId};
 use crate::health::HealthChecker;
-use crate::ingress::bridge::{ActivationError, ActivationHook, LoopbackBridgeSupervisor};
+use crate::ingress::pingora::{ActivationError, ActivationHook, IngressState};
 use crate::observability::metrics::CgroupMetricsReader;
 use crate::runtime::Runtime;
 use crate::state::SqliteStore;
@@ -130,7 +130,7 @@ pub struct Controller {
     pub registry: ReplicaRegistry,
     pub ledger: ResourceLedger,
     pub runtime: Arc<dyn Runtime>,
-    pub bridge: Arc<LoopbackBridgeSupervisor>,
+    pub bridge: Arc<IngressState>,
     pub health: Arc<dyn HealthChecker>,
     pub store: SqliteStore,
     pub usage: Box<dyn UsageSource>,
@@ -145,7 +145,7 @@ impl Controller {
         registry: ReplicaRegistry,
         ledger: ResourceLedger,
         runtime: Arc<dyn Runtime>,
-        bridge: Arc<LoopbackBridgeSupervisor>,
+        bridge: Arc<IngressState>,
         health: Arc<dyn HealthChecker>,
         store: SqliteStore,
         usage: Box<dyn UsageSource>,
@@ -859,7 +859,7 @@ mod tests {
             ReplicaRegistry::default(),
             ledger,
             runtime,
-            Arc::new(LoopbackBridgeSupervisor::default()),
+            Arc::new(IngressState::default()),
             Arc::new(FakeHealthChecker::healthy()),
             store,
             usage,
@@ -1573,7 +1573,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_controller_delegates() {
-        use crate::ingress::bridge::ActivationHook;
+        use crate::ingress::pingora::ActivationHook;
 
         let svc = Uuid::now_v7();
         let ms = zero_scaled(svc);

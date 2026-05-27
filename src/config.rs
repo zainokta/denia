@@ -49,19 +49,14 @@ pub struct AppConfig {
     pub cgroup_root: PathBuf,
     pub artifact_dir: PathBuf,
     pub log_dir: PathBuf,
-    pub bridge_start_port: u16,
-    pub traefik_dynamic_config_path: PathBuf,
     pub userns_base: u32,
     pub userns_size: u32,
-    pub acme_resolver: String,
     pub control_domain: Option<String>,
     pub control_tls: bool,
     pub node_disk_path: PathBuf,
-    pub traefik_image: String,
     pub acme_email: Option<String>,
     pub http_port: u16,
     pub https_port: u16,
-    pub traefik_dir: PathBuf,
     pub autoscale_interval_s: u64,
     pub autoscale_headroom_cpu_millis: u32,
     pub autoscale_headroom_mem_bytes: u64,
@@ -120,13 +115,6 @@ impl AppConfig {
             .unwrap_or_else(|_| PathBuf::from("/sys/fs/cgroup/denia"));
         let artifact_dir = data_dir.join("artifacts");
         let log_dir = data_dir.join("logs");
-        let bridge_start_port = env::var("DENIA_BRIDGE_START_PORT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(19_000);
-        let traefik_dir = data_dir.join("traefik");
-        let traefik_image = env::var("DENIA_TRAEFIK_IMAGE")
-            .unwrap_or_else(|_| "docker.io/library/traefik:v3.3".to_string());
         let acme_email = env::var("DENIA_ACME_EMAIL").ok().filter(|v| !v.is_empty());
         let http_port = env::var("DENIA_HTTP_PORT")
             .ok()
@@ -136,9 +124,6 @@ impl AppConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(443);
-        let traefik_dynamic_config_path = env::var("DENIA_TRAEFIK_DYNAMIC_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| traefik_dir.join("dynamic/denia.yml"));
         let userns_base = env::var("DENIA_USERNS_BASE")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -147,7 +132,6 @@ impl AppConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(65536);
-        let acme_resolver = env::var("DENIA_ACME_RESOLVER").unwrap_or_else(|_| "le".to_string());
         let control_domain = env::var("DENIA_CONTROL_DOMAIN").ok();
         let control_tls = env::var("DENIA_CONTROL_TLS")
             .map(|v| v == "1" || v == "true")
@@ -193,19 +177,14 @@ impl AppConfig {
             cgroup_root,
             artifact_dir,
             log_dir,
-            bridge_start_port,
-            traefik_dynamic_config_path,
             userns_base,
             userns_size,
-            acme_resolver,
             control_domain,
             control_tls,
             node_disk_path,
-            traefik_image,
             acme_email,
             http_port,
             https_port,
-            traefik_dir,
             autoscale_interval_s,
             autoscale_headroom_cpu_millis,
             autoscale_headroom_mem_bytes,
@@ -234,16 +213,11 @@ impl AppConfig {
             cgroup_root: data_dir.join("cgroup"),
             artifact_dir: data_dir.join("artifacts"),
             log_dir: data_dir.join("logs"),
-            bridge_start_port: 19_000,
-            traefik_dir: data_dir.join("traefik"),
-            traefik_dynamic_config_path: data_dir.join("traefik/dynamic/denia.yml"),
             userns_base: 100000,
             userns_size: 65536,
-            acme_resolver: "le".to_string(),
             control_domain: None,
             control_tls: false,
             node_disk_path: data_dir.clone(),
-            traefik_image: "docker.io/library/traefik:v3.3".to_string(),
             acme_email: None,
             http_port: 80,
             https_port: 443,
@@ -255,10 +229,6 @@ impl AppConfig {
         }
     }
 
-    pub fn ingress_resolver_name(&self) -> String {
-        self.acme_resolver.clone()
-    }
-
     pub fn require_acme_email(&self, tls_in_use: bool) -> Result<(), ConfigError> {
         if tls_in_use && self.acme_email.is_none() {
             return Err(ConfigError::AcmeEmailRequired);
@@ -268,7 +238,7 @@ impl AppConfig {
 }
 
 #[cfg(test)]
-mod managed_traefik_tests {
+mod ingress_tls_tests {
     use super::*;
 
     fn base() -> AppConfig {
@@ -276,26 +246,10 @@ mod managed_traefik_tests {
     }
 
     #[test]
-    fn traefik_dir_under_data_dir() {
-        let c = base();
-        assert_eq!(c.traefik_dir, c.data_dir.join("traefik"));
-    }
-
-    #[test]
-    fn dynamic_config_defaults_under_traefik_dir() {
-        let c = base();
-        assert_eq!(
-            c.traefik_dynamic_config_path,
-            c.data_dir.join("traefik/dynamic/denia.yml")
-        );
-    }
-
-    #[test]
-    fn defaults_for_ports_and_image() {
+    fn defaults_for_ports() {
         let c = base();
         assert_eq!(c.http_port, 80);
         assert_eq!(c.https_port, 443);
-        assert!(c.traefik_image.starts_with("docker.io/library/traefik:"));
         assert!(c.acme_email.is_none());
     }
 
