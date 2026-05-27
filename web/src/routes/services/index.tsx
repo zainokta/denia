@@ -5,37 +5,48 @@ import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
 import { StatusSignal } from '#/components/StatusSignal'
-import { SecurityBadge } from '#/components/SecurityBadge'
+import { ServiceForm } from '#/components/ServiceForm'
 import { useAuth, can } from '#/hooks/useAuth'
+import type {
+  Service,
+  ServiceInput,
+  WorkloadView,
+} from '#/effect/schema'
 
-const listServices = Effect.gen(function* () {
+export const listServices = Effect.gen(function* () {
   const api = yield* ApiClient
   return yield* api.listServices
 })
 
-const createDeployment = (input: {
-  service_id: number
-  source?: {
-    type: 'git'
-    repo_url: string
-    git_ref: string
-    dockerfile_path: string
-    context_path: string
-    credential?: { name: string; key: string }
-  } | {
-    type: 'external_image'
-    image?: string
-    registry_id?: string
-    image_ref?: string
-    credential?: { name: string; key: string } | null
-  }
-}) =>
+export const listWorkloads = Effect.gen(function* () {
+  const api = yield* ApiClient
+  return yield* api.listWorkloads
+})
+
+export const listProjects = Effect.gen(function* () {
+  const api = yield* ApiClient
+  return yield* api.listProjects
+})
+
+export const createService = (input: ServiceInput | Service) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.putService(input)
+  })
+
+export const deleteService = (id: string) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.deleteService(id)
+  })
+
+const createDeployment = (input: { service_id: string }) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
     return yield* api.createDeployment(input)
   })
 
-const stopService = (id: number) =>
+const stopService = (id: string) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
     return yield* api.stopService(id)
@@ -45,83 +56,88 @@ export const Route = createFileRoute('/services/')({
   component: ServicesIndex,
 })
 
+type DeploymentStatusValue = NonNullable<WorkloadView['status']>
+
 export function ServicesIndex() {
   const queryClient = useQueryClient()
   const { isSuperAdmin, roleForActiveProject } = useAuth()
 
-  // Deployment source form state
   const [createOpen, setCreateOpen] = useState(false)
-  const [sourceType, setSourceType] = useState<string>('git')
-  const [gitRepoUrl, setGitRepoUrl] = useState('')
-  const [gitRef, setGitRef] = useState('main')
-  const [gitDockerfilePath, setGitDockerfilePath] = useState('Dockerfile')
-  const [gitContextPath, setGitContextPath] = useState('.')
-  const [extImage, setExtImage] = useState('')
-  const [extRegistryId, setExtRegistryId] = useState('')
-  const [extImageRef, setExtImageRef] = useState('')
   const [createError, setCreateError] = useState('')
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
+  const [deleteError, setDeleteError] = useState('')
 
   const { data: services = [], isFetching } = useQuery({
     queryKey: ['services'],
     queryFn: () => runQuery(listServices),
   })
 
-  const canOperate = (projectId: number): boolean => {
+  const { data: workloads = [] } = useQuery({
+    queryKey: ['workloads'],
+    queryFn: () => runQuery(listWorkloads),
+  })
+
+  const { data: projects = [] } = useQuery({
+    queryKey: ['projects'],
+    queryFn: () => runQuery(listProjects),
+  })
+
+  const statusByService = new Map<string, DeploymentStatusValue | null>()
+  for (const wl of workloads) {
+    statusByService.set(wl.service_id, wl.status)
+  }
+
+  const canOperate = (projectId: string): boolean => {
     if (isSuperAdmin) return true
-    const role = roleForActiveProject(String(projectId))
+    const role = roleForActiveProject(projectId)
     return role !== undefined && can('operator', role)
   }
 
   const canOperateService = (): boolean => {
     if (isSuperAdmin) return true
-    // Check if user has operator+ role on any project
     for (const svc of services) {
       if (canOperate(svc.project_id)) return true
     }
     return false
   }
 
-  const buildSource = () => {
-    if (sourceType === 'git') {
-      return {
-        type: 'git' as const,
-        repo_url: gitRepoUrl.trim(),
-        git_ref: gitRef.trim() || 'main',
-        dockerfile_path: gitDockerfilePath.trim() || 'Dockerfile',
-        context_path: gitContextPath.trim() || '.',
-      }
-    }
-    // external_image — validate: must have legacy image OR (registry_id + image_ref)
-    const hasLegacy = extImage.trim().length > 0
-    const hasNew =
-      extRegistryId.trim().length > 0 && extImageRef.trim().length > 0
-    if (!hasLegacy && !hasNew) return undefined
-
-    return {
-      type: 'external_image' as const,
-      image: hasLegacy ? extImage.trim() : undefined,
-      registry_id: hasNew ? extRegistryId.trim() : undefined,
-      image_ref: hasNew ? extImageRef.trim() : undefined,
-    }
-  }
-
-  const deploy = useMutation({
-    mutationFn: (input: {
-      id: number
-      source?: Parameters<typeof createDeployment>[0]['source']
-    }) => runQuery(createDeployment({ service_id: input.id, source: input.source })),
+  const create = useMutation({
+    mutationFn: (input: ServiceInput | Service) =>
+      runQuery(createService(input)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['services'] })
+      setCreateOpen(false)
       setCreateError('')
     },
     onError: (err: unknown) => {
-      const msg = err instanceof Error ? err.message : 'Deploy failed'
+      const msg = err instanceof Error ? err.message : 'Create failed'
       setCreateError(msg)
     },
   })
 
+  const remove = useMutation({
+    mutationFn: (id: string) => runQuery(deleteService(id)),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['services'] })
+      setDeleteConfirm(null)
+      setDeleteError('')
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error ? err.message : 'Delete failed'
+      setDeleteError(msg)
+    },
+  })
+
+  const deploy = useMutation({
+    mutationFn: (id: string) =>
+      runQuery(createDeployment({ service_id: id })),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['services'] })
+    },
+  })
+
   const stop = useMutation({
-    mutationFn: (id: number) => runQuery(stopService(id)),
+    mutationFn: (id: string) => runQuery(stopService(id)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['services'] })
     },
@@ -134,7 +150,6 @@ export function ServicesIndex() {
         Services
       </h1>
 
-      {/* Deployment source form — collapsible panel */}
       {canOperateService() ? (
         <section className="panel mb-6 overflow-hidden">
           <button
@@ -144,7 +159,7 @@ export function ServicesIndex() {
           >
             <span className="flex items-center gap-2">
               <span className="signal signal-steady" aria-hidden="true" />
-              new deployment
+              new service
             </span>
             <span className="text-xs text-[var(--fg-muted)]">
               {createOpen ? '▲' : '▼'}
@@ -153,104 +168,16 @@ export function ServicesIndex() {
 
           {createOpen ? (
             <div className="border-t border-[var(--border)] px-4 py-3">
-              {createError ? (
-                <div className="mb-3 text-xs text-[var(--violet)]">
-                  <span className="signal signal-fault mr-2 inline-block align-middle" />
-                  {createError}
-                </div>
-              ) : null}
-
-              <fieldset className="mb-3 flex flex-wrap items-center gap-4 text-sm">
-                <legend className="text-xs text-[var(--fg-muted)] mb-1">
-                  source type
-                </legend>
-                <label className="inline-flex items-center gap-1.5 text-[var(--fg)]">
-                  <input
-                    type="radio"
-                    name="sourceType"
-                    value="git"
-                    checked={sourceType === 'git'}
-                    onChange={() => setSourceType('git')}
-                  />
-                  Git
-                </label>
-                <label className="inline-flex items-center gap-1.5 text-[var(--fg)]">
-                  <input
-                    type="radio"
-                    name="sourceType"
-                    value="external_image"
-                    checked={sourceType === 'external_image'}
-                    onChange={() => setSourceType('external_image')}
-                  />
-                  External Image
-                </label>
-              </fieldset>
-
-              {sourceType === 'git' ? (
-                <div className="flex flex-wrap items-end gap-2 mb-3">
-                  <input
-                    type="text"
-                    placeholder="repo url"
-                    value={gitRepoUrl}
-                    onChange={(e) => setGitRepoUrl(e.target.value)}
-                    className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)] w-72"
-                  />
-                  <input
-                    type="text"
-                    placeholder="branch/tag"
-                    value={gitRef}
-                    onChange={(e) => setGitRef(e.target.value)}
-                    className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Dockerfile path"
-                    value={gitDockerfilePath}
-                    onChange={(e) => setGitDockerfilePath(e.target.value)}
-                    className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]"
-                  />
-                  <input
-                    type="text"
-                    placeholder="context path"
-                    value={gitContextPath}
-                    onChange={(e) => setGitContextPath(e.target.value)}
-                    className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]"
-                  />
-                </div>
-              ) : (
-                <div className="flex flex-wrap items-end gap-2 mb-3">
-                  <input
-                    type="text"
-                    placeholder="image (legacy)"
-                    value={extImage}
-                    onChange={(e) => setExtImage(e.target.value)}
-                    className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)] w-72"
-                  />
-                  <span className="text-xs text-[var(--fg-muted)]">or</span>
-                  <input
-                    type="text"
-                    placeholder="registry id"
-                    value={extRegistryId}
-                    onChange={(e) => setExtRegistryId(e.target.value)}
-                    className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]"
-                  />
-                  <input
-                    type="text"
-                    placeholder="image ref"
-                    value={extImageRef}
-                    onChange={(e) => setExtImageRef(e.target.value)}
-                    className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]"
-                  />
-                </div>
-              )}
-              <p className="text-xs text-[var(--fg-muted)] mb-3">
-                Select a service below and click <strong>deploy</strong> to
-                use this source configuration.
-              </p>
+              <ServiceForm
+                projects={projects.map((p) => ({ id: p.id, name: p.name }))}
+                pending={create.isPending}
+                error={createError || undefined}
+                onSubmit={(value) => create.mutate(value)}
+              />
             </div>
           ) : null}
         </section>
-      ) : null} 
+      ) : null}
 
       {services.length === 0 && !isFetching ? (
         <p className="text-[var(--fg-muted)]">
@@ -260,53 +187,93 @@ export function ServicesIndex() {
         <section className="panel overflow-hidden">
           <div className="flex items-center border-b border-[var(--border)] px-4 py-2.5">
             <p className="kicker m-0">
-              {isFetching ? 'fetching...' : `${services.length} service${services.length !== 1 ? 's' : ''}`}
+              {isFetching
+                ? 'fetching...'
+                : `${services.length} service${services.length !== 1 ? 's' : ''}`}
             </p>
           </div>
+          {deleteError ? (
+            <div className="border-b border-[var(--border)] px-4 py-2 text-xs text-[var(--violet)]">
+              <span className="signal signal-fault mr-2 inline-block align-middle" />
+              {deleteError}
+            </div>
+          ) : null}
           <ul className="m-0 list-none">
-            {services.map((svc, i) => (
-              <li
-                key={svc.id}
-                className={`flex items-center gap-4 px-4 py-3 text-sm ${
-                  i > 0 ? 'border-t border-[var(--border)]' : ''
-                }`}
-              >
-                {svc.status ? <StatusSignal status={svc.status} /> : null}
-                <SecurityBadge security={svc.security} />
-                <a
-                  href={`/services/${svc.id}`}
-                  className="min-w-0 flex-1 text-[var(--fg)] no-underline hover:underline"
+            {services.map((svc, i) => {
+              const status = statusByService.get(svc.id) ?? null
+              return (
+                <li
+                  key={svc.id}
+                  className={`flex items-center gap-4 px-4 py-3 text-sm ${
+                    i > 0 ? 'border-t border-[var(--border)]' : ''
+                  }`}
                 >
-                  <span className="font-semibold">{svc.name}</span>
-                  <span className="ml-3 text-xs text-[var(--fg-muted)]">
-                    {svc.domains.join(', ') || `:${svc.internal_port}`}
-                  </span>
-                </a>
-                {canOperate(svc.project_id) ? (
-                  <>
-                    <button
-                      className="btn btn-primary text-xs"
-                      type="button"
-                      onClick={() => {
-                        const source = createOpen ? buildSource() : undefined
-                        deploy.mutate({ id: svc.id, source })
-                      }}
-                      disabled={deploy.isPending}
-                    >
-                      {deploy.isPending ? 'deploying...' : 'deploy'}
-                    </button>
-                    <button
-                      className="btn text-xs"
-                      type="button"
-                      onClick={() => stop.mutate(svc.id)}
-                      disabled={stop.isPending}
-                    >
-                      stop
-                    </button>
-                  </>
-                ) : null}
-              </li>
-            ))}
+                  {status ? (
+                    <StatusSignal status={status} />
+                  ) : null}
+                  <a
+                    href={`/services/${svc.id}`}
+                    className="min-w-0 flex-1 text-[var(--fg)] no-underline hover:underline"
+                  >
+                    <span className="font-semibold">{svc.name}</span>
+                    <span className="ml-3 text-xs text-[var(--fg-muted)]">
+                      {svc.domains.join(', ') || `:${svc.internal_port}`}
+                    </span>
+                  </a>
+                  {canOperate(svc.project_id) ? (
+                    <>
+                      <button
+                        className="btn btn-primary text-xs"
+                        type="button"
+                        onClick={() => deploy.mutate(svc.id)}
+                        disabled={deploy.isPending}
+                      >
+                        {deploy.isPending ? 'deploying...' : 'deploy'}
+                      </button>
+                      <button
+                        className="btn text-xs"
+                        type="button"
+                        onClick={() => stop.mutate(svc.id)}
+                        disabled={stop.isPending}
+                      >
+                        stop
+                      </button>
+                      {deleteConfirm === svc.id ? (
+                        <span className="inline-flex items-center gap-1 text-xs">
+                          <span className="text-[var(--violet)]">delete?</span>
+                          <button
+                            type="button"
+                            className="btn text-xs"
+                            onClick={() => remove.mutate(svc.id)}
+                            disabled={remove.isPending}
+                          >
+                            yes
+                          </button>
+                          <button
+                            type="button"
+                            className="btn text-xs"
+                            onClick={() => setDeleteConfirm(null)}
+                          >
+                            no
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn text-xs"
+                          onClick={() => {
+                            setDeleteError('')
+                            setDeleteConfirm(svc.id)
+                          }}
+                        >
+                          delete
+                        </button>
+                      )}
+                    </>
+                  ) : null}
+                </li>
+              )
+            })}
           </ul>
         </section>
       )}

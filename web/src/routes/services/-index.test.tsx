@@ -1,8 +1,19 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest'
+import {
+  cleanup,
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+} from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { ServicesIndex } from './index'
+import {
+  ServicesIndex,
+  listServices,
+  listWorkloads,
+  listProjects,
+} from './index'
 
 vi.mock('#/effect/runtime', () => ({
   runQuery: vi.fn(() => Promise.resolve([])),
@@ -22,30 +33,88 @@ import { runQuery } from '#/effect/runtime'
 
 const mockRunQuery = runQuery as ReturnType<typeof vi.fn>
 
+const SVC_A = '0190b8a0-0000-7000-8000-000000000001'
+const SVC_B = '0190b8a0-0000-7000-8000-000000000002'
+const PROJECT = '0190b8a0-0000-7000-8000-0000000000aa'
+
 const FIXTURE_SERVICES = [
   {
-    id: 1,
-    project_id: 42,
+    id: SVC_A,
+    project_id: PROJECT,
     name: 'web',
     domains: ['example.com'],
-    internal_port: 3000,
-    status: 'Healthy',
-    security: {
-      userns: true,
-      mapped_uid: 100000,
-      no_new_privs: true,
-      caps_dropped: true,
+    source: {
+      type: 'external_image',
+      image: 'nginx:latest',
+      credential: null,
+      registry_id: null,
+      image_ref: null,
     },
+    internal_port: 3000,
+    health_check: { path: '/', timeout_seconds: 5 },
+    resource_limits: null,
+    env: [],
+    tls_enabled: true,
   },
   {
-    id: 2,
-    project_id: 42,
+    id: SVC_B,
+    project_id: PROJECT,
     name: 'api',
     domains: ['api.example.com'],
+    source: {
+      type: 'external_image',
+      image: 'api:latest',
+      credential: null,
+      registry_id: null,
+      image_ref: null,
+    },
     internal_port: 8080,
-    status: 'Failed',
+    health_check: { path: '/health', timeout_seconds: 5 },
+    resource_limits: null,
+    env: [],
+    tls_enabled: false,
   },
 ]
+
+const FIXTURE_WORKLOADS = [
+  {
+    service_id: SVC_A,
+    service_name: 'web',
+    project_id: PROJECT,
+    deployment_id: null,
+    status: 'Healthy',
+    cpu_usage_usec: null,
+    memory_current_bytes: null,
+  },
+  {
+    service_id: SVC_B,
+    service_name: 'api',
+    project_id: PROJECT,
+    deployment_id: null,
+    status: 'Failed',
+    cpu_usage_usec: null,
+    memory_current_bytes: null,
+  },
+]
+
+const FIXTURE_PROJECTS = [
+  {
+    id: PROJECT,
+    name: 'demo',
+    description: null,
+    shared_env: [],
+    default_resource_limits: null,
+    created_at: '2026-05-25T00:00:00Z',
+  },
+]
+
+// Dispatch runQuery by the effect identity passed in.
+function dispatch(effect: unknown): Promise<unknown> {
+  if (effect === listServices) return Promise.resolve(FIXTURE_SERVICES)
+  if (effect === listWorkloads) return Promise.resolve(FIXTURE_WORKLOADS)
+  if (effect === listProjects) return Promise.resolve(FIXTURE_PROJECTS)
+  return Promise.resolve(undefined)
+}
 
 function makeWrapper() {
   const queryClient = new QueryClient({
@@ -63,38 +132,35 @@ function makeWrapper() {
   }
 }
 
+afterEach(() => {
+  cleanup()
+})
+
 describe('ServicesIndex', () => {
   beforeEach(() => {
     mockRunQuery.mockReset()
-    mockRunQuery.mockImplementation(() =>
-      new Promise((r) => setTimeout(() => r([]), 0)),
-    )
+    mockRunQuery.mockImplementation((effect: unknown) => dispatch(effect))
   })
 
-  it('renders services with status signals', async () => {
-    mockRunQuery.mockImplementation(() =>
-      Promise.resolve(FIXTURE_SERVICES),
-    )
-
+  it('renders service rows with derived status', async () => {
     render(<ServicesIndex />, { wrapper: makeWrapper() })
 
     expect(await screen.findByText('web')).toBeTruthy()
     expect(screen.getByText('api')).toBeTruthy()
+    // StatusSignal renders the raw phase text.
     expect(screen.getByText('Healthy')).toBeTruthy()
     expect(screen.getByText('Failed')).toBeTruthy()
   })
 
   it('renders empty state when no services', async () => {
+    mockRunQuery.mockImplementation(() => Promise.resolve([]))
+
     render(<ServicesIndex />, { wrapper: makeWrapper() })
 
     expect(await screen.findByText(/No services yet/)).toBeTruthy()
   })
 
-  it('has deploy and stop buttons', async () => {
-    mockRunQuery.mockImplementation(() =>
-      Promise.resolve(FIXTURE_SERVICES),
-    )
-
+  it('has deploy and stop buttons per row', async () => {
     render(<ServicesIndex />, { wrapper: makeWrapper() })
 
     await screen.findByText('web')
@@ -103,27 +169,68 @@ describe('ServicesIndex', () => {
     expect(screen.getAllByText('stop').length).toBe(2)
   })
 
-  it('shows sandboxed badge for service with full posture', async () => {
-    mockRunQuery.mockImplementation(() =>
-      Promise.resolve(FIXTURE_SERVICES),
-    )
-
+  it('opens the create disclosure and renders ServiceForm', async () => {
     render(<ServicesIndex />, { wrapper: makeWrapper() })
 
     await screen.findByText('web')
-    const badges = screen.queryAllByText('sandboxed')
-    expect(badges.length).toBeGreaterThanOrEqual(1)
+    fireEvent.click(screen.getByText('new service'))
+
+    // ServiceForm-specific control.
+    expect(screen.getByText('source type')).toBeTruthy()
+    expect(screen.getByText('create service')).toBeTruthy()
   })
 
-  it('shows posture n/a for service without security', async () => {
-    mockRunQuery.mockImplementation(() =>
-      Promise.resolve(FIXTURE_SERVICES),
-    )
-
+  it('submits the create form via the putService effect path', async () => {
     render(<ServicesIndex />, { wrapper: makeWrapper() })
 
-    await screen.findAllByText('web')
-    const naTexts = screen.queryAllByText(/n\/a/)
-    expect(naTexts.length).toBeGreaterThanOrEqual(1)
+    await screen.findByText('web')
+    fireEvent.click(screen.getByText('new service'))
+
+    // Fill the minimum required fields for the form to be valid.
+    fireEvent.change(screen.getByLabelText('name'), {
+      target: { value: 'newsvc' },
+    })
+    fireEvent.change(screen.getByLabelText('domains'), {
+      target: { value: 'new.example.com' },
+    })
+    fireEvent.change(screen.getByLabelText('internal port'), {
+      target: { value: '9000' },
+    })
+    fireEvent.change(screen.getByLabelText('image'), {
+      target: { value: 'newsvc:latest' },
+    })
+
+    mockRunQuery.mockClear()
+    fireEvent.click(screen.getByText('create service'))
+
+    // The first effect run on submit is the putService / createService
+    // mutation path, distinct from the list query effects. (A `services`
+    // refetch follows via invalidateQueries on success.)
+    await waitFor(() => expect(mockRunQuery).toHaveBeenCalled())
+    const submitted = mockRunQuery.mock.calls[0]?.[0]
+    expect(submitted).not.toBe(listServices)
+    expect(submitted).not.toBe(listWorkloads)
+    expect(submitted).not.toBe(listProjects)
+  })
+
+  it('confirms and deletes a service via the deleteService effect path', async () => {
+    render(<ServicesIndex />, { wrapper: makeWrapper() })
+
+    await screen.findByText('web')
+
+    fireEvent.click(screen.getAllByText('delete')[0]!)
+    expect(screen.getByText('delete?')).toBeTruthy()
+
+    mockRunQuery.mockClear()
+    fireEvent.click(screen.getByText('yes'))
+
+    // The first effect run on confirm is the deleteService mutation path,
+    // distinct from the list query effects. (A `services` refetch follows
+    // via invalidateQueries on success.)
+    await waitFor(() => expect(mockRunQuery).toHaveBeenCalled())
+    const submitted = mockRunQuery.mock.calls[0]?.[0]
+    expect(submitted).not.toBe(listServices)
+    expect(submitted).not.toBe(listWorkloads)
+    expect(submitted).not.toBe(listProjects)
   })
 })
