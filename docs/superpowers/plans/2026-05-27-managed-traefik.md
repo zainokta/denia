@@ -155,10 +155,15 @@ In `src/config.rs`:
     }
 ```
 
-- [ ] **Step 4: Run tests, verify they pass**
+- [ ] **Step 4: Run tests, verify they pass + check no `for_test` assertion regressions**
 
-Run: `cargo test --lib config::managed_traefik_tests`
-Expected: PASS. Then `cargo build` to confirm `for_test` callers still compile.
+Run: `cargo test --lib config::managed_traefik_tests` → PASS.
+Then run the **full** suite: `cargo test`. The `for_test` change moves
+`traefik_dynamic_config_path` from `/tmp/denia-traefik.yml` to
+`data_dir.join("traefik/dynamic/denia.yml")`; any existing test that asserts the
+old value will now fail. Search for dependents and fix their expectations:
+`grep -rn "denia-traefik.yml\|traefik_dynamic_config_path" src tests`.
+Expected: full suite PASS after fixing any dependents.
 
 - [ ] **Step 5: Commit**
 
@@ -581,6 +586,20 @@ git commit -m "feat(ingress): traefik supervisor backoff + bind-error classifica
 
 This task adds the async loop. The child process is abstracted behind `TraefikSpawner` so the loop is testable without binding ports or pulling images. The real spawner is added but its end-to-end behavior is validated manually (Task 6 + integration).
 
+- [ ] **Step 0: Enable tokio `test-util` (required for `start_paused`)**
+
+The supervisor tests use `#[tokio::test(start_paused = true)]`, which is gated
+behind tokio's `test-util` feature. `Cargo.toml` does not enable it. Add it to
+the tokio dependency features (alongside the existing
+`fs, io-util, macros, net, process, rt-multi-thread, signal, time`):
+
+```toml
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time", "test-util"] }
+```
+
+Run `cargo build` to confirm it resolves. Commit this with the task's final
+commit.
+
 - [ ] **Step 1: Write failing test**
 
 Append:
@@ -795,7 +814,16 @@ impl TraefikSpawner for HostTraefikSpawner {
 }
 ```
 
-NOTE: `EADDRINUSE` surfaces from Traefik's own exit, not from `spawn()`. For v1, detecting it precisely requires parsing the child's exit/log; keep `is_fatal_bind_error` for the spawn path and document (in the ADR) that a port conflict currently manifests as repeated restarts with the conflict logged to `traefik.log` until resolved. (A log-scan upgrade is a follow-up — do not block v1.)
+NOTE (coverage honesty): `EADDRINUSE` for a *bound* port surfaces from Traefik's
+own **exit**, not from the `spawn()` syscall. So `is_fatal_bind_error` only
+catches the (rare) case where `spawn()` itself fails with `AddrInUse`. In
+practice a port conflict yields `ChildExit::Exited` → restart loop, with the
+conflict logged to `traefik.log` until the operator stops the other Traefik. The
+unit tests in Step 1 use a fake spawner that returns `FatalBind` directly — they
+verify the *loop's* fatal-stop branch, NOT that the production spawner detects a
+real port conflict. This v1 gap is intentional and documented in ADR-016;
+precise detection (scan child log for the bind error → return `FatalBind`) is a
+follow-up. Do not claim the supervisor tests cover real EADDRINUSE behavior.
 
 - [ ] **Step 6: Build + commit**
 
@@ -804,7 +832,7 @@ Expected: compiles.
 
 ```bash
 cargo fmt --all
-git add src/ingress/traefik_supervisor.rs src/config.rs
+git add src/ingress/traefik_supervisor.rs src/config.rs Cargo.toml Cargo.lock
 git commit -m "feat(ingress): traefik supervisor loop + host spawner + acquire"
 ```
 
@@ -817,7 +845,32 @@ git commit -m "feat(ingress): traefik supervisor loop + host spawner + acquire"
 
 - [ ] **Step 1: Implement wiring**
 
-In `src/main.rs`, after the scheduler task is spawned and before `axum::serve`, add a second shutdown channel and spawn the supervisor. Use `tokio::sync::mpsc` for the supervisor shutdown.
+In `src/main.rs`:
+
+1. **Fail-fast ACME-email check (spec goal).** After `store.migrate()?` and after
+   `AppState` is available, compute whether any service uses TLS and validate the
+   email. The simplest place is right before building the router / serving, using
+   the already-built `AppState` (`state.services`). Restructure so `AppState` is
+   built into a `state` binding you can read before `serve`:
+
+```rust
+    let state = AppState::new(config.clone(), &store);
+    let tls_in_use = state
+        .services
+        .list_services()?
+        .iter()
+        .any(|s| s.tls_enabled);
+    state.config.require_acme_email(tls_in_use)?; // ConfigError -> anyhow via `?`
+```
+
+   (Keep one owned `config` for the supervisor task below; `AppState::new` takes
+   `config` by value, so pass `config.clone()` to it and keep the original for the
+   task, or read `state.config` — both work since `AppConfig: Clone`.)
+
+2. **Spawn the supervisor.** After the scheduler task is spawned and before
+   `axum::serve`, add an `mpsc` shutdown channel and spawn the supervisor. Ensure
+   `traefik_dir` exists before constructing the puller (its `staging_dir` is
+   `traefik_dir`, and `RegistryImagePuller::pull` does `TempDir::new_in(staging_dir)`):
 
 ```rust
     use denia::ingress::traefik_supervisor::{
@@ -830,6 +883,11 @@ In `src/main.rs`, after the scheduler task is spawned and before `axum::serve`, 
     let traefik_task = {
         let config = config.clone();
         tokio::spawn(async move {
+            // Ensure staging/traefik dir exists before the puller creates a TempDir in it.
+            if let Err(e) = std::fs::create_dir_all(&config.traefik_dir) {
+                eprintln!("traefik dir create failed: {e}");
+                return;
+            }
             let puller = RegistryImagePuller::new(config.traefik_dir.clone());
             let unpacker = TarRootfsUnpacker::new();
             match acquire_and_prepare(&config, &puller, &unpacker).await {
@@ -848,6 +906,8 @@ In `src/main.rs`, after the scheduler task is spawned and before `axum::serve`, 
             }
         })
     };
+
+    let app = build_router(state);
 ```
 
 After `axum::serve(...).await?` returns (graceful shutdown), signal + await the task:
@@ -857,7 +917,12 @@ After `axum::serve(...).await?` returns (graceful shutdown), signal + await the 
     let _ = traefik_task.await;
 ```
 
-Confirm `config` is `Clone` (it is — `AppConfig` derives `Clone`) and that `RegistryImagePuller`/`TarRootfsUnpacker`/`traefik_supervisor` are reachable from the crate root (`pub mod` in `src/oci` and `src/ingress`; `src/lib.rs` already re-exports `ingress`/`oci` modules — verify and add `pub use` if needed).
+Note the existing scheduler shutdown uses a `oneshot`; the new traefik channel is
+a separate `mpsc` — no conflict. `RegistryImagePuller`/`TarRootfsUnpacker`/
+`traefik_supervisor` are reachable from the crate root (`pub mod` in `src/oci`
+and `src/ingress`; `src/lib.rs` exposes both). `acquire_and_prepare`,
+`HostTraefikSpawner`, `TraefikSupervisor` must be `pub` in
+`src/ingress/traefik_supervisor.rs` (they are, per Task 5).
 
 - [ ] **Step 2: Build**
 
