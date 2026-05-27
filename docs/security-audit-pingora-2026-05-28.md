@@ -30,3 +30,23 @@ Diff: `24b59a4^..a687c34`. Both reviewers: **AMBER**.
 **Key handling — PASS:** `ParsedCert` omits `Debug`/`Serialize`; `IngressState` has no `Debug`; no `tracing` touches key bytes.
 
 **Resolution (commit `f2766e8`):** A1, A2, A4, A5, A10 ✅ fixed — `validate_domain` (rejects empty/whitespace/control/backtick/CRLF/wildcard/non-ASCII/overlong/dot-edges, returns lowercased), `RouteTable::try_upsert` + `CertStore::try_insert`, lowercase lookups in `resolve`/`get`, `resolve_or_activate` wrapped in `timeout(ACTIVATION_WAIT)` → `ActivationError::Timeout`, concurrent single-flight test (16 racers → 1 activation). 309 tests pass. **Carry-forward for Chunk C:** callers (coordinator/routes) MUST use `try_upsert` (not the infallible `upsert`, which silently skips invalid domains) and surface `InvalidDomain` at the API boundary. A3/A6/A7/A8/A9 remain ⏸️ per target chunk.
+
+---
+
+## Chunk B — Phase 3+4 (DeniaProxy request path + in-process ACME/TLS)
+
+Commits `514a0e9` (proxy) + `74edc16` (ACME/TLS). Additive: no Traefik/bridge or `main.rs`/`app.rs` cutover (Chunk C).
+
+**Secrets discipline — PASS.** No `Debug`/`Serialize`/`Clone`-to-log on any private-key holder: `ChallengeStore` and `IssuedCert` omit those derives; `instant_acme::KeyAuthorization`'s own `Debug` is redacted; the `:80` `request_filter`/`logging()` path logs no request headers and runs every access-log path through `sanitize_path` (UUID/token redaction). Account key + leaf key files are written **atomically** (temp file created at mode `0600` up front, then `rename`) so they are never world-readable mid-write — verified by `persist_cert_writes_files_at_mode_0600` / `_is_atomic_no_temp_left_behind` / `account_key_persisted_at_mode_0600`.
+
+**A1 carry-forward — HONORED.** Every externally-influenced hostname is run through `validate_domain` before it becomes an ACME order identifier (`AcmeDriver::issue`), a persisted cert directory name (`persist_cert` — also blocks `../` path traversal, test `persist_cert_rejects_path_traversal_domain`), or an SNI selection key (`CertStore::try_insert`, `load_certs_from_disk` skips non-domain dirs).
+
+**TLS decline — PASS (Spike 0.3 honored).** `DeniaCertResolver::certificate_callback` installs no cert for an unknown / absent SNI → clean `TLSHandshakeFailure`, never a default/wrong cert. Decision isolated in the pure `resolve_sni_cert` (5 unit tests incl. case-insensitivity + empty-store decline).
+
+| # | Sev | Finding | Status |
+|---|-----|---------|--------|
+| A7 | MINOR | No zeroization of private-key bytes on drop. Account key (`instant_acme::Key`), leaf keys (`pingora::tls::pkey::PKey<Private>` inside `ArcSwap<CertStore>`), and the transient `IssuedCert.key_pem`/account PKCS#8 DER (`PrivatePkcs8KeyDer`) are all foreign types whose secret bytes live in boring/ring-owned allocations. | ⏸️ **deferred (documented trade-off)** |
+
+**A7 assessment:** zeroize-on-drop is **not cheap** here — the secret bytes are owned by foreign types (`boring::pkey::PKey`, `ring`/`aws-lc-rs`-backed `instant_acme::Key`, `rustls_pki_types::PrivatePkcs8KeyDer`). Wrapping them in `Zeroizing` only protects copies we make, not the foreign allocations, and we cannot add `Drop` to foreign types. The realistic exposures are: (a) the in-memory `ArcSwap<CertStore>` (resident for the process lifetime by design — selection must be sync), and (b) the transient `IssuedCert`/account-DER buffers during issuance. The mitigation already in place is no-log + no-derive discipline and `0600` at-rest files. Given foreign ownership, the residual risk is a memory-disclosure / core-dump scenario, which is out of scope for the single-node trust boundary (host root is already trusted). **Decision: accept and document; revisit only if a `Zeroizing` newtype around our own copies becomes warranted.** No code change this chunk.
+
+**Carry-forward for Chunk C:** `main` must (1) build a single shared `ChallengeStore`, clone it into both the `AcmeDriver` and `AppState.acme_challenges` so the axum handler and issuer see the same map; (2) **boot-load certs** via `load_certs_from_disk(tls_dir)` + `IngressState::swap_certs` **before** `:443` accepts; (3) call `AcmeDriver::new(tls_dir, acme_directory_url, acme_email, challenges)` and spawn issuance + a renewal scan (`select_renewals(&certs, RENEWAL_WINDOW_DAYS)`); (4) `build_server(Arc<IngressState>, &IngressServerConfig)` now returns `Result<Server, ServerBuildError>` and binds both `:80` and `:443`. A3 (unauthenticated cold-start trigger) and A6 (`Server::new(None)` still `Result`-but-callers-may-`expect`) remain ⏸️ for Chunk C.
