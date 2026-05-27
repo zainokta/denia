@@ -62,3 +62,19 @@ Commits `514a0e9` (proxy) + `74edc16` (ACME/TLS). Additive: no Traefik/bridge or
 **PASS (security-verified, not just self-reported):** atomic 0600 secret writes (temp@0600→rename, correct syscall order); `validate_domain` enforced on all three sinks (ACME identifier, cert dir name w/ `../` blocked, SNI key); fail-closed TLS decline on unknown/absent SNI; no secret bytes in `Debug`/`Serialize`/errors/logs; `sanitize_path` redacts UUID/token segments. A7 (no zeroization) deferral independently confirmed sound.
 
 **Carry-forward for Chunk C:** `main` must (1) build a single shared `ChallengeStore`, clone it into both the `AcmeDriver` and `AppState.acme_challenges` so the axum handler and issuer see the same map; (2) **boot-load certs** via `load_certs_from_disk(tls_dir)` + `IngressState::swap_certs` **before** `:443` accepts; (3) call `AcmeDriver::new(tls_dir, acme_directory_url, acme_email, challenges)` and spawn issuance + a renewal scan (`select_renewals(&certs, RENEWAL_WINDOW_DAYS)`); (4) `build_server(Arc<IngressState>, &IngressServerConfig)` now returns `Result<Server, ServerBuildError>` and binds both `:80` and `:443`. A3 (unauthenticated cold-start trigger) and A6 (`Server::new(None)` still `Result`-but-callers-may-`expect`) remain ⏸️ for Chunk C.
+
+---
+
+## Chunk C — Phase 5 (big-bang cutover) review (infra RED / security GREEN)
+
+Commits `a1e6853..6ed7e45`.
+
+| # | Sev | Finding | Status |
+|---|-----|---------|--------|
+| C1 | BLOCKER | **Data plane broken.** `proxy.rs::upstream_peer` resolves `Host` → `route.service_name` (human name) and passes it to `resolve_or_activate`, but replica pools are keyed by `service.id.to_string()` (coordinator/lifecycle) and the activator parses the key as a UUID. Every request misses the pool → activator fails → 503. No deployed service reachable. | ✅ fix |
+| C2 | MAJOR | Rewritten `coordinator_registers_route_and_replica_on_promotion` asserts route + pool separately but never exercises the `resolve(host)→resolve_or_activate` join, so it structurally cannot catch C1. | ✅ add end-to-end test |
+| C3 | MINOR | `controller.rs`/`lifecycle.rs` field/param still named `bridge: Arc<IngressState>` — stale; rename to `ingress`. | ✅ fix |
+| C4 | MINOR | `lifecycle.rs` tests assert `healthy_count(&service_name)` (wrong key) — trivially passes, masks regressions. Assert on `service_id.to_string()`. | ✅ fix |
+| C5 | MINOR | `DENIA_ACME_DIRECTORY_URL` defaults to LE **production** — document the staging override to avoid rate-limit burns in non-prod. | ⏸️ Chunk E docs |
+
+**Security PASS (verified):** proxy binds only `0.0.0.0:80`/`:443`; control plane stays on `bind_addr` (loopback) — not newly exposed. Certs boot-loaded before `:443` accepts (no empty-store window). ACME issuance gated to `tls_enabled` + `list_verified_hostnames` only; `validate_domain` re-applied. Challenge hop dials the fixed `control_backend` SocketAddr (host/path never influence upstream) → no SSRF/open-proxy. Bind failure logs + control plane survives; no insecure fallback (no API-on-public-port, no TLS-disable). `/v1/ingress/config` + Traefik files removed cleanly; no dead RBAC entry.
