@@ -3,7 +3,10 @@ import {
   Scripts,
   createRootRouteWithContext,
   redirect,
+  useNavigate,
+  useRouterState,
 } from '@tanstack/react-router'
+import { useEffect } from 'react'
 import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
 import { TanStackDevtools } from '@tanstack/react-devtools'
 import Footer from '../components/Footer'
@@ -14,11 +17,19 @@ import TanStackQueryDevtools from '../integrations/tanstack-query/devtools'
 import appCss from '../styles.css?url'
 
 import type { QueryClient } from '@tanstack/react-query'
-import { getToken } from '../effect/auth-store'
+import { captureTokenFromUrl, getToken } from '../effect/auth-store'
+import { useAuth } from '../hooks/useAuth'
+
+// Capture a `?token=...` from the launch URL into storage before any
+// `beforeLoad` auth gate runs, then strip it from the address bar.
+captureTokenFromUrl()
 
 interface MyRouterContext {
   queryClient: QueryClient
 }
+
+// Public routes that do not require an authenticated session.
+const PUBLIC_ROUTES = ['/login', '/setup']
 
 function hasAuth(): boolean {
   if (getToken()) return true
@@ -35,8 +46,9 @@ const THEME_INIT_SCRIPT = `(function(){try{var stored=window.localStorage.getIte
 
 export const Route = createRootRouteWithContext<MyRouterContext>()({
   beforeLoad: ({ location }) => {
+    const isPublicRoute = PUBLIC_ROUTES.includes(location.pathname)
     const isLoginRoute = location.pathname === '/login'
-    if (!hasAuth() && !isLoginRoute) {
+    if (!hasAuth() && !isPublicRoute) {
       throw redirect({ to: '/login' })
     }
     if (hasAuth() && isLoginRoute) {
@@ -66,6 +78,25 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
   shellComponent: RootDocument,
 })
 
+// Redirects bootstrap principals to/from `/setup` AFTER `me()` resolves.
+// Never redirects during render; does nothing while loading or token-less.
+function BootstrapGate({ children }: { children: React.ReactNode }) {
+  const navigate = useNavigate()
+  const { token, isLoading, isBootstrap, adminInitialized } = useAuth()
+  const pathname = useRouterState({ select: (s) => s.location.pathname })
+
+  useEffect(() => {
+    if (isLoading || !token) return
+    if (isBootstrap && !adminInitialized && pathname !== '/setup') {
+      navigate({ to: '/setup' })
+    } else if (isBootstrap && adminInitialized && pathname === '/setup') {
+      navigate({ to: '/login' })
+    }
+  }, [token, isLoading, isBootstrap, adminInitialized, pathname, navigate])
+
+  return <>{children}</>
+}
+
 function RootDocument({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
@@ -75,7 +106,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       </head>
       <body className="font-mono antialiased [overflow-wrap:anywhere] selection:bg-[color-mix(in_oklab,var(--pink)_28%,transparent)]">
         <Header />
-        {children}
+        <BootstrapGate>{children}</BootstrapGate>
         <Footer />
         <TanStackDevtools
           config={{

@@ -37,6 +37,20 @@ export function clearToken(): void {
   for (const listener of listeners) listener()
 }
 
+export function captureTokenFromUrl(): void {
+  if (typeof window === 'undefined') return
+  const params = new URLSearchParams(window.location.search)
+  const token = params.get('token')
+  if (token) {
+    setToken(token)
+    params.delete('token')
+    const qs = params.toString()
+    const url =
+      window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash
+    window.history.replaceState({}, '', url)
+  }
+}
+
 export function subscribe(listener: () => void): () => void {
   listeners.add(listener)
   return () => {
