@@ -93,17 +93,26 @@ git commit -m "feat(ingress): add pingora, instant-acme deps"
 - [ ] **Step 1: Write failing test** — host lookup, exact + control domain match.
 
 ```rust
+// Real RouteSpec fields (src/ingress/traefik.rs): route_key, service_name, domains, bridge_port, tls.
 #[test]
 fn route_table_resolves_host_to_service() {
     let mut t = RouteTable::default();
-    t.upsert(RouteSpec { service_name: "api".into(), domains: vec!["api.example.com".into()], port: 0, tls: true });
+    t.upsert(RouteSpec {
+        route_key: "svc-1".into(),
+        service_name: "api".into(),
+        domains: vec!["api.example.com".into()],
+        bridge_port: 0, // field dropped entirely if Spike 0.2 = UDS
+        tls: true,
+    });
     assert_eq!(t.resolve("api.example.com").map(|r| r.service_name.as_str()), Some("api"));
     assert!(t.resolve("nope.example.com").is_none());
 }
 ```
 
 - [ ] **Step 2:** Run `cargo test route_table_resolves_host_to_service`. Expected: FAIL (no `RouteTable`).
-- [ ] **Step 3:** Implement `RouteSpec` (moved) + `RouteTable { by_host: BTreeMap<String, RouteSpec> }` with `upsert`, `remove`, `resolve`. Keep `RouteSpec` fields compatible with the current struct (drop `bridge_port` only if Spike 0.2 = UDS).
+- [ ] **Step 3:** Implement `RouteSpec` (moved, exact current fields) + `RouteTable { by_host: BTreeMap<String, RouteSpec> }` with `upsert`, `remove`, `resolve`. Drop `bridge_port` only if Spike 0.2 = UDS (then update every reference — see Tasks 5.6, 6.2, 6.3, 6.4).
+
+> **Testability mandate:** put resolution/redirect/cert-selection logic in **free functions or `IngressState` methods** (e.g. `IngressState::resolve_host`, `classify_request`, `select_cert`). The `ProxyHttp`/`TlsAccept` trait methods must be thin wrappers, so Phase 3/4 "failing test first" steps can test the logic without a live Pingora `Session`.
 - [ ] **Step 4:** Run test. Expected: PASS.
 - [ ] **Step 5:** Commit.
 
@@ -189,6 +198,13 @@ async fn zero_replicas_invokes_activation_hook() { /* fake hook records call */ 
 - [ ] **Step 3:** Add the acme-challenge route backed by a shared challenge map owned by `AcmeDriver`. Confirm `denia-challenge` route still served (unchanged).
 - [ ] **Step 4:** Run. Expected: PASS. Commit.
 
+> **Verifier path is unchanged:** `src/verification/http.rs` still fetches
+> `http://<host>/.well-known/denia-challenge/<token>` against the public host.
+> Previously Traefik routed that to Denia; now Pingora's `:80` `request_filter`
+> (Task 3.2) intercepts the path and proxies to the control backend, so external
+> verification still reaches axum. No change to the verifier code itself — the
+> regression risk is purely in Pingora forwarding the path, which Task 3.2 covers.
+
 ### Task 4.3: Cert persistence + boot load + `CertStore` swap
 
 **Files:** Modify `src/ingress/pingora/acme.rs`, `state.rs`; Test: inline.
@@ -219,11 +235,11 @@ async fn zero_replicas_invokes_activation_hook() { /* fake hook records call */ 
 ### Task 5.1: Build `IngressState` in `app.rs`; remove bridge fields
 
 **Files:** Modify `src/app.rs`
-- Reference lines: fields ~46-55; `new`/full constructor ~66-121; `new_with_deploy_dependencies`/`AppStateBuilder` ~146-311; `autoscaler_handle` ~128-136.
+- Real reference lines: `ingress_options` field 49 + bridge fields 46-55; `new` at 59; `LoopbackBridgeSupervisor` build ~84; `Controller::new` 109; `autoscaler_handle` 128; the **two** generic constructors `new_with_deploy_dependencies` (140) and `new_with_deploy_dependencies_and_log` (169); `IngressRenderOptions` built in two bodies (186 and 278 in `AppStateBuilder::build`); `AppStateBuilder` 244-320.
 
-- [ ] **Step 1:** Replace `bridge_allocator`/`bridge_manager`/`bridge_supervisor`/`ingress_options` with `ingress: Arc<IngressState>`.
-- [ ] **Step 2:** Update `Controller::new` (~109) to take `Arc<IngressState>` (or the narrowed activation/pool trait) instead of `LoopbackBridgeSupervisor`. Update `autoscaler_handle` return type to `(Arc<IngressState>, controller)`.
-- [ ] **Step 3:** Remove the `M: BridgeManager` / `B: Into<BridgeAllocator>` generics from the two constructors; replace `FakeBridgeManager` usage with a test `IngressState`/fake `ActivationHook` (see Task 6.0 test seam).
+- [ ] **Step 1:** Replace `bridge_allocator`/`bridge_manager`/`bridge_supervisor`/`ingress_options` with `ingress: Arc<IngressState>`. Remove the `IngressRenderOptions` import (28) and both construction blocks (186-191, 278-283).
+- [ ] **Step 2:** Update `Controller::new` (109) to take `Arc<IngressState>` (or the narrowed activation/pool trait) instead of `LoopbackBridgeSupervisor`. Update `autoscaler_handle` (128) return type to `(Arc<IngressState>, controller)`.
+- [ ] **Step 3:** Remove the `M: BridgeManager` / `B: Into<BridgeAllocator>` generics from **both** `new_with_deploy_dependencies` (140) and `new_with_deploy_dependencies_and_log` (169), and the `AppStateBuilder::build` body (278+). Replace `FakeBridgeManager` usage with a test `IngressState`/fake `ActivationHook` (see Task 5.6 test seam).
 - [ ] **Step 4:** `cargo build` (may fail until 5.2-5.4). Commit.
 
 ### Task 5.2: Rewire `src/deploy/coordinator.rs`
@@ -238,21 +254,24 @@ async fn zero_replicas_invokes_activation_hook() { /* fake hook records call */ 
 
 ### Task 5.3: Rewire `src/deploy/routes.rs`
 
-**Files:** Modify `src/deploy/routes.rs` (`rerender_traefik` → `apply_routes`; callers `verify_service_domain`, `delete_service_domain_handler`).
+**Files:** Modify `src/deploy/routes.rs` (`rerender_traefik` → `apply_routes`; `default_ingress_options` at line 11; callers `verify_service_domain`, `delete_service_domain_handler`).
 
-- [ ] **Step 1:** Replace `render_file_provider_config` + file write with `RouteTable` rebuild from `list_services`/`list_verified_hostnames` into `IngressState`.
-- [ ] **Step 2:** Rename `rerender_traefik` → `apply_routes`; update call sites.
-- [ ] **Step 3:** `cargo build`. Commit.
+> **Key reconciliation (real bug surfaced):** `routes.rs` keys the routes map by `svc.name` (line 33/38), but `coordinator.rs` keys by `service.id.to_string()` (line 324, deliberately, comment F-3: names only unique per project). Standardize **both** on `service.id` when building the `RouteTable` so two projects' same-named services don't collide. The route table's host index is by domain, but the underlying entry key must be `service.id`.
+
+- [ ] **Step 1:** Remove `default_ingress_options` (11) and the `IngressRenderOptions` import (7).
+- [ ] **Step 2:** Replace `render_file_provider_config` + file write with a `RouteTable` rebuild from `list_services`/`list_verified_hostnames` into `IngressState`, keyed by `service.id`.
+- [ ] **Step 3:** Rename `rerender_traefik` → `apply_routes`; update call sites (`verify_service_domain`, `delete_service_domain_handler`).
+- [ ] **Step 4:** `cargo build`. Commit.
 
 ### Task 5.4: Rewire `src/main.rs`; spawn Pingora + ACME tasks
 
 **Files:** Modify `src/main.rs`
-- Reference: traefik_supervisor import line 7; supervisor task ~80-82; `autoscaler_handle`/`set_activator` ~92-94.
+- Real reference: `traefik_supervisor` import line 7; the existing `traefik_shutdown_tx`/`rx` mpsc (59) + supervisor task (~81) + `traefik_shutdown_tx.send` (126); `autoscaler_handle`/`set_activator` (~92-94); graceful shutdown via `tokio::signal::ctrl_c` (119-122) + `shutdown_tx.send` (124).
 
-- [ ] **Step 1:** Remove the `traefik_supervisor` import + supervisor task.
-- [ ] **Step 2:** Spawn `pingora::server` on a dedicated thread (per Spike 0.1 model) with an explicit shutdown channel tied to Denia's signal path. Spawn the ACME issuance + renewal tasks. Boot-load certs before binding `:443`.
-- [ ] **Step 3:** Update `set_activator` wiring to the new owner.
-- [ ] **Step 4:** Add failure isolation: Pingora bind failure logs a clear `:80`/`:443`-in-use message and the control plane keeps serving `bind_addr`.
+- [ ] **Step 1:** Remove the `traefik_supervisor` import (7) and the supervisor task (~80-82).
+- [ ] **Step 2:** **Model Pingora shutdown on the existing `traefik_shutdown` mpsc pattern**: create a `pingora_shutdown` channel, spawn the Pingora `Server` on a dedicated thread (per Spike 0.1), and send on it from the same place `traefik_shutdown_tx.send()` was (126), driven by the existing `ctrl_c` graceful path. Spawn the ACME issuance + renewal tasks. **Boot-load certs before binding `:443`.**
+- [ ] **Step 3:** Update `set_activator` wiring (92-94) to the new `IngressState` owner.
+- [ ] **Step 4:** Add failure isolation: Pingora bind failure logs a clear `:80`/`:443`-in-use message and the control plane keeps serving `bind_addr` (axum `serve` at 119 unaffected).
 - [ ] **Step 5:** `cargo build`. Commit.
 
 ### Task 5.5: Delete Traefik + bridge transport; drop `/v1/ingress/config`
@@ -271,10 +290,10 @@ async fn zero_replicas_invokes_activation_hook() { /* fake hook records call */ 
 
 ### Task 5.6: Rewrite backend contract tests
 
-**Files:** Modify `tests/backend_contract.rs` (`traefik_config_*` tests), `tests/domain_verification.rs`.
+**Files:** Modify `tests/backend_contract.rs` (`traefik_config_*` tests), `tests/domain_verification.rs` (sets `traefik_dynamic_config_path` + `bridge_port` RouteSpec ~339-353), `tests/deploy_orchestration.rs` (`new_with_routing(... FakeBridgeManager ...)` ~186 + `coordinator_writes_traefik_config_on_promotion`).
 
 - [ ] **Step 1:** Replace `traefik_config_routes_domains_to_loopback_bridge_ports` and siblings with route-table assertions (host → service, tls flag) via `IngressState`/`/v1/ingress/routes`.
-- [ ] **Step 2:** Fix any `FakeBridgeManager`/`AppStateBuilder` instantiations to the new test seam.
+- [ ] **Step 2:** Fix **all three** test files' `FakeBridgeManager`/`AppStateBuilder`/`new_with_routing`/`traefik_dynamic_config_path` instantiations to the new test seam. Rewrite `coordinator_writes_traefik_config_on_promotion` to assert route-table/replica registration instead of a YAML file.
 - [ ] **Step 3:** `cargo test`. Expected: PASS. Commit.
 
 ---
@@ -307,7 +326,8 @@ cd web && git add src/effect/api-client.ts && git commit -m "refactor(web): drop
 **Files:** Modify `web/src/routes/-ingress.test.tsx`
 
 - [ ] **Step 1:** Remove/replace the `shows raw YAML config on expand` test (line 91) and the `raw config` toggle assertion (98).
-- [ ] **Step 2:** `pnpm test`. Expected: PASS. Commit.
+- [ ] **Step 2:** If Spike 0.2 = UDS (`bridge_port` dropped): update the `FIXTURE_ROUTES` fixture's `bridge_port` (lines ~18-27) and the "renders bridge ports in table" test (~82-89) — every `bridge_port` reference in this file.
+- [ ] **Step 3:** `pnpm test`. Expected: PASS. Commit.
 
 ### Task 6.4: Update `RouteView` schema if `bridge_port` dropped
 
@@ -341,16 +361,19 @@ cd web && git add src/effect/api-client.ts && git commit -m "refactor(web): drop
 
 **Files:** Modify/create `tests/linux_runtime_privileged.rs` (opt-in via `DENIA_RUN_PRIVILEGED_TESTS=1`).
 
+> **Prerequisite (BLOCKER if skipped):** the Rust binary embeds `web/dist/client` via `rust-embed` (`src/web.rs`); a release build *requires* it to exist, and the Phase 6 frontend edits invalidate the existing build. Run `cd web && pnpm build` **before** booting Denia in this test or any release `cargo build`.
+
+- [ ] **Step 0:** `cd web && pnpm build` (regenerate `dist/client` after Phase 6).
 - [ ] **Step 1: Write failing test** — boot Denia with Pingora; deploy a service; `GET http://<host>:80/` proxies to the workload UDS and returns 200; unknown host → 404; `tls_enabled` host on `:80` → 308; scale-from-zero → 503-then-200 after activation.
 - [ ] **Step 2:** Run `DENIA_RUN_PRIVILEGED_TESTS=1 cargo test --test linux_runtime_privileged -- --ignored`. Expected: PASS.
 - [ ] **Step 3:** Commit.
 
 ### Task 8.2: Full verification sweep
 
-- [ ] **Step 1:** `cargo fmt --all`
-- [ ] **Step 2:** `cargo clippy --all-targets --all-features` — fix lints.
-- [ ] **Step 3:** `cargo build && cargo test`
-- [ ] **Step 4:** `cd web && pnpm typecheck && pnpm test && pnpm build`
+- [ ] **Step 1:** `cd web && pnpm typecheck && pnpm test && pnpm build` (frontend first — backend release embed needs fresh `dist/client`).
+- [ ] **Step 2:** `cargo fmt --all`
+- [ ] **Step 3:** `cargo clippy --all-targets --all-features` — fix lints.
+- [ ] **Step 4:** `cargo build && cargo test`
 - [ ] **Step 5:** `DENIA_RUN_PRIVILEGED_TESTS=1 cargo test --test linux_runtime_privileged -- --ignored`
 - [ ] **Step 6:** Report exact commands + results. Commit any fixes.
 
