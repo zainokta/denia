@@ -1,4 +1,4 @@
-import { Schema } from 'effect'
+import { Effect, Schema } from 'effect'
 
 export class Node extends Schema.Class<Node>('Node')({
   id: Schema.Number,
@@ -89,19 +89,6 @@ export const SecurityPosture = Schema.Struct({
   no_new_privs: Schema.Boolean,
   caps_dropped: Schema.Boolean,
 })
-
-export class Service extends Schema.Class<Service>('Service')({
-  id: Schema.Number,
-  project_id: Schema.Number,
-  name: Schema.String,
-  domains: Schema.Array(Schema.String),
-  internal_port: Schema.Number,
-  status: Schema.optional(Schema.String),
-  tls_enabled: Schema.optional(Schema.Boolean),
-  security: Schema.optional(SecurityPosture),
-}) {}
-
-export const Services = Schema.Array(Service)
 
 export const DeploymentStatus = Schema.Literals([
   'Pending',
@@ -218,6 +205,38 @@ export const ExternalImageSource = Schema.Struct({
 export type ExternalImageSource = typeof ExternalImageSource.Type
 
 export const ServiceSource = Schema.Union([GitSource, ExternalImageSource])
+
+export const HealthCheck = Schema.Struct({
+  path: Schema.String,
+  timeout_seconds: Schema.Number,
+})
+
+export const ResourceLimits = Schema.Struct({
+  cpu_millis: Schema.Number,
+  memory_bytes: Schema.Number,
+})
+
+export class Service extends Schema.Class<Service>('Service')({
+  id: Schema.String,
+  project_id: Schema.String,
+  name: Schema.String,
+  domains: Schema.Array(Schema.String),
+  source: ServiceSource,
+  internal_port: Schema.Number,
+  health_check: HealthCheck,
+  resource_limits: Schema.optional(Schema.NullOr(ResourceLimits)),
+  env: Schema.Array(Schema.Tuple([Schema.String, Schema.String])),
+  tls_enabled: Schema.optionalKey(Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
+}) {}
+
+export const Services = Schema.Array(Service)
+
+// Service fields minus `id`, for create requests.
+const { id: _serviceId, ...serviceInputFields } = Service.fields
+export const ServiceInput = Schema.Struct(serviceInputFields)
+export type ServiceInput = typeof ServiceInput.Type
 
 export class Job extends Schema.Class<Job>('Job')({
   id: Schema.String,
