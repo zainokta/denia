@@ -8,9 +8,11 @@
 //! It is being introduced additively alongside the existing Traefik/bridge code;
 //! the old modules are removed in a later cutover chunk.
 
+pub mod proxy;
 pub mod server;
 pub mod state;
 
+pub use proxy::{DeniaProxy, Port80Decision, RequestCtx, UpstreamChoice, classify_port80};
 pub use server::{IngressServerConfig, build_server};
 pub use state::{
     ActivationError, ActivationHook, CertStore, IngressError, IngressState, ParsedCert,
