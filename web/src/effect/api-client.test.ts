@@ -160,13 +160,11 @@ describe('RouteView schema', () => {
     Schema.decodeUnknownEffect(RouteView)({
       service_name: 'web',
       domains: ['example.com', 'www.example.com'],
-      bridge_port: 9090,
       tls: true,
     }).pipe(
       Effect.map((rv) => {
         expect(rv.service_name).toBe('web')
         expect(rv.domains).toEqual(['example.com', 'www.example.com'])
-        expect(rv.bridge_port).toBe(9090)
         expect(rv.tls).toBe(true)
       }),
     ),
@@ -177,13 +175,11 @@ describe('RouteView schema', () => {
       {
         service_name: 'web',
         domains: ['example.com'],
-        bridge_port: 9090,
         tls: true,
       },
       {
         service_name: 'api',
         domains: ['api.example.com'],
-        bridge_port: 9091,
         tls: false,
       },
     ]).pipe(
@@ -271,7 +267,6 @@ const mockApi = (success = true) =>
           )) as never,
     putService: ((_svc: never) => emptyApi()) as never,
     listRoutes: emptyApi() as never,
-    getIngressConfig: emptyApi() as never,
     listJobs: ((_pid: string) =>
       Effect.succeed([FIXTURE_JOB] as ReadonlyArray<typeof FIXTURE_JOB>)) as never,
     getJob: ((_id: string) => Effect.succeed(FIXTURE_JOB)) as never,
@@ -412,7 +407,6 @@ describe('ApiClient jobs', () => {
     deleteProject: ((_id: string) => emptyApi()) as never,
     putService: ((_svc: unknown) => emptyApi()) as never,
     listRoutes: emptyApi() as never,
-    getIngressConfig: emptyApi() as never,
     listJobs: ((_pid: string) =>
       Effect.succeed([FIXTURE_JOB] as ReadonlyArray<typeof FIXTURE_JOB>)) as never,
     getJob: ((_id: string) => Effect.succeed(FIXTURE_JOB)) as never,
@@ -687,13 +681,11 @@ const FIXTURE_ROUTES = [
   {
     service_name: 'web',
     domains: ['example.com'],
-    bridge_port: 9090,
     tls: true,
   },
   {
     service_name: 'api',
     domains: ['api.example.com'],
-    bridge_port: 9091,
     tls: false,
   },
 ]
@@ -728,7 +720,6 @@ const mockIngressApi = () =>
     deleteProject: ((_id: string) => emptyApi()) as never,
     putService: ((_svc: never) => emptyApi()) as never,
     listRoutes: Effect.succeed(FIXTURE_ROUTES as ReadonlyArray<RouteView>) as never,
-    getIngressConfig: Effect.succeed('http:\n  routers:\n    web:\n      service: web\n') as never,
     listJobs: ((_pid: string) =>
       Effect.succeed([FIXTURE_JOB] as ReadonlyArray<typeof FIXTURE_JOB>)) as never,
     getJob: ((_id: string) => Effect.succeed(FIXTURE_JOB)) as never,
@@ -759,15 +750,6 @@ describe('Ingress ApiClient methods', () => {
       expect(routes[0].tls).toBe(true)
       expect(routes[1].service_name).toBe('api')
       expect(routes[1].tls).toBe(false)
-    }).pipe(Effect.provide(mockIngressApi())),
-  )
-
-  it.effect('getIngressConfig returns raw text', () =>
-    Effect.gen(function* () {
-      const api = yield* ApiClient
-      const yaml = yield* api.getIngressConfig
-      expect(yaml).toContain('routers:')
-      expect(yaml).toContain('web')
     }).pipe(Effect.provide(mockIngressApi())),
   )
 })
@@ -869,7 +851,6 @@ describe('putService', () => {
           deleteProject: ((_id: string) => emptyApi()) as never,
           putService: ((_svc: unknown) => Effect.succeed(FIXTURE_SVC)) as never,
           listRoutes: emptyApi() as never,
-          getIngressConfig: emptyApi() as never,
           listJobs: ((_pid: string) =>
             Effect.succeed([FIXTURE_JOB] as ReadonlyArray<typeof FIXTURE_JOB>)) as never,
           getJob: ((_id: string) => Effect.succeed(FIXTURE_JOB)) as never,

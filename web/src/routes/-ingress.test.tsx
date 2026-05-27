@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, afterEach } from 'vitest'
 import { vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 vi.mock('#/effect/runtime', () => ({
@@ -17,18 +17,14 @@ const FIXTURE_ROUTES = [
   {
     service_name: 'web',
     domains: ['example.com'],
-    bridge_port: 9090,
     tls: true,
   },
   {
     service_name: 'api',
     domains: ['api.example.com'],
-    bridge_port: 9091,
     tls: false,
   },
 ]
-
-const FIXTURE_CONFIG = 'http:\n  routers:\n    web:\n      service: web\n'
 
 function makeWrapper() {
   const queryClient = new QueryClient({
@@ -77,27 +73,5 @@ describe('Ingress route', () => {
     render(<IngressRoute />, { wrapper: makeWrapper() })
 
     expect(await screen.findByText(/No routes yet/)).toBeTruthy()
-  })
-
-  it('renders bridge ports in table', async () => {
-    allReturns([FIXTURE_ROUTES, []])
-
-    render(<IngressRoute />, { wrapper: makeWrapper() })
-
-    expect(await screen.findByText('9090')).toBeTruthy()
-    expect(screen.getByText('9091')).toBeTruthy()
-  })
-
-  it('shows raw YAML config on expand', async () => {
-    allReturns([FIXTURE_ROUTES, FIXTURE_CONFIG])
-
-    render(<IngressRoute />, { wrapper: makeWrapper() })
-
-    await screen.findByText('example.com')
-
-    const toggle = screen.getByText('raw config')
-    fireEvent.click(toggle)
-
-    expect(await screen.findByText(/routers:/)).toBeTruthy()
   })
 })
