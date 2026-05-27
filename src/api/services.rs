@@ -13,6 +13,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::api::ApiError;
 use crate::app::AppState;
 use crate::auth::{Principal, ensure_role};
+use crate::config::ConfigError;
 use crate::deploy::DeploymentCoordinator;
 use crate::domain::{Role, ServiceConfig};
 use crate::logs::{LogStore, LogTailer};
@@ -76,6 +77,16 @@ async fn put_service(
             }
         }
     }
+    // FIX 4: validate ACME email before persisting a service that enables TLS.
+    state
+        .config
+        .require_acme_email(service.tls_enabled)
+        .map_err(|e| match e {
+            ConfigError::AcmeEmailRequired => {
+                ApiError::BadRequest("DENIA_ACME_EMAIL must be set to enable TLS".to_string())
+            }
+            other => ApiError::BadRequest(other.to_string()),
+        })?;
     Ok(Json(state.services.put_service(service)?))
 }
 
@@ -353,6 +364,53 @@ mod tests {
         assert!(seen.contains("backlog-line"), "missing backlog in: {seen}");
         assert!(seen.contains("live-line"), "missing live line in: {seen}");
         // Dropping `stream` here cancels the tailer task.
+    }
+
+    #[tokio::test]
+    async fn put_service_with_tls_and_no_acme_email_returns_400() {
+        use crate::domain::{
+            ExternalImageSource, HealthCheck, Project, ServiceConfig, ServiceSource,
+        };
+        let state = test_state(); // acme_email is None in for_test
+        let project = Project::new("team-tls", None).unwrap();
+        state.projects.put_project(project.clone()).unwrap();
+        let mut svc = ServiceConfig::new(
+            project.id,
+            "tlssvc",
+            vec!["tls.example.com".into()],
+            ServiceSource::ExternalImage(ExternalImageSource {
+                image: "nginx".into(),
+                credential: None,
+                registry_id: None,
+                image_ref: None,
+            }),
+            80,
+            HealthCheck::new("/health", 5),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        svc.tls_enabled = true;
+        let body = serde_json::to_vec(&svc).unwrap();
+
+        let resp = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let msg = body_string(resp).await;
+        assert!(
+            msg.contains("DENIA_ACME_EMAIL"),
+            "expected ACME error in: {msg}"
+        );
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 pub mod config;
 pub mod credentials;
 pub mod layout;
+pub mod pull_to_dir;
 pub mod registry;
 pub mod unpack;
 
@@ -10,6 +11,7 @@ use thiserror::Error;
 
 pub use config::OciImageConfig;
 pub use oci_client::secrets::RegistryAuth;
+pub use pull_to_dir::pull_image_to_dir;
 
 #[derive(Debug, Clone)]
 pub enum LayerCompression {

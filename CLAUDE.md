@@ -43,7 +43,7 @@ Guidelines for AI agents working on Denia, a Rust backend PaaS that runs workloa
 - SQLite stores control-plane state; secrets are referenced, not stored raw.
 - SOPS-encrypted files hold SSH deploy keys, registry credentials, and service secrets.
 - The default SOPS key backend is a host-local age identity with root-only permissions.
-- Traefik integration uses the file provider. Denia generates route config and owns loopback bridge listeners.
+- Denia runs and supervises its own Traefik (OCI-pulled host process, no namespaces) via the file provider; default dynamic config path is `<data_dir>/traefik/dynamic/denia.yml`. Denia generates route config and owns loopback bridge listeners. The operator must not run a separate Traefik (Denia owns `:80`/`:443`). See ADR-016.
 - Workload ingress is modeled as Denia-owned Unix sockets, with loopback bridge ports only for Traefik compatibility.
 - Runtime metrics come from cgroup v2 and procfs.
 - Runtime security hardening uses `DENIA_USERNS_BASE` (default `100000`) and `DENIA_USERNS_SIZE` (default `65536`). `no_new_privs` and capability-bounding-set drop are applied in-process via the `rustix` syscall module (`src/syscall/`); the `setpriv` host binary is no longer required.
