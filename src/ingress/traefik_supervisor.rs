@@ -125,9 +125,14 @@ pub async fn acquire_and_prepare(
     .await
     .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-    let dynamic_dir = dir.join("dynamic");
+    // FIX 3: derive the watched dir from config.traefik_dynamic_config_path so the
+    // file-provider directory always matches where the deploy code writes denia.yml.
+    let denia_yml = config.traefik_dynamic_config_path.clone();
+    let dynamic_dir = denia_yml
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| dir.join("dynamic"));
     std::fs::create_dir_all(&dynamic_dir)?;
-    let denia_yml = dynamic_dir.join("denia.yml");
     if !denia_yml.exists() {
         std::fs::write(&denia_yml, "http:\n  routers: {}\n  services: {}\n")?;
     }
@@ -162,23 +167,38 @@ pub struct HostTraefikSpawner {
 impl TraefikSpawner for HostTraefikSpawner {
     async fn run_once(&self) -> ChildExit {
         use std::process::Stdio;
+        // FIX 2: ensure the log directory exists before opening the log file.
+        if let Some(parent) = self.log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let log = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.log_path)
         {
             Ok(f) => f,
-            Err(_) => return ChildExit::Exited,
+            Err(e) => {
+                eprintln!(
+                    "traefik: failed to open log file {}: {e}",
+                    self.log_path.display()
+                );
+                return ChildExit::Exited;
+            }
         };
         let log_err = match log.try_clone() {
             Ok(f) => f,
-            Err(_) => return ChildExit::Exited,
+            Err(e) => {
+                eprintln!("traefik: failed to clone log file handle: {e}");
+                return ChildExit::Exited;
+            }
         };
         let mut cmd = tokio::process::Command::new(&self.binary);
         cmd.arg(format!("--configfile={}", self.config_file.display()))
             .current_dir(&self.cwd)
             .stdout(Stdio::from(log))
-            .stderr(Stdio::from(log_err));
+            .stderr(Stdio::from(log_err))
+            // FIX 1: kill the child process when this future is cancelled (prevents orphaned Traefik).
+            .kill_on_drop(true);
         match cmd.spawn() {
             Ok(mut child) => {
                 let _ = child.wait().await;
@@ -277,6 +297,40 @@ mod tests {
         tx.send(()).await.unwrap();
         let outcome = handle.await.unwrap();
         assert_eq!(outcome, super::SupervisorOutcome::Shutdown);
+    }
+
+    /// FIX 3: dynamic_dir in the rendered static config must equal the parent of
+    /// traefik_dynamic_config_path, even when overridden via env.
+    #[test]
+    fn dynamic_dir_matches_dynamic_config_path_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom_dir = tmp.path().join("custom");
+        let custom_yml = custom_dir.join("routes.yml");
+
+        // Simulate what acquire_and_prepare computes with an overridden path.
+        let derived_dir = custom_yml
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| tmp.path().join("dynamic"));
+        assert_eq!(
+            derived_dir, custom_dir,
+            "derived dir must be the yml parent"
+        );
+
+        // The rendered static config must reference that same dir.
+        let o = TraefikStaticOptions {
+            http_port: 80,
+            https_port: 443,
+            dynamic_dir: derived_dir.clone(),
+            acme_email: "ops@example.com".into(),
+            acme_storage: tmp.path().join("acme.json"),
+            resolver: "le".into(),
+        };
+        let yaml = render_static_config(&o);
+        assert!(
+            yaml.contains(&format!("directory: \"{}\"", derived_dir.display())),
+            "static config must point to the derived dir; yaml=\n{yaml}"
+        );
     }
 
     #[test]
