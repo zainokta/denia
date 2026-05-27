@@ -165,6 +165,14 @@ async fn coordinator_promotes_only_after_health_check_passes() {
             .status,
         DeploymentStatus::Healthy
     );
+    assert_eq!(
+        store
+            .get_deployment_artifact(deployment.id)
+            .expect("artifact lookup")
+            .expect("artifact linked")
+            .digest,
+        "sha256:abc123"
+    );
 }
 
 #[tokio::test]
