@@ -4,7 +4,7 @@ use denia::{
     runtime::{LinuxRuntime, LinuxRuntimeProcessSpec, Runtime},
     syscall::{
         self,
-        ns::{NamespaceConfig, spawn_namespaced_process},
+        ns::{NamespaceConfig, OverlaySpec, RoBind, spawn_namespaced_process},
     },
 };
 use std::{
@@ -421,6 +421,95 @@ async fn linux_runtime_start_uses_native_namespace_and_cgroup_gate() {
         !status.cgroup_path.exists(),
         "runtime stop should remove deployment cgroup {}",
         status.cgroup_path.display()
+    );
+}
+
+#[test]
+#[ignore = "requires root, cgroup v2, Linux namespace permissions, and DENIA_PRIVILEGED_BUSYBOX_STATIC"]
+fn overlay_replica_launches_with_readonly_bind_mount() {
+    assert_eq!(
+        std::env::var("DENIA_RUN_PRIVILEGED_TESTS").as_deref(),
+        Ok("1")
+    );
+    assert!(
+        std::fs::read_to_string("/proc/self/status")
+            .expect("status")
+            .lines()
+            .any(|line| line == "Uid:\t0\t0\t0\t0"),
+        "privileged runtime tests must run as root"
+    );
+    assert!(
+        static_busybox().exists(),
+        "static busybox must exist through DENIA_PRIVILEGED_BUSYBOX_STATIC or /usr/lib/nix/busybox"
+    );
+
+    let work_root = tempfile::tempdir().expect("overlay work root");
+    let cgroup_root = CgroupTestRoot::new();
+    let test_userns_base = 100000u32;
+
+    // lower = shared read-only artifact rootfs; upper/work/merged are per-replica.
+    let lower = work_root.path().join("lower");
+    write_busybox_rootfs(&lower);
+    let upper = work_root.path().join("upper");
+    let work = work_root.path().join("work");
+    let merged = work_root.path().join("merged");
+    for dir in [&upper, &work, &merged] {
+        fs::create_dir_all(dir).expect("overlay layer dir");
+    }
+
+    // Host file bound read-only into the guest.
+    let bound_src = work_root.path().join("bound-secret");
+    fs::write(&bound_src, "denia-bound-payload\n").expect("write bound source");
+
+    let stdout_file = work_root.path().join("replica.out");
+    let stderr_file = work_root.path().join("replica.err");
+
+    // The guest reads the bound file (proving visibility) and attempts to write
+    // to it (which must fail because the bind is read-only). Output records the
+    // observed content and the write outcome.
+    let script = "cat /.denia/bound; \
+         if echo mutate > /.denia/bound 2>/dev/null; then echo WRITE_OK; else echo WRITE_DENIED; fi";
+
+    let cgroup_path = cgroup_root.create_leaf("overlay-replica");
+    let namespace = NamespaceConfig::new(
+        lower.clone(),
+        vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+    )
+    .with_uid_map(test_userns_base, 65536)
+    .with_cgroup_path(cgroup_path)
+    .with_stdio_paths(&stdout_file, &stderr_file)
+    .with_overlay(OverlaySpec {
+        lower: lower.clone(),
+        upper,
+        work,
+        merged,
+    })
+    .with_ro_bind(RoBind {
+        src: bound_src,
+        dest: PathBuf::from("/.denia/bound"),
+    });
+
+    let pid = spawn_namespaced_process(&namespace).expect("spawn overlay replica");
+    let status = syscall::signal::wait(pid).expect("wait overlay replica");
+    assert_eq!(
+        status,
+        syscall::signal::ProcessStatus::Exited(0),
+        "expected overlay replica to exit successfully; stderr: {:?}",
+        fs::read_to_string(&stderr_file).ok()
+    );
+
+    let output = fs::read_to_string(&stdout_file).expect("replica stdout");
+    assert!(
+        output.contains("denia-bound-payload"),
+        "expected bound file content to be visible inside the guest, got: {output:?}"
+    );
+    assert!(
+        output.contains("WRITE_DENIED"),
+        "expected read-only bind to deny writes, got: {output:?}"
+    );
+    assert!(
+        !output.contains("WRITE_OK"),
+        "read-only bind mount must not be writable, got: {output:?}"
     );
 }
 
