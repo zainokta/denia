@@ -28,9 +28,9 @@ should not install or configure Traefik separately.
   host `:80`/`:443` and reads/writes its config + cert files directly.
 - Generate Traefik **static config** (entrypoints, file provider, ACME resolver)
   and keep emitting **dynamic config** as today.
-- ACME via **HTTP-01** using `certResolver` `le`, email required.
-- **Default on**; an explicit escape hatch disables management for sites that run
-  their own edge.
+- ACME via **HTTP-01** using `certResolver` `le`, email required when TLS is used.
+- **Always managed — no opt-out.** Denia is the only Traefik on the node; there is
+  no external-Traefik mode and no `DENIA_MANAGE_TRAEFIK` flag.
 
 ## Non-Goals
 
@@ -56,14 +56,17 @@ should not install or configure Traefik separately.
    This keeps "no manual install" without a separate download/checksum path and
    without Docker. Pinned by digest for reproducibility.
 
-3. **Managed mode default-on, authoritative.** Denia fully owns Traefik's config
-   and lifecycle. `DENIA_MANAGE_TRAEFIK=0` is an explicit escape hatch that
-   reverts to today's external-Traefik behavior (Denia only writes dynamic config
-   at the legacy path; no supervision).
+3. **Always managed, authoritative — no opt-out.** Denia fully owns Traefik's
+   config and lifecycle on every node. There is no flag to disable it and no
+   external-Traefik mode: the operator must not run a separate Traefik. This is
+   the Dokploy model (the platform ships and runs its own edge). An operator who
+   already runs Traefik must stop it (the node's `:80`/`:443` belong to Denia's
+   Traefik).
 
-4. **ACME HTTP-01, email required.** Simplest correct path with no DNS provider
-   creds. If managed mode is on, TLS is in use, and `DENIA_ACME_EMAIL` is unset →
-   fail fast at config load (`ConfigError`).
+4. **ACME HTTP-01, email required when TLS is used.** Simplest correct path with
+   no DNS provider creds. If any service has `tls_enabled` and `DENIA_ACME_EMAIL`
+   is unset → fail fast (`ConfigError` at startup; same check at service
+   create/update). Nodes with no TLS service need no email.
 
 5. **Resolver name stays `le`.** The dynamic-config renderer already emits
    `tls.certResolver: le` (`acme_resolver`, default `le`). The generated static
@@ -93,42 +96,39 @@ New fields on `AppConfig`:
 
 | Field | Env | Default | Notes |
 |-------|-----|---------|-------|
-| `manage_traefik` | `DENIA_MANAGE_TRAEFIK` | `true` | `0`/`false` → external mode |
 | `traefik_image` | `DENIA_TRAEFIK_IMAGE` | `docker.io/library/traefik:v3.<x>@sha256:<pin>` | pinned by digest |
-| `acme_email` | `DENIA_ACME_EMAIL` | — | required if managed + TLS |
+| `acme_email` | `DENIA_ACME_EMAIL` | — | required when any service uses TLS |
 | `http_port` | `DENIA_HTTP_PORT` | `80` | `web` entrypoint |
 | `https_port` | `DENIA_HTTPS_PORT` | `443` | `websecure` entrypoint |
+
+There is **no** `DENIA_MANAGE_TRAEFIK` flag — supervision is unconditional.
 
 Derived:
 
 - `traefik_dir = data_dir/traefik` — holds `rootfs/`, `traefik.yml`, `acme.json`,
   `dynamic/`, `.image-digest`.
-- Dynamic-config path resolution:
-  - **Managed mode:** default `traefik_dir/dynamic/denia.yml` (so the generated
-    static config's file provider watches `traefik_dir/dynamic`).
-  - **External mode:** unchanged default `/etc/traefik/dynamic/denia.yml`.
-  - `DENIA_TRAEFIK_DYNAMIC_CONFIG` overrides in both modes.
+- Dynamic-config path: always `traefik_dir/dynamic/denia.yml`, so the generated
+  static config's file provider watches `traefik_dir/dynamic`.
+  `DENIA_TRAEFIK_DYNAMIC_CONFIG` still overrides the path for advanced setups,
+  but Denia always supervises its own Traefik regardless.
 
-### Upgrade path (default-on caveat)
+### Upgrade path
 
-Managed mode is default-on, so an existing node upgrading to this version
-switches behavior on next boot: (a) the dynamic-config path moves from
-`/etc/traefik/dynamic/denia.yml` to `traefik_dir/dynamic/denia.yml`, and (b)
-Denia starts its own Traefik on `:80`/`:443`. If an operator-installed Traefik is
-already bound to those ports, the managed child will hit `EADDRINUSE`. The
-supervisor treats `EADDRINUSE` on the listen ports as a **fatal, non-retried**
-error with an explicit message ("port already in use; stop the external Traefik
-or set `DENIA_MANAGE_TRAEFIK=0`") rather than entering infinite backoff.
-Operators who intend to keep their own edge set `DENIA_MANAGE_TRAEFIK=0`, which
-restores the legacy path and disables supervision. This caveat is called out in
-the README upgrade notes.
+An existing node upgrading to this version switches behavior on next boot: the
+dynamic-config path moves from the old `/etc/traefik/dynamic/denia.yml` default to
+`traefik_dir/dynamic/denia.yml`, and Denia starts its own Traefik on
+`:80`/`:443`. **The operator must stop any pre-existing Traefik** — there is no
+opt-out. If a separate Traefik still holds those ports, the supervised child hits
+`EADDRINUSE`; the supervisor treats this as a **fatal, non-retried** error with an
+explicit message ("`:80`/`:443` already in use; stop the external Traefik —
+Denia now manages its own") rather than infinite backoff. Called out in README
+upgrade notes.
 
-New `ConfigError` variant: `AcmeEmailRequired` (managed + TLS-in-use + no email).
-Note: "TLS in use" is determined at startup from existing services
-(`tls_enabled`); if none yet, missing email is allowed until the first TLS
-service is created (validated again at that point) — OR, simpler v1: require
-`DENIA_ACME_EMAIL` whenever managed mode is on. **Decision: require it whenever
-managed mode is on** (predictable, avoids deferred failure). Document in README.
+New `ConfigError` variant: `AcmeEmailRequired` (TLS-in-use + no email). "TLS in
+use" is determined at startup from existing services (`tls_enabled`); the same
+check runs at service create/update so enabling TLS without `DENIA_ACME_EMAIL`
+fails at the API boundary. Nodes with no TLS service boot without an email.
+Document in README.
 
 ## Acquisition (`src/oci/`)
 
@@ -216,8 +216,8 @@ shutdown do. This is an accepted v1 limitation.
 Inject a spawn abstraction (trait or fn pointer) so restart/backoff logic is
 unit-testable without pulling a real image or binding ports.
 
-`src/main.rs` wiring: when `config.manage_traefik`, spawn the supervisor task
-alongside the scheduler; thread the existing shutdown signal to it.
+`src/main.rs` wiring: always spawn the supervisor task alongside the scheduler;
+thread the existing shutdown signal to it.
 
 ## Dynamic Config (mostly unchanged)
 
@@ -284,9 +284,9 @@ Traefik) at far lower architectural cost.
 - `render_static_config`: entrypoint ports reflect `http_port`/`https_port`; file
   provider directory = `traefik_dir/dynamic`, `watch: true`; ACME block carries
   `email`, `storage`, `httpChallenge.entryPoint: web`; resolver named `le`.
-- Config: managed mode without `DENIA_ACME_EMAIL` → `ConfigError::AcmeEmailRequired`.
-- Config: `DENIA_MANAGE_TRAEFIK=0` → no supervisor; dynamic path defaults to the
-  legacy `/etc/traefik/dynamic/denia.yml`.
+- Config: a TLS service without `DENIA_ACME_EMAIL` → `ConfigError::AcmeEmailRequired`
+  (at startup and at service create/update). No TLS service → boots without email.
+- Dynamic path always resolves to `traefik_dir/dynamic/denia.yml` (no opt-out).
 - Digest cache: matching `.image-digest` → no re-pull; mismatch → re-pull.
 - Supervisor restart: injected fake spawner that "exits" triggers backoff +
   restart; backoff schedule monotonic up to the cap and resets after stable
