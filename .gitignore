@@ -3,3 +3,18 @@
 .repos/effect
 codedb.snapshot
 .worktree/
+TODO.md
+
+# Secrets and local state — never commit
+*.sops.yaml
+*.sops.yml
+*.sops.json
+age.key
+*.age
+.env
+.env.*
+*.sqlite
+*.sqlite3
+*.db
+*.pem
+*.key
