@@ -55,7 +55,9 @@ Commits `514a0e9` (proxy) + `74edc16` (ACME/TLS). Additive: no Traefik/bridge or
 |---|-----|---------|--------|
 | B1 | BLOCKER | `/.well-known/acme-challenge/{token}` (and `denia-challenge`) mounted behind `rate_limit_login` (`LoginRateLimiter`, default 5 req/60s per IP). Let's Encrypt validates from multiple vantage points + retries → `429` silently breaks issuance/renewal once `:80` is public. Spec lists rate limiting as out of scope. | ✅ fix before Chunk C |
 | B2 | MAJOR | (= A3) Unauthenticated client on public `:80`/`:443` can trigger `ActivationHook` for any cold *routed* service; bounded by single-flight + `ACTIVATION_WAIT` (not unbounded), but can keep cold services hot. | ⏸️ Chunk C: add abuse limit OR accept explicitly in ADR-020 |
-| B3 | MINOR | `<tls_dir>`/`<domain>` dirs created with default umask (~0755); leaf files are 0600 so keys aren't exposed, but 0700 dirs = defense-in-depth. | ✅ fold into B1 fix |
+| B3 | MINOR | `<tls_dir>`/`<domain>` dirs created with default umask (~0755); leaf files are 0600 so keys aren't exposed, but 0700 dirs = defense-in-depth. | ✅ fixed (`211acfc`) |
+
+**Resolution (commit `211acfc`):** B1 ✅ — both `/.well-known/{acme,denia}-challenge/{token}` routes moved off the login rate limiter onto the unauthenticated branch (siblings of `/healthz`, before `/v1`); login/admin routes keep their limiters. Test `challenge_routes_are_not_login_rate_limited` fires 20 rapid requests, asserts no 429. B3 ✅ — `create_private_dir_all` (`DirBuilder.mode(0o700)`) for tls dirs. 342 tests pass. **B2/A3 (unauthenticated activation trigger) deferred to Chunk C decision → document in ADR-020 (bounded by single-flight + `ACTIVATION_WAIT`; rate-limiting is out of scope per spec).**
 
 **PASS (security-verified, not just self-reported):** atomic 0600 secret writes (temp@0600→rename, correct syscall order); `validate_domain` enforced on all three sinks (ACME identifier, cert dir name w/ `../` blocked, SNI key); fail-closed TLS decline on unknown/absent SNI; no secret bytes in `Debug`/`Serialize`/errors/logs; `sanitize_path` redacts UUID/token segments. A7 (no zeroization) deferral independently confirmed sound.
 
