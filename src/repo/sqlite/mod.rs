@@ -5,6 +5,7 @@
 //! blocks. Both code paths funnel through the same `*_q` free functions so
 //! SQL is never duplicated. `SqliteStore` will be deleted in Task 10.
 
+pub mod autoscale;
 pub mod credentials;
 pub mod deployments;
 pub mod domains;
