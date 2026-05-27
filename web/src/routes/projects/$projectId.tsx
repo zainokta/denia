@@ -65,6 +65,7 @@ export function ProjectDetail() {
   const queryClient = useQueryClient()
   const { isSuperAdmin, roleForActiveProject } = useAuth()
   const [deleteError, setDeleteError] = useState('')
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const [newUserId, setNewUserId] = useState<string>('')
   const [newRole, setNewRole] = useState<Role>('viewer')
 
@@ -207,9 +208,9 @@ export function ProjectDetail() {
       )}
 
       <section className="panel mb-8 overflow-hidden">
-        <p className="kicker border-b border-[var(--border)] px-4 py-2.5">
+        <h2 className="kicker border-b border-[var(--border)] px-4 py-2.5">
           shared environment
-        </p>
+        </h2>
         {project.shared_env.length === 0 ? (
           <p className="px-4 py-3 text-sm text-[var(--fg-muted)]">
             No shared environment variables set.
@@ -237,9 +238,9 @@ export function ProjectDetail() {
 
       {project.default_resource_limits && (
         <section className="panel mb-8 overflow-hidden">
-          <p className="kicker border-b border-[var(--border)] px-4 py-2.5">
+          <h2 className="kicker border-b border-[var(--border)] px-4 py-2.5">
             default resource limits
-          </p>
+          </h2>
           <dl className="m-0">
             <div className="flex items-baseline gap-4 px-4 py-3">
               <dt className="w-48 flex-shrink-0 text-sm font-semibold text-[var(--fg)]">
@@ -265,9 +266,9 @@ export function ProjectDetail() {
       )}
 
       <section className="panel mb-8 overflow-hidden">
-        <p className="kicker border-b border-[var(--border)] px-4 py-2.5">
+        <h2 className="kicker border-b border-[var(--border)] px-4 py-2.5">
           members
-        </p>
+        </h2>
         {members.length === 0 ? (
           <p className="px-4 py-3 text-sm text-[var(--fg-muted)]">
             No members yet.
@@ -277,7 +278,7 @@ export function ProjectDetail() {
             {members.map((m, i) => (
               <li
                 key={`${m.user_id}-${m.project_id}`}
-                className={`flex items-center gap-4 px-4 py-2.5 text-sm ${
+                className={`flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 text-sm ${
                   i > 0 ? 'border-t border-[var(--border)]' : ''
                 }`}
               >
@@ -309,17 +310,25 @@ export function ProjectDetail() {
               addMemberMutation.mutate({ userId, role: newRole })
             }}
           >
+            <label htmlFor="add-member-user" className="sr-only">
+              User id (uuid)
+            </label>
             <input
+              id="add-member-user"
               type="text"
               placeholder="user id (uuid)"
               value={newUserId}
               onChange={(e) => setNewUserId(e.target.value)}
-              className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono"
+              className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono"
             />
+            <label htmlFor="add-member-role" className="sr-only">
+              Member role
+            </label>
             <select
+              id="add-member-role"
               value={newRole}
               onChange={(e) => setNewRole(e.target.value as Role)}
-              className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm"
+              className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm"
             >
               <option value="viewer">viewer</option>
               <option value="operator">operator</option>
@@ -338,12 +347,12 @@ export function ProjectDetail() {
 
       {canManage ? (
         <section className="panel mb-8 overflow-hidden">
-          <p className="kicker border-b border-[var(--border)] px-4 py-2.5">
+          <h2 className="kicker border-b border-[var(--border)] px-4 py-2.5">
             registries
-          </p>
+          </h2>
 
           {regDeleteError ? (
-            <div className="px-4 py-2 text-xs text-[var(--violet)]">
+            <div role="alert" className="px-4 py-2 text-xs text-[var(--violet)]">
               <span className="signal signal-fault mr-2 inline-block align-middle" />
               {regDeleteError}
             </div>
@@ -358,7 +367,7 @@ export function ProjectDetail() {
               {registries.map((r, i) => (
                 <li
                   key={r.id}
-                  className={`flex items-center gap-4 px-4 py-2.5 text-sm ${
+                  className={`flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 text-sm ${
                     i > 0 ? 'border-t border-[var(--border)]' : ''
                   }`}
                 >
@@ -411,7 +420,7 @@ export function ProjectDetail() {
           )}
 
           {regCreateError ? (
-            <div className="border-t border-[var(--border)] px-4 py-2 text-xs text-[var(--violet)]">
+            <div role="alert" className="border-t border-[var(--border)] px-4 py-2 text-xs text-[var(--violet)]">
               {regCreateError}
             </div>
           ) : null}
@@ -434,24 +443,36 @@ export function ProjectDetail() {
               })
             }}
           >
+            <label htmlFor="reg-name" className="sr-only">
+              Registry name
+            </label>
             <input
+              id="reg-name"
               type="text"
               placeholder="name"
               value={regName}
               onChange={(e) => setRegName(e.target.value)}
-              className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]"
+              className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono text-[var(--fg)]"
             />
+            <label htmlFor="reg-endpoint" className="sr-only">
+              Registry endpoint
+            </label>
             <input
+              id="reg-endpoint"
               type="text"
               placeholder="endpoint"
               value={regEndpoint}
               onChange={(e) => setRegEndpoint(e.target.value)}
-              className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]"
+              className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono text-[var(--fg)]"
             />
+            <label htmlFor="reg-auth-kind" className="sr-only">
+              Auth kind
+            </label>
             <select
+              id="reg-auth-kind"
               value={regAuthKind}
               onChange={(e) => setRegAuthKind(e.target.value)}
-              className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm text-[var(--fg)]"
+              className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm text-[var(--fg)]"
             >
               <option value="Anonymous">Anonymous</option>
               <option value="Basic">Basic</option>
@@ -459,12 +480,16 @@ export function ProjectDetail() {
               <option value="EcrToken">ECR Token</option>
               <option value="GarToken">GAR Token</option>
             </select>
+            <label htmlFor="reg-cred-ref" className="sr-only">
+              Credential ref (optional)
+            </label>
             <input
+              id="reg-cred-ref"
               type="text"
               placeholder="credential ref (optional)"
               value={regCredRef}
               onChange={(e) => setRegCredRef(e.target.value)}
-              className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]"
+              className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono text-[var(--fg)]"
             />
             <button
               type="submit"
@@ -483,26 +508,49 @@ export function ProjectDetail() {
 
       <section className="mb-8">
         {deleteError && (
-          <div className="panel mb-4 p-4">
+          <div role="alert" className="panel mb-4 p-4">
             <p className="m-0 flex items-center gap-2 text-sm signal-fault">
               <span className="signal signal-fault" />
               {deleteError}
             </p>
           </div>
         )}
-        <button
-          type="button"
-          className="btn"
-          onClick={() => {
-            if (window.confirm(`Delete project "${project.name}"?`)) {
-              setDeleteError('')
-              del.mutate()
-            }
-          }}
-          disabled={del.isPending}
-        >
-          {del.isPending ? 'deleting...' : 'delete project'}
-        </button>
+        {confirmDelete ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm text-[var(--violet)]">
+              Delete project &quot;{project.name}&quot;? This cannot be undone.
+            </span>
+            <button
+              type="button"
+              className="btn text-xs"
+              onClick={() => {
+                setDeleteError('')
+                setConfirmDelete(false)
+                del.mutate()
+              }}
+              disabled={del.isPending}
+            >
+              {del.isPending ? 'deleting...' : 'confirm delete'}
+            </button>
+            <button
+              type="button"
+              className="btn text-xs"
+              onClick={() => setConfirmDelete(false)}
+              disabled={del.isPending}
+            >
+              cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setConfirmDelete(true)}
+            disabled={del.isPending}
+          >
+            delete project
+          </button>
+        )}
       </section>
     </main>
   )
