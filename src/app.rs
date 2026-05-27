@@ -50,6 +50,10 @@ pub struct AppState {
     pub access_log: AccessLogStore,
     pub domain_verifier: Arc<dyn crate::verification::DomainVerifier>,
     pub verifying_domains: Arc<Mutex<std::collections::HashSet<uuid::Uuid>>>,
+    /// Shared ACME HTTP-01 challenge map (token -> key authorization), served by
+    /// the `/.well-known/acme-challenge/{token}` handler. Cloned from the
+    /// in-process ACME driver in `main` (Chunk C); defaults to an empty store.
+    pub acme_challenges: crate::ingress::pingora::acme::ChallengeStore,
     pub(crate) autoscaler:
         Option<Arc<tokio::sync::Mutex<crate::autoscale::controller::Controller>>>,
     pub(crate) bridge_supervisor: Option<Arc<LoopbackBridgeSupervisor>>,
@@ -211,6 +215,7 @@ impl AppState {
             access_log,
             domain_verifier: Arc::new(crate::verification::HttpDomainVerifier::new()),
             verifying_domains: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            acme_challenges: crate::ingress::pingora::acme::ChallengeStore::new(),
             autoscaler: None,
             bridge_supervisor: None,
         }
@@ -307,6 +312,7 @@ impl AppStateBuilder {
                 .domain_verifier
                 .unwrap_or_else(|| Arc::new(crate::verification::HttpDomainVerifier::new())),
             verifying_domains: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            acme_challenges: crate::ingress::pingora::acme::ChallengeStore::new(),
             autoscaler: None,
             bridge_supervisor: None,
         }
@@ -355,6 +361,13 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/.well-known/denia-challenge/{token}",
             get(api::domains::challenge_handler).route_layer(middleware::from_fn_with_state(
+                challenge_rate_limiter.clone(),
+                rate_limit_login,
+            )),
+        )
+        .route(
+            "/.well-known/acme-challenge/{token}",
+            get(api::domains::acme_challenge_handler).route_layer(middleware::from_fn_with_state(
                 challenge_rate_limiter,
                 rate_limit_login,
             )),

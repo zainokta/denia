@@ -8,13 +8,20 @@
 //! It is being introduced additively alongside the existing Traefik/bridge code;
 //! the old modules are removed in a later cutover chunk.
 
+pub mod acme;
 pub mod proxy;
 pub mod server;
 pub mod state;
+pub mod tls;
 
+pub use acme::{
+    AcmeDriver, AcmeError, ChallengeStore, IssuedCert, load_certs_from_disk, persist_cert,
+    select_renewals,
+};
 pub use proxy::{DeniaProxy, Port80Decision, RequestCtx, UpstreamChoice, classify_port80};
 pub use server::{IngressServerConfig, build_server};
 pub use state::{
     ActivationError, ActivationHook, CertStore, IngressError, IngressState, ParsedCert,
     ReplicaEndpoint, RouteSpec, RouteTable,
 };
+pub use tls::{DeniaCertResolver, resolve_sni_cert};

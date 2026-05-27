@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 arc-swap = "1"
+# Pinned to match the boringssl backend re-exported by pingora-boringssl 0.8 so
+# `X509`/`Asn1Time` are the same types; used for cert `notAfter` renewal checks.
+boring = "=4.22.0"
 argon2 = "0.5.3"
 async-trait = "0.1"
 axum = "0.8"
@@ -13,12 +16,14 @@ chrono = { version = "0.4", features = ["serde"] }
 cron = "0.16.0"
 flate2 = "1.1.9"
 hex = "0.4.3"
+instant-acme = { version = "0.8", features = ["rcgen"] }
 libc = "0.2"
 oci-client = "0.17.0"
 pingora = { version = "0.8", default-features = false, features = ["boringssl"] }
 pingora-proxy = { version = "0.8", default-features = false, features = ["boringssl"] }
 rand = "0.10.1"
 rusqlite = { version = "0.39", features = ["bundled"] }
+rustls-pki-types = "1"
 rust-embed = { version = "8", features = ["mime-guess"] }
 rustix = { version = "1.1.4", features = ["event", "fs", "mount", "net", "pipe", "process", "thread"] }
 serde = { version = "1", features = ["derive"] }

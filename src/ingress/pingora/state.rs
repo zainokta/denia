@@ -227,6 +227,11 @@ impl CertStore {
     pub fn is_empty(&self) -> bool {
         self.by_sni.is_empty()
     }
+
+    /// The SNI names currently held (for renewal scanning / diagnostics).
+    pub fn sni_names(&self) -> Vec<String> {
+        self.by_sni.keys().cloned().collect()
+    }
 }
 
 /// Maximum time a request waits for a cold-start activation to produce a

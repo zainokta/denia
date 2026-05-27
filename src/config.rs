@@ -65,7 +65,16 @@ pub struct AppConfig {
     pub autoscale_interval_s: u64,
     pub autoscale_headroom_cpu_millis: u32,
     pub autoscale_headroom_mem_bytes: u64,
+    /// ACME directory URL (Let's Encrypt production by default; staging/pebble
+    /// via `DENIA_ACME_DIRECTORY_URL` for tests).
+    pub acme_directory_url: String,
+    /// Directory holding the ACME account key and per-domain cert material
+    /// (`<tls_dir>/account.key`, `<tls_dir>/<domain>/{fullchain,key}.pem`).
+    pub tls_dir: PathBuf,
 }
+
+/// Default ACME directory: Let's Encrypt production.
+pub const DEFAULT_ACME_DIRECTORY_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -158,6 +167,13 @@ impl AppConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(536870912);
+        let acme_directory_url = env::var("DENIA_ACME_DIRECTORY_URL")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| DEFAULT_ACME_DIRECTORY_URL.to_string());
+        let tls_dir = env::var("DENIA_TLS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| data_dir.join("tls"));
 
         let mut admin_token_hmac_key = [0u8; 32];
         rand::rng().fill(&mut admin_token_hmac_key);
@@ -193,6 +209,8 @@ impl AppConfig {
             autoscale_interval_s,
             autoscale_headroom_cpu_millis,
             autoscale_headroom_mem_bytes,
+            acme_directory_url,
+            tls_dir,
         })
     }
 
@@ -224,7 +242,7 @@ impl AppConfig {
             acme_resolver: "le".to_string(),
             control_domain: None,
             control_tls: false,
-            node_disk_path: data_dir,
+            node_disk_path: data_dir.clone(),
             traefik_image: "docker.io/library/traefik:v3.3".to_string(),
             acme_email: None,
             http_port: 80,
@@ -232,6 +250,8 @@ impl AppConfig {
             autoscale_interval_s: 15,
             autoscale_headroom_cpu_millis: 1000,
             autoscale_headroom_mem_bytes: 536870912,
+            acme_directory_url: DEFAULT_ACME_DIRECTORY_URL.to_string(),
+            tls_dir: data_dir.join("tls"),
         }
     }
 
@@ -299,6 +319,19 @@ mod managed_traefik_tests {
         let mut c = base();
         c.acme_email = Some("ops@example.com".into());
         assert!(c.require_acme_email(true).is_ok());
+    }
+
+    #[test]
+    fn tls_dir_defaults_under_data_dir() {
+        let c = base();
+        assert_eq!(c.tls_dir, c.data_dir.join("tls"));
+    }
+
+    #[test]
+    fn acme_directory_defaults_to_lets_encrypt_prod() {
+        let c = base();
+        assert_eq!(c.acme_directory_url, DEFAULT_ACME_DIRECTORY_URL);
+        assert!(c.acme_directory_url.starts_with("https://"));
     }
 }
 

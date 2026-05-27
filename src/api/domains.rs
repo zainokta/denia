@@ -41,6 +41,25 @@ pub async fn challenge_handler(
     }
 }
 
+/// ACME HTTP-01 challenge responder.
+///
+/// Serves the key authorization registered by the in-process ACME driver for
+/// `token` (via the shared [`ChallengeStore`]). Pingora's `:80` listener proxies
+/// `/.well-known/acme-challenge/{token}` here. Unknown tokens return 404.
+///
+/// [`ChallengeStore`]: crate::ingress::pingora::acme::ChallengeStore
+pub async fn acme_challenge_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> Result<axum::response::Response, ApiError> {
+    match state.acme_challenges.get(&token) {
+        Some(key_authorization) => {
+            Ok(([(header::CONTENT_TYPE, "text/plain")], key_authorization).into_response())
+        }
+        None => Err(ApiError::NotFound("not found".into())),
+    }
+}
+
 #[derive(Deserialize)]
 struct CreateDomainBody {
     hostname: String,
@@ -222,5 +241,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn acme_challenge_unknown_token_returns_404() {
+        let resp = build_router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/acme-challenge/does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn acme_challenge_returns_registered_key_authorization() {
+        let state = test_state();
+        // Register a challenge response in the shared store; the router clones
+        // the same `Arc`, so the handler sees it.
+        state
+            .acme_challenges
+            .register("tok-abc", "tok-abc.keyauth-value");
+        let resp = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/acme-challenge/tok-abc")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"tok-abc.keyauth-value");
     }
 }
