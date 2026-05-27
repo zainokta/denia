@@ -61,6 +61,9 @@ pub struct AppConfig {
     pub http_port: u16,
     pub https_port: u16,
     pub traefik_dir: PathBuf,
+    pub autoscale_interval_s: u64,
+    pub autoscale_headroom_cpu_millis: u32,
+    pub autoscale_headroom_mem_bytes: u64,
 }
 
 #[derive(Debug, Error)]
@@ -140,6 +143,18 @@ impl AppConfig {
         let node_disk_path = env::var("DENIA_NODE_DISK_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| data_dir.clone());
+        let autoscale_interval_s = env::var("DENIA_AUTOSCALE_INTERVAL_S")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15);
+        let autoscale_headroom_cpu_millis = env::var("DENIA_AUTOSCALE_HEADROOM_CPU_MILLIS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
+        let autoscale_headroom_mem_bytes = env::var("DENIA_AUTOSCALE_HEADROOM_MEM_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(536870912);
 
         let mut admin_token_hmac_key = [0u8; 32];
         rand::rng().fill(&mut admin_token_hmac_key);
@@ -171,6 +186,9 @@ impl AppConfig {
             http_port,
             https_port,
             traefik_dir,
+            autoscale_interval_s,
+            autoscale_headroom_cpu_millis,
+            autoscale_headroom_mem_bytes,
         })
     }
 
@@ -206,6 +224,9 @@ impl AppConfig {
             acme_email: None,
             http_port: 80,
             https_port: 443,
+            autoscale_interval_s: 15,
+            autoscale_headroom_cpu_millis: 1000,
+            autoscale_headroom_mem_bytes: 536870912,
         }
     }
 

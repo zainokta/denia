@@ -50,12 +50,27 @@ pub struct AppState {
     pub access_log: AccessLogStore,
     pub domain_verifier: Arc<dyn crate::verification::DomainVerifier>,
     pub verifying_domains: Arc<Mutex<std::collections::HashSet<uuid::Uuid>>>,
+    pub(crate) autoscaler:
+        Option<Arc<tokio::sync::Mutex<crate::autoscale::controller::Controller>>>,
+    pub(crate) bridge_supervisor: Option<Arc<LoopbackBridgeSupervisor>>,
 }
 
 impl AppState {
     pub fn new(config: AppConfig, store: &SqliteStore) -> Self {
+        use crate::autoscale::catalog::RepoServiceCatalog;
+        use crate::autoscale::controller::{CgroupUsageSource, Controller};
+        use crate::autoscale::ledger::{Headroom, HostCapacity, ResourceLedger};
+        use crate::autoscale::registry::ReplicaRegistry;
+        use crate::observability::metrics::CgroupMetricsReader;
+
         let bridge_start_port = config.bridge_start_port;
-        let runtime = Arc::new(
+        let cgroup_root = config.cgroup_root.clone();
+        let headroom = Headroom {
+            cpu_millis: config.autoscale_headroom_cpu_millis,
+            mem_bytes: config.autoscale_headroom_mem_bytes,
+        };
+
+        let runtime: Arc<dyn Runtime> = Arc::new(
             LinuxRuntime::new_with_paths(
                 config.runtime_dir.clone(),
                 config.artifact_dir.clone(),
@@ -66,17 +81,60 @@ impl AppState {
             .with_log_dir(config.log_dir.clone()),
         );
         let access_log = AccessLogStore::new();
-        let supervisor = LoopbackBridgeSupervisor::with_access_log(access_log.clone());
-        Self::new_with_deploy_dependencies_and_log(
+        let supervisor = Arc::new(LoopbackBridgeSupervisor::with_access_log(
+            access_log.clone(),
+        ));
+        let health: Arc<dyn HealthChecker> = Arc::new(FakeHealthChecker::healthy());
+
+        let mut state = Self::new_with_deploy_dependencies_and_log(
             config,
             store,
-            runtime,
-            FakeHealthChecker::healthy(),
+            runtime.clone(),
+            health.clone(),
             TokioCommandRunner,
             BridgeAllocator::new(bridge_start_port),
-            supervisor,
+            supervisor.clone(),
             access_log,
-        )
+        );
+
+        let ledger = ResourceLedger::new(HostCapacity::detect(), headroom);
+        let usage = Box::new(CgroupUsageSource::new(CgroupMetricsReader::new(
+            cgroup_root,
+        )));
+        let catalog = Arc::new(RepoServiceCatalog::new(
+            state.services.clone(),
+            state.projects.clone(),
+            state.deployments.clone(),
+        ));
+        let controller = Controller::new(
+            ReplicaRegistry::default(),
+            ledger,
+            runtime,
+            supervisor.clone(),
+            health,
+            store.clone(),
+            usage,
+            catalog,
+            std::time::Duration::from_secs(30),
+        );
+        state.autoscaler = Some(Arc::new(tokio::sync::Mutex::new(controller)));
+        state.bridge_supervisor = Some(supervisor);
+        state
+    }
+
+    /// Handle for `main` to wire the bridge activator and spawn the periodic
+    /// control loop: returns `(supervisor, controller)` when the autoscaler was
+    /// constructed (only via [`AppState::new`]).
+    pub fn autoscaler_handle(
+        &self,
+    ) -> Option<(
+        Arc<LoopbackBridgeSupervisor>,
+        Arc<tokio::sync::Mutex<crate::autoscale::controller::Controller>>,
+    )> {
+        match (&self.bridge_supervisor, &self.autoscaler) {
+            (Some(s), Some(c)) => Some((s.clone(), c.clone())),
+            _ => None,
+        }
     }
 
     pub fn new_with_deploy_dependencies<R, H, C, B, M>(
@@ -153,6 +211,8 @@ impl AppState {
             access_log,
             domain_verifier: Arc::new(crate::verification::HttpDomainVerifier::new()),
             verifying_domains: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            autoscaler: None,
+            bridge_supervisor: None,
         }
     }
 
@@ -247,6 +307,8 @@ impl AppStateBuilder {
                 .domain_verifier
                 .unwrap_or_else(|| Arc::new(crate::verification::HttpDomainVerifier::new())),
             verifying_domains: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            autoscaler: None,
+            bridge_supervisor: None,
         }
     }
 }
