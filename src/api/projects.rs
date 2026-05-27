@@ -1,9 +1,23 @@
 use axum::{Json, Router, extract::State, routing::get};
 
+use serde::Deserialize;
+
 use crate::api::ApiError;
 use crate::app::AppState;
 use crate::auth::{Principal, ensure_role, ensure_super_admin};
+use crate::domain::service::ResourceLimits;
 use crate::domain::{Project, Role};
+
+#[derive(Debug, Deserialize)]
+struct CreateProjectRequest {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    shared_env: Vec<(String, String)>,
+    #[serde(default)]
+    default_resource_limits: Option<ResourceLimits>,
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -51,9 +65,13 @@ async fn get_project(
 async fn create_project(
     State(state): State<AppState>,
     principal: Principal,
-    Json(project): Json<Project>,
+    Json(req): Json<CreateProjectRequest>,
 ) -> Result<Json<Project>, ApiError> {
     ensure_super_admin(&principal)?;
+    let mut project = Project::new(req.name, req.description)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    project.shared_env = req.shared_env;
+    project.default_resource_limits = req.default_resource_limits;
     Ok(Json(state.projects.put_project(project)?))
 }
 
@@ -85,8 +103,7 @@ mod tests {
     #[tokio::test]
     async fn create_then_get_project_roundtrips() {
         let state = test_state();
-        let project = Project::new("team-a", None).unwrap();
-        let body = serde_json::to_vec(&project).unwrap();
+        let body = serde_json::json!({ "name": "team-a" }).to_string();
         let app = build_router(state);
 
         let create = app
@@ -104,10 +121,15 @@ mod tests {
             .unwrap();
         assert_eq!(create.status(), StatusCode::OK);
 
+        let created_bytes = axum::body::to_bytes(create.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: Project = serde_json::from_slice(&created_bytes).unwrap();
+
         let get = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/v1/projects/{}", project.id))
+                    .uri(format!("/v1/projects/{}", created.id))
                     .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
                     .body(Body::empty())
                     .unwrap(),

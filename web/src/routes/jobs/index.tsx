@@ -5,6 +5,7 @@ import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
 import { useAuth, can } from '#/hooks/useAuth'
+import { useActiveProject } from '#/hooks/useActiveProject'
 
 const listJobs = (projectId: string) =>
   Effect.gen(function* () {
@@ -60,8 +61,7 @@ export const Route = createFileRoute('/jobs/')({
 export function JobsIndex() {
   const queryClient = useQueryClient()
   const auth = useAuth()
-  const search = Route.useSearch() as { project?: string }
-  const projectId = search.project ?? ''
+  const [projectId] = useActiveProject()
 
   const [name, setName] = useState('')
   const [image, setImage] = useState('')

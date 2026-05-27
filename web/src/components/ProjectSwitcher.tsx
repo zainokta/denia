@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
-import { useNavigate, useSearch } from '@tanstack/react-router'
 import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
+import { useActiveProject } from '#/hooks/useActiveProject'
 
 const listProjects = Effect.gen(function* () {
   const api = yield* ApiClient
@@ -10,32 +10,25 @@ const listProjects = Effect.gen(function* () {
 })
 
 export function ProjectSwitcher() {
-  const navigate = useNavigate()
-  const search = useSearch({ strict: false }) as Record<string, string>
-  const activeProject = (search.project as string) ?? ''
+  const [activeProject, setActiveProject] = useActiveProject()
 
   const { data: projects = [] } = useQuery({
     queryKey: ['projects'],
     queryFn: () => runQuery(listProjects),
   })
 
-  const handleChange = (projectId: string) => {
-    navigate({
-      to: '.',
-      search: (prev: Record<string, string>) => ({
-        ...prev,
-        project: projectId || undefined,
-      }),
-    } as never)
-  }
-
   if (projects.length === 0) return null
+
+  const selected = projects.some((p) => p.id === activeProject)
+    ? activeProject
+    : ''
 
   return (
     <select
-      value={activeProject}
-      onChange={(e) => handleChange(e.target.value)}
-      className="btn text-xs py-2 px-3 min-w-0"
+      value={selected}
+      onChange={(e) => setActiveProject(e.target.value)}
+      aria-label="Filter dashboard by project"
+      className="btn text-xs py-2 px-3 min-w-0 max-w-[40vw] truncate sm:max-w-[14rem]"
     >
       <option value="">all projects</option>
       {projects.map((p) => (

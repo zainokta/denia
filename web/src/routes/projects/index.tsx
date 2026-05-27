@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
+import { useActiveProject } from '#/hooks/useActiveProject'
 
 const listProjects = Effect.gen(function* () {
   const api = yield* ApiClient
@@ -33,6 +34,7 @@ export function ProjectsIndex() {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [createError, setCreateError] = useState('')
+  const [, setActiveProject] = useActiveProject()
 
   const { data: projects = [], isFetching } = useQuery({
     queryKey: ['projects'],
@@ -77,25 +79,34 @@ export function ProjectsIndex() {
       </h1>
 
       <form onSubmit={handleCreate} className="panel mb-8 p-4 space-y-3">
-        <p className="kicker m-0">new project</p>
+        <h2 className="kicker m-0">new project</h2>
         <div className="flex flex-wrap gap-3 items-end">
           <div className="flex-1 min-w-0">
+            <label htmlFor="new-project-name" className="sr-only">
+              Project name
+            </label>
             <input
+              id="new-project-name"
               placeholder="Project name"
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
+              aria-describedby={createError ? 'new-project-error' : undefined}
+              className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:border-[var(--pink)]"
               required
             />
           </div>
           <div className="flex-1 min-w-0">
+            <label htmlFor="new-project-description" className="sr-only">
+              Description (optional)
+            </label>
             <input
+              id="new-project-description"
               placeholder="Description (optional)"
               type="text"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
+              className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:border-[var(--pink)]"
             />
           </div>
           <button
@@ -107,7 +118,9 @@ export function ProjectsIndex() {
           </button>
         </div>
         {createError && (
-          <p className="text-sm signal-fault">{createError}</p>
+          <p id="new-project-error" role="alert" className="text-sm signal-fault">
+            {createError}
+          </p>
         )}
       </form>
 
@@ -136,6 +149,7 @@ export function ProjectsIndex() {
                 <Link
                   to="/projects/$projectId"
                   params={{ projectId: p.id }}
+                  onClick={() => setActiveProject(p.id)}
                   className="min-w-0 flex-1 text-[var(--fg)] no-underline hover:underline"
                 >
                   <span className="font-semibold">{p.name}</span>
