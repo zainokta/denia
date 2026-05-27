@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod controller;
 pub mod ledger;
 pub mod lifecycle;

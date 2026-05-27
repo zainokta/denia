@@ -84,6 +84,9 @@ pub struct ManagedService {
 /// artifact, limits, env, ports, and policy — this lookup supplies them.
 pub trait ServiceCatalog: Send + Sync {
     fn resolve(&self, service_name: &str) -> Option<ManagedService>;
+    /// All currently managed (autoscaled, promoted, artifact-linked) services.
+    /// Drives the periodic tick loop and boot reconcile.
+    fn all(&self) -> Vec<ManagedService>;
 }
 
 /// Abstracts metric sampling so the controller is testable without real cgroups.
@@ -774,6 +777,10 @@ mod tests {
     impl ServiceCatalog for FakeCatalog {
         fn resolve(&self, service_name: &str) -> Option<ManagedService> {
             self.services.get(service_name).cloned()
+        }
+
+        fn all(&self) -> Vec<ManagedService> {
+            self.services.values().cloned().collect()
         }
     }
 
