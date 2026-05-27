@@ -20,6 +20,10 @@ use crate::domain::{Role, ServiceConfig};
 use crate::logs::{LogStore, LogTailer};
 use crate::metrics::CgroupMetricsReader;
 
+/// Process-wide cap on concurrent SSE log streams (F-8 DoS mitigation).
+static LOG_STREAM_LIMIT: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(64)));
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/services", get(list_services).post(put_service))
@@ -54,11 +58,20 @@ async fn list_services(
         .user_id
         .ok_or_else(|| ApiError::Forbidden("authenticated user required".to_string()))?;
     let memberships = state.users.list_memberships_for_user(user_id)?;
-    let allowed: std::collections::HashSet<uuid::Uuid> =
-        memberships.into_iter().map(|m| m.project_id).collect();
+    let roles: std::collections::HashMap<uuid::Uuid, Role> = memberships
+        .into_iter()
+        .map(|m| (m.project_id, m.role))
+        .collect();
     Ok(Json(
         all.into_iter()
-            .filter(|s| allowed.contains(&s.project_id))
+            .filter_map(|mut s| {
+                let role = roles.get(&s.project_id)?;
+                // Viewers (below Operator) must not see raw env values (F-7).
+                if *role < Role::Operator {
+                    s.redact_env();
+                }
+                Some(s)
+            })
             .collect(),
     ))
 }
@@ -69,17 +82,21 @@ async fn put_service(
     Json(mut service): Json<ServiceConfig>,
 ) -> Result<Json<ServiceConfig>, ApiError> {
     ensure_role(&state, &principal, service.project_id, Role::Operator)?;
-    if let crate::domain::ServiceSource::ExternalImage(src) = &service.source {
-        src.validate()
-            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-        if let Some(registry_id) = src.registry_id {
-            let registry = state
-                .registries
-                .registry(registry_id)?
-                .ok_or_else(|| ApiError::NotFound("registry not found".into()))?;
-            if registry.project_id != service.project_id {
-                return Err(ApiError::NotFound("registry not found".into()));
-            }
+    // The body is deserialized straight into ServiceConfig, bypassing the
+    // `ServiceConfig::new` constructor, so re-validate every invariant here:
+    // safe service name (F-6), git build-path confinement (F-1), domains, port.
+    service
+        .validate()
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if let crate::domain::ServiceSource::ExternalImage(src) = &service.source
+        && let Some(registry_id) = src.registry_id
+    {
+        let registry = state
+            .registries
+            .registry(registry_id)?
+            .ok_or_else(|| ApiError::NotFound("registry not found".into()))?;
+        if registry.project_id != service.project_id {
+            return Err(ApiError::NotFound("registry not found".into()));
         }
     }
     // Validate ACME email before persisting a service that enables TLS.
@@ -115,10 +132,14 @@ async fn get_service(
     principal: Principal,
     axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<ServiceConfig>, ApiError> {
-    let Some(service) = state.services.get_service(service_id)? else {
+    let Some(mut service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
     ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
+    // Only Operators+ (and super admins) see raw env values (F-7).
+    if ensure_role(&state, &principal, service.project_id, Role::Operator).is_err() {
+        service.redact_env();
+    }
     Ok(Json(service))
 }
 
@@ -178,7 +199,8 @@ async fn service_logs(
     };
     ensure_role(&state, &principal, service.project_id, Role::Operator)?;
     let logs = LogStore::new(&state.config.log_dir);
-    match logs.read_recent(&service.name, 200) {
+    // Logs are stored by service_id (globally unique), not name (F-3).
+    match logs.read_recent(&service.id.to_string(), 200) {
         Ok(lines) => Ok(Json(lines)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Json(Vec::new())),
         Err(error) => Err(ApiError::Log(error)),
@@ -195,12 +217,21 @@ async fn service_logs_stream(
     };
     ensure_role(&state, &principal, service.project_id, Role::Operator)?;
 
-    let log_path =
-        std::path::Path::new(&state.config.log_dir).join(format!("{}.log", service.name));
+    // Bound the number of concurrent SSE log streams process-wide. Each stream
+    // holds a long-lived task polling a file; without a cap a client could open
+    // unbounded streams and exhaust tasks/file descriptors (F-8). The permit is
+    // moved into the streaming task and released when the client disconnects.
+    let permit = LOG_STREAM_LIMIT
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::TooManyRequests("too many concurrent log streams".to_string()))?;
+
+    let log_path = std::path::Path::new(&state.config.log_dir).join(format!("{}.log", service.id));
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(256);
 
     tokio::spawn(async move {
+        let _permit = permit;
         let mut tailer = LogTailer::new(&log_path);
 
         if let Ok(lines) = tokio::task::block_in_place(|| tailer.backlog(200)) {
@@ -347,9 +378,9 @@ mod tests {
         let service_id = svc.id;
         state.services.put_service(svc).unwrap();
 
-        // Seed a backlog line in the service log file.
+        // Seed a backlog line in the service log file (named by service_id).
         std::fs::create_dir_all(&log_dir).unwrap();
-        let log_path = log_dir.join("streamsvc.log");
+        let log_path = log_dir.join(format!("{service_id}.log"));
         std::fs::write(&log_path, "backlog-line\n").unwrap();
 
         let resp = build_router(state)

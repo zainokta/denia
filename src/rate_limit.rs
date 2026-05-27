@@ -79,10 +79,26 @@ impl Default for AdminRateLimiter {
 }
 
 fn extract_client_ip(request: &Request) -> String {
-    request
+    let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.0.ip().to_string())
+        .map(|ci| ci.0.ip());
+
+    // Only trust X-Forwarded-For when the TCP peer is loopback (our own Traefik
+    // reverse proxy). A directly-connected client could otherwise spoof the
+    // header and evade or poison the rate-limit buckets.
+    if peer.map(|ip| ip.is_loopback()).unwrap_or(false)
+        && let Some(forwarded) = request
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+        && let Some(client) = forwarded.split(',').next().map(str::trim)
+        && !client.is_empty()
+    {
+        return client.to_string();
+    }
+
+    peer.map(|ip| ip.to_string())
         .unwrap_or_else(|| "anonymous".to_string())
 }
 

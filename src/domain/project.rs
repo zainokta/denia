@@ -19,6 +19,14 @@ pub struct Project {
 }
 
 impl Project {
+    /// Replace every shared-env value with a redaction marker (keeps keys).
+    /// Used before returning projects to members below Operator role (F-7).
+    pub fn redact_shared_env(&mut self) {
+        for (_key, value) in self.shared_env.iter_mut() {
+            *value = crate::domain::service::REDACTED_ENV_VALUE.to_string();
+        }
+    }
+
     pub fn new(name: impl Into<String>, description: Option<String>) -> Result<Self, DomainError> {
         let name = name.into();
         if name.trim().is_empty() {

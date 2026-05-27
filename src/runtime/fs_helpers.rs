@@ -197,15 +197,21 @@ pub(crate) async fn wait_for_service_socket(
     }
 }
 
+/// Grace period a workload gets to exit after SIGTERM before it is force-killed.
+pub(crate) const TERMINATION_GRACE: Duration = Duration::from_secs(10);
+const TERMINATION_POLL: Duration = Duration::from_millis(100);
+
 pub(crate) async fn terminate_tracked_child(
     tracked: &mut TrackedChild,
 ) -> Result<(), RuntimeError> {
+    // Graceful shutdown first (SIGTERM + grace, then SIGKILL on the main pid).
+    terminate_tracked_process(&mut tracked.process).await?;
+    // Backstop: kill any stragglers left in the cgroup.
     match std::fs::write(tracked.plan.cgroup_path.join("cgroup.kill"), "1\n") {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(RuntimeError::Io(error)),
     }
-    terminate_tracked_process(&mut tracked.process).await?;
     Ok(())
 }
 
@@ -219,6 +225,20 @@ pub(crate) async fn terminate_tracked_process(
             }
             let raw_pid = *pid;
             if signal::try_wait(raw_pid)? == ProcessStatus::Running {
+                // Ask the workload to shut down cleanly first.
+                let _ = signal::kill(raw_pid, rustix::process::Signal::TERM);
+                let deadline = Instant::now() + TERMINATION_GRACE;
+                loop {
+                    if signal::try_wait(raw_pid)? != ProcessStatus::Running {
+                        *pid = 0;
+                        return Ok(());
+                    }
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    sleep(TERMINATION_POLL).await;
+                }
+                // Grace expired; force kill and reap.
                 signal::kill(raw_pid, rustix::process::Signal::KILL)?;
                 let _ = tokio::task::spawn_blocking(move || signal::wait(raw_pid)).await??;
             }

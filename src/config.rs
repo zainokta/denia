@@ -42,6 +42,7 @@ pub struct AppConfig {
     pub database_path: PathBuf,
     pub data_dir: PathBuf,
     pub buildkit_binary: PathBuf,
+    pub git_binary: PathBuf,
     pub sops_binary: PathBuf,
     pub socket_proxy_binary: PathBuf,
     pub runtime_dir: PathBuf,
@@ -97,6 +98,8 @@ impl AppConfig {
         let buildkit_binary = PathBuf::from(
             env::var("DENIA_BUILDKIT_BINARY").unwrap_or_else(|_| "buildctl".to_string()),
         );
+        let git_binary =
+            PathBuf::from(env::var("DENIA_GIT_BINARY").unwrap_or_else(|_| "git".to_string()));
         let sops_binary =
             PathBuf::from(env::var("DENIA_SOPS_BINARY").unwrap_or_else(|_| "sops".to_string()));
         let socket_proxy_binary = env::var("DENIA_SOCKET_PROXY_BINARY")
@@ -167,6 +170,7 @@ impl AppConfig {
             database_path,
             data_dir,
             buildkit_binary,
+            git_binary,
             sops_binary,
             socket_proxy_binary,
             runtime_dir,
@@ -205,6 +209,7 @@ impl AppConfig {
             database_path: PathBuf::from(":memory:"),
             data_dir: data_dir.clone(),
             buildkit_binary: PathBuf::from("buildctl"),
+            git_binary: PathBuf::from("git"),
             sops_binary: PathBuf::from("sops"),
             socket_proxy_binary: PathBuf::from("denia"),
             runtime_dir: data_dir.join("runtime"),

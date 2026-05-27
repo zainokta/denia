@@ -371,5 +371,22 @@ pub fn run_migrations(pool: &SqlitePool) -> Result<(), RepoError> {
         connection.execute("INSERT INTO schema_version (version) VALUES (9)", [])?;
     }
 
+    if current < 10 {
+        // Track session creation time to enforce an absolute lifetime cap
+        // (the sliding `expires_at` window alone never expires an active session).
+        connection.execute_batch(
+            r#"
+            ALTER TABLE sessions ADD COLUMN created_at TEXT;
+            "#,
+        )?;
+        let now = Utc::now().to_rfc3339();
+        connection.execute(
+            "UPDATE sessions SET created_at = ?1 WHERE created_at IS NULL",
+            params![now],
+        )?;
+        connection.execute("DELETE FROM schema_version", [])?;
+        connection.execute("INSERT INTO schema_version (version) VALUES (10)", [])?;
+    }
+
     Ok(())
 }

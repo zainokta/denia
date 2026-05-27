@@ -96,10 +96,19 @@ impl SopsSecretStore {
         }
     }
 
-    pub fn secret_path(&self, secret_ref: &SecretRef) -> std::path::PathBuf {
-        let secrets_dir = self.data_dir.join("secrets");
-        let candidate = secrets_dir.join(format!("{}.sops.yaml", secret_ref.file_stem()));
-        candidate
+    /// Resolve the on-disk SOPS file for a secret reference *within a project's
+    /// namespace*. Secrets live under `secrets/<project_id>/<ref>.sops.yaml`, so
+    /// a deployment can only ever decrypt secrets belonging to its own project —
+    /// references are authorized by construction, not by global name (F-2).
+    pub fn secret_path(
+        &self,
+        project_id: uuid::Uuid,
+        secret_ref: &SecretRef,
+    ) -> std::path::PathBuf {
+        self.data_dir
+            .join("secrets")
+            .join(project_id.to_string())
+            .join(format!("{}.sops.yaml", secret_ref.file_stem()))
     }
 
     fn validate_secret_path(&self, path: &std::path::Path) -> Result<(), SecretError> {
@@ -119,9 +128,10 @@ impl SopsSecretStore {
         &self,
         runner: &dyn CommandRunner,
         sops_binary: &std::path::Path,
+        project_id: uuid::Uuid,
         secret_ref: &SecretRef,
     ) -> Result<SecretPayload, SecretError> {
-        let secret_path = self.secret_path(secret_ref);
+        let secret_path = self.secret_path(project_id, secret_ref);
         self.validate_secret_path(&secret_path)?;
         let secret_path = secret_path.to_string_lossy();
         let sops_binary = sops_binary.to_string_lossy();

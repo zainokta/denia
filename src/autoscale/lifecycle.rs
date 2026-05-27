@@ -83,29 +83,34 @@ pub async fn launch_replica(
         status.socket_path.clone(),
     );
 
+    // Bridge/route/runtime state is keyed by service_id (globally unique), not
+    // service.name (project-scoped), to prevent cross-project collisions (F-3).
+    let service_key = spec.service_id.to_string();
+
     // 4. Register the endpoint (unhealthy) in the bridge pool.
     bridge
-        .add_replica(&spec.service_name, replica_id, status.socket_path.clone())
+        .add_replica(&service_key, replica_id, status.socket_path.clone())
         .await;
 
     // 5. Gate on the health check; roll back everything on failure.
     let url = format!("http://127.0.0.1:{}", spec.internal_port);
     if health.check(&url, &spec.health_check).await.is_err() {
         let instance = RuntimeInstanceId {
+            service_id: spec.service_id,
             service_name: spec.service_name.clone(),
             replica_index: spec.replica_index,
         };
         let _ = runtime.stop(&instance).await;
         ledger.release(&spec.limits);
         registry.remove(replica_id);
-        bridge.remove_replica(&spec.service_name, replica_id).await;
+        bridge.remove_replica(&service_key, replica_id).await;
         return Err(LifecycleError::Health);
     }
 
     // 6. Promote to Healthy and start taking traffic.
     registry.set_state(replica_id, ReplicaState::Healthy);
     bridge
-        .set_replica_healthy(&spec.service_name, replica_id, true)
+        .set_replica_healthy(&service_key, replica_id, true)
         .await;
     Ok(replica_id)
 }
@@ -115,7 +120,7 @@ pub async fn launch_replica(
 /// remove from the registry/bridge so resources never leak even if `stop` errs.
 #[allow(clippy::too_many_arguments)]
 pub async fn drain_replica(
-    service_name: &str,
+    service_key: &str,
     replica_id: Uuid,
     instance: &RuntimeInstanceId,
     limits: &ResourceLimits,
@@ -128,7 +133,7 @@ pub async fn drain_replica(
     // 1. Stop directing new connections at this replica.
     registry.set_state(replica_id, ReplicaState::Draining);
     bridge
-        .set_replica_healthy(service_name, replica_id, false)
+        .set_replica_healthy(service_key, replica_id, false)
         .await;
 
     // 2. Bounded drain window for in-flight connections.
@@ -142,7 +147,7 @@ pub async fn drain_replica(
     // 4. Always release and remove.
     ledger.release(limits);
     registry.remove(replica_id);
-    bridge.remove_replica(service_name, replica_id).await;
+    bridge.remove_replica(service_key, replica_id).await;
     Ok(())
 }
 
@@ -233,7 +238,7 @@ mod tests {
             .expect("replica present");
         assert_eq!(replica.state, ReplicaState::Healthy);
         assert!(ledger.committed_cpu() > 0);
-        assert_eq!(bridge.healthy_count(&spec.service_name).await, 1);
+        assert_eq!(bridge.healthy_count(&spec.service_id.to_string()).await, 1);
         assert_eq!(runtime.started_requests().len(), 1);
     }
 
@@ -327,11 +332,12 @@ mod tests {
         assert!(ledger.committed_cpu() > 0);
 
         let instance = RuntimeInstanceId {
+            service_id: spec.service_id,
             service_name: spec.service_name.clone(),
             replica_index: spec.replica_index,
         };
         drain_replica(
-            &spec.service_name,
+            &spec.service_id.to_string(),
             id,
             &instance,
             &spec.limits,

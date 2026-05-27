@@ -18,6 +18,7 @@ pub enum ApiError {
     Unauthorized(String),
     Forbidden(String),
     Conflict(String),
+    TooManyRequests(String),
     Deploy(DeployError),
     Log(std::io::Error),
     Metrics(MetricsError),
@@ -128,6 +129,7 @@ impl IntoResponse for ApiError {
             Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
             Self::Forbidden(message) => (StatusCode::FORBIDDEN, message),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
+            Self::TooManyRequests(message) => (StatusCode::TOO_MANY_REQUESTS, message),
             Self::Deploy(error) => match &error {
                 DeployError::RegistryNotFound => (StatusCode::NOT_FOUND, error.to_string()),
                 _ => (

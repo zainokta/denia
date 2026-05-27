@@ -120,6 +120,10 @@ pub async fn run(config: SocketProxyConfig) -> Result<(), SocketProxyError> {
     let listener = UnixListener::bind(&config.listen_socket)?;
     caps::set_no_new_privs()?;
     caps::drop_bounding_caps()?;
+    // Install the seccomp denylist before spawning so the workload child inherits
+    // it. Long-running services defer hardening to this proxy, so without this
+    // call the workload would run with no syscall filter at all (F-4).
+    syscall::seccomp::install_filter()?;
     let mut child = Command::new(&config.child_argv[0])
         .args(&config.child_argv[1..])
         .stdin(Stdio::null())

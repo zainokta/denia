@@ -76,7 +76,10 @@ Optional (client-exposed, must be `VITE_`-prefixed):
 
 - `VITE_DENIA_API_URL` — control-plane base URL. Unset/empty -> `ApiClient.listNodes`
   serves a local fixture (offline demo). Set -> real `GET {baseUrl}/v1/nodes`.
-- `VITE_DENIA_TOKEN` — bearer token sent as `Authorization: Bearer <token>` when present.
+- `VITE_DENIA_TOKEN` — **DEV-ONLY** bearer token sent as `Authorization: Bearer <token>`.
+  Only honored when `import.meta.env.DEV` is true; stripped from production
+  bundles, and `pnpm build` under `NODE_ENV=production` hard-fails if it is set
+  (it would otherwise be embedded in the public SPA). Use runtime login in prod.
 
 ## Deployment
 

@@ -42,6 +42,7 @@ impl Runtime for FakeRuntime {
             .map_err(|_| RuntimeError::LockPoisoned)?
             .push(request.clone());
         let status = RuntimeStatus {
+            service_id: request.service_id,
             service_name: request.service_name,
             deployment_id: request.deployment_id,
             state: "running".to_string(),

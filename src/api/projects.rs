@@ -40,11 +40,20 @@ async fn list_projects(
         .user_id
         .ok_or_else(|| ApiError::Forbidden("authenticated user required".to_string()))?;
     let memberships = state.users.list_memberships_for_user(user_id)?;
-    let allowed: std::collections::HashSet<uuid::Uuid> =
-        memberships.into_iter().map(|m| m.project_id).collect();
+    let roles: std::collections::HashMap<uuid::Uuid, Role> = memberships
+        .into_iter()
+        .map(|m| (m.project_id, m.role))
+        .collect();
     Ok(Json(
         all.into_iter()
-            .filter(|p| allowed.contains(&p.id))
+            .filter_map(|mut p| {
+                let role = roles.get(&p.id)?;
+                // Viewers (below Operator) must not see raw shared_env values (F-7).
+                if *role < Role::Operator {
+                    p.redact_shared_env();
+                }
+                Some(p)
+            })
             .collect(),
     ))
 }
@@ -55,10 +64,14 @@ async fn get_project(
     axum::extract::Path(project_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<Project>, ApiError> {
     ensure_role(&state, &principal, project_id, Role::Viewer)?;
-    let project = state
+    let mut project = state
         .projects
         .get_project(project_id)?
         .ok_or_else(|| ApiError::NotFound("project not found".to_string()))?;
+    // Only Operators+ (and super admins) see raw shared_env values (F-7).
+    if ensure_role(&state, &principal, project_id, Role::Operator).is_err() {
+        project.redact_shared_env();
+    }
     Ok(Json(project))
 }
 

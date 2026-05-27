@@ -99,6 +99,7 @@ async fn fake_runtime_starts_and_stops_service() {
 
     runtime
         .stop(&RuntimeInstanceId {
+            service_id: status.service_id,
             service_name: status.service_name.clone(),
             replica_index: 0,
         })
