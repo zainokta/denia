@@ -86,6 +86,30 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
+    // Wire the autoscaler: hand the bridge its activation hook, run boot
+    // reconcile once, then spawn the periodic control loop until shutdown.
+    let autoscale_interval = config.autoscale_interval_s;
+    let autoscaler_task = if let Some((supervisor, controller)) = state.autoscaler_handle() {
+        supervisor
+            .set_activator(Arc::new(denia::autoscale::controller::SharedController(
+                controller.clone(),
+            )))
+            .await;
+        {
+            let mut c = controller.lock().await;
+            let _ = c.reconcile_boot_all().await;
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(denia::autoscale::controller::run_until_shutdown(
+            controller,
+            std::time::Duration::from_secs(autoscale_interval),
+            rx,
+        ));
+        Some((tx, handle))
+    } else {
+        None
+    };
+
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     let app = build_router(state);
     axum::serve(
@@ -101,5 +125,9 @@ async fn main() -> anyhow::Result<()> {
     let _ = scheduler_task.await;
     let _ = traefik_shutdown_tx.send(()).await;
     let _ = traefik_task.await;
+    if let Some((tx, handle)) = autoscaler_task {
+        let _ = tx.send(());
+        let _ = handle.await;
+    }
     Ok(())
 }
