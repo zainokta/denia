@@ -35,14 +35,30 @@ separated internally so they can split later if a multi-node ADR is accepted.
   ECR-token, and GAR-token mappings (ADR-014).
 - **Runtime** — `LinuxRuntime` launches workloads under `cgroup_v2 +
   unshare(user|pid|mount|uts|ipc) + no_new_privs + bounded-caps` and places
-  them in `<cgroup_root>/<service_id>/<deployment_id>` cgroups. Host paths are
-  keyed off the globally-unique `service_id`, so the same service name across
-  projects is isolated on disk. Host root is the trust boundary; agent runs
-  rootful.
+  them in `<cgroup_root>/<service_id>/<deployment_id>/<replica_index>` cgroups.
+  Host paths are keyed off the globally-unique `service_id`, so the same service
+  name across projects is isolated on disk. Every workload — including a single
+  instance — boots into a **private per-replica overlay filesystem** (shared
+  read-only artifact rootfs as `lower`, per-replica writable `upper`/`work`,
+  helper binaries bind-mounted read-only) so replicas never clobber each other
+  and the content-addressed bundle is never mutated (ADR-019). Host root is the
+  trust boundary; agent runs rootful.
+- **Autoscaling** — Per-service horizontal autoscaling (HPA-like). A control
+  loop samples per-replica CPU/memory from cgroup v2 and scales replicas between
+  `min_replicas` and `max_replicas` toward `target_cpu_pct` /`target_mem_pct`,
+  with a scale-down cooldown. Idle services scale to zero; the first request
+  reactivates them via a single-flight cold-start through the loopback bridge. A
+  resource ledger reserves CPU/memory against detected host capacity (minus
+  configured headroom) so scale-ups can't oversubscribe the node. Redeploys
+  roll replicas one at a time; boot reconcile adopts surviving replicas and
+  cleans orphaned overlay layers (ADR-018).
 - **Ingress** — Denia runs and supervises its own Traefik (OCI-pulled, host
   process) via the file provider; see [Managed Traefik](#managed-traefik) below.
   Denia owns the loopback-bridge listeners that forward Traefik traffic to
-  per-workload Unix sockets. Per-service TLS (`tls_enabled`) emits
+  per-workload Unix sockets. Each bridge fans out across a service's healthy
+  replica pool with round-robin selection; with zero healthy replicas it
+  single-flights a cold-start activation and holds the connection until a
+  replica is ready (or replies 503). Per-service TLS (`tls_enabled`) emits
   ACME-resolved `websecure` routers with HTTP→HTTPS redirect (ADR-007). The
   bridge tees the first HTTP request line and response status into an in-process
   access log (ADR-009).
@@ -63,8 +79,10 @@ Source modules (`src/`): `api`, `app`, `auth`, `command`, `config`, `deploy`,
 `domain`, `repo`, `state`, `secrets`, `artifacts`, `oci` (in-process
 puller/unpacker + credentials), `runtime`, `ingress` (bridge, socket proxy,
 Traefik rendering), `observability` (access logs, service logs, service metrics,
-node metrics), `scheduler`, `verification`, `syscall` (rustix chown/caps/ns +
-signal), `web`, and `workload_launcher`.
+node metrics), `autoscale` (scaler math, controller, resource ledger, replica
+registry, usage sampler, lifecycle), `scheduler`, `verification`, `syscall`
+(rustix chown/caps/ns + overlay/bind mounts + signal), `web`, and
+`workload_launcher`.
 
 Deployments are **health-gated**: Denia starts the new deployment, waits for the
 configured HTTP health-check path and timeout, then atomically promotes routing
@@ -140,6 +158,8 @@ Key stage transitions in code: `create_deployment`
 
 - Rust 2024 edition (stable toolchain).
 - Linux host with **cgroup v2** and **systemd** (Ubuntu/Debian LTS baseline).
+  Kernel **≥ 5.11** for overlayfs mounts inside the workload user namespace
+  (per-replica isolation, ADR-019).
 - `unshare` (util-linux) and `sops`. For Git sources: BuildKit (`buildctl`).
   OCI image acquisition is in-process — no `skopeo`/`umoci`. `no_new_privs` +
   capability-drop are applied via `rustix` in-process — no `setpriv`.
@@ -196,6 +216,9 @@ All configuration is environment-driven (`src/config.rs`).
 | `DENIA_USERNS_BASE` | `100000` | uid/gid base for the workload user namespace |
 | `DENIA_USERNS_SIZE` | `65536` | uid/gid range size for the workload user namespace |
 | `DENIA_NODE_DISK_PATH` | `<data_dir>` | Path used for `statvfs` disk metrics |
+| `DENIA_AUTOSCALE_INTERVAL_S` | `15` | Autoscale control-loop tick interval (seconds) |
+| `DENIA_AUTOSCALE_HEADROOM_CPU_MILLIS` | `1000` | CPU (millicores) held back from the autoscale resource ledger |
+| `DENIA_AUTOSCALE_HEADROOM_MEM_BYTES` | `536870912` | Memory (bytes) held back from the autoscale resource ledger |
 
 Derived paths: `runtime/`, `artifacts/`, `logs/`, and SOPS files under
 `secrets/*.sops.yaml` below `DENIA_DATA_DIR`. Registry credentials are configured
@@ -226,6 +249,34 @@ Traefik process causes a fatal port-in-use error logged to
 
 See ADR-016 for the full design rationale and known v1 limitations.
 
+## Autoscaling
+
+Each service carries an optional `AutoscalePolicy`:
+
+| Field | Meaning |
+|-------|---------|
+| `min_replicas` | Floor (0 enables scale-to-zero) |
+| `max_replicas` | Ceiling |
+| `target_cpu_pct` | Target average CPU utilization driving scale-up |
+| `target_mem_pct` | Optional target average memory utilization |
+| `scale_down_cooldown_s` | Minimum quiet period before removing a replica |
+| `idle_timeout_s` | Idle duration before scaling to zero |
+
+A control loop (`DENIA_AUTOSCALE_INTERVAL_S`) samples per-replica cgroup CPU and
+memory, computes the desired replica count against the targets, and launches or
+drains replicas within the policy bounds. A resource ledger reserves each
+replica's CPU/memory against detected host capacity minus headroom
+(`DENIA_AUTOSCALE_HEADROOM_*`), so scale-ups never oversubscribe the node.
+
+Replicas are stateless cattle: each runs in a private overlay rootfs (ADR-019),
+gets a per-replica cgroup, and registers a Unix socket the loopback bridge fans
+out to round-robin. Scale-to-zero drains all replicas; the next inbound request
+single-flights a cold-start and waits for readiness before proxying. Redeploys
+replace replicas one at a time, and boot reconcile re-adopts replicas that
+survived a control-plane restart while removing orphaned overlay layers.
+
+See ADR-018 (autoscaling) and ADR-019 (per-replica filesystem isolation).
+
 ## API
 
 `GET /healthz` is public. Everything under `/v1` requires `Authorization:
@@ -238,6 +289,7 @@ user session / API token issued by `/v1/auth/login` (ADR-008).
 | `POST` | `/v1/auth/login` | public | Issue a session token |
 | `POST` | `/v1/auth/logout` | authenticated | Revoke the bearer session |
 | `GET` | `/v1/me` | authenticated | Current principal + memberships |
+| `POST` | `/v1/bootstrap` | super-admin | One-time: create the first real super-admin user |
 | `GET` / `POST` / `DELETE` | `/v1/users{,/...}` | super-admin | User management |
 | `GET` / `POST` / `DELETE` | `/v1/api-tokens{,/...}` | authenticated | Caller's API tokens |
 | `GET` | `/v1/projects` | viewer (membership-filtered) | List projects |
@@ -249,10 +301,13 @@ user session / API token issued by `/v1/auth/login` (ADR-008).
 | `GET` / `PATCH` / `DELETE` | `/v1/projects/{id}/registries/{registry_id}` | admin | Registry detail / update / delete |
 | `POST` | `/v1/credentials/{git,registry}` | super-admin | Register a SOPS-referenced credential |
 | `GET` | `/v1/services` | viewer (membership-filtered) | List services |
-| `POST` | `/v1/services` | operator | Create/update a service config |
+| `POST` | `/v1/services` | operator | Create/update a service config (incl. autoscale policy) |
+| `GET` | `/v1/services/{id}` | viewer | Service detail |
+| `DELETE` | `/v1/services/{id}` | operator | Delete a service (ADR-017) |
 | `POST` | `/v1/deployments` | operator | Create a deployment (Git or external image) |
 | `GET` | `/v1/services/{id}/deployments` | viewer | List deployments |
 | `GET` | `/v1/services/{id}/logs` | operator | Service logs |
+| `GET` | `/v1/services/{id}/logs/stream` | operator | Live (streaming) service logs |
 | `GET` | `/v1/services/{id}/metrics` | viewer | cgroup snapshots |
 | `GET` | `/v1/services/{id}/requests` | operator | Recent access-log entries |
 | `GET` / `POST` | `/v1/services/{id}/domains` | viewer / operator | List / add a domain (HTTP-verified before routing) |
@@ -268,7 +323,7 @@ user session / API token issued by `/v1/auth/login` (ADR-008).
 | `GET` | `/v1/ingress/routes` | super-admin | Live RouteSpec snapshot |
 | `GET` | `/v1/ingress/config` | super-admin | Live Traefik dynamic YAML |
 | `GET` | `/v1/metrics/node` | super-admin | NodeSnapshot (CPU/mem/disk/load) |
-| `GET` | `/v1/workloads` | viewer (membership-filtered) | Running-workload roll-up |
+| `GET` | `/v1/workloads` | viewer (membership-filtered) | Running-workload roll-up incl. replica + healthy-replica counts |
 
 Credentials store only a `secret_ref` pointing at a SOPS-encrypted file; raw
 secret material never enters SQLite or logs.
@@ -319,7 +374,8 @@ per-aggregate SQLite repositories.
   project-scoped RBAC, `009` observability, `010` jobs scheduler, `011`
   in-process OCI acquisition, `012` `src/` modularization, `013` domain
   verification, `014` per-service registry, `015` streaming OCI layer staging,
-  `016` managed Traefik.
+  `016` managed Traefik, `017` service CRUD API, `018` autoscaling, `019`
+  per-replica runtime filesystem isolation.
 - `docs/superpowers/specs/` and `docs/superpowers/plans/` — design specs and
   implementation plans used to track active backend and console work.
 - `CLAUDE.md` — agent/contributor guidelines.
