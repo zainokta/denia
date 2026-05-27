@@ -195,7 +195,7 @@ async fn full_autoscale_lifecycle() {
         .expect("activation ok");
     assert_eq!(ctrl.replica_count(svc), 1);
     assert_eq!(ctrl.healthy_replicas(svc), 1);
-    assert_eq!(ctrl.bridge.healthy_count(&svc.to_string()).await, 1);
+    assert_eq!(ctrl.ingress.healthy_count(&svc.to_string()).await, 1);
 
     // 2. Scale up on high CPU: 100% over an 80% target → ceil(1*100/80)=2.
     set_usage(&mut ctrl, 100, 0);
@@ -252,9 +252,9 @@ async fn full_autoscale_lifecycle() {
         "expected ScaledDown 3->1, got {down:?}"
     );
 
-    // 5. Idle to zero: backdate bridge activity past idle_timeout_s (600s) with
+    // 5. Idle to zero: backdate ingress activity past idle_timeout_s (600s) with
     // low CPU → all replicas drain and the service reports ScaledToZero.
-    ctrl.bridge
+    ctrl.ingress
         .set_last_activity(&svc.to_string(), Instant::now() - Duration::from_secs(700))
         .await;
     let zero = ctrl.tick_all(1000).await;
@@ -266,7 +266,7 @@ async fn full_autoscale_lifecycle() {
         "expected ScaledToZero, got {zero:?}"
     );
     assert_eq!(ctrl.store.get_desired_replicas(svc).unwrap(), Some(0));
-    assert_eq!(ctrl.bridge.healthy_count(&svc.to_string()).await, 0);
+    assert_eq!(ctrl.ingress.healthy_count(&svc.to_string()).await, 0);
 }
 
 /// Swap the active deployment mid-run and confirm the live replica rolls onto

@@ -130,7 +130,7 @@ pub struct Controller {
     pub registry: ReplicaRegistry,
     pub ledger: ResourceLedger,
     pub runtime: Arc<dyn Runtime>,
-    pub bridge: Arc<IngressState>,
+    pub ingress: Arc<IngressState>,
     pub health: Arc<dyn HealthChecker>,
     pub store: SqliteStore,
     pub usage: Box<dyn UsageSource>,
@@ -145,7 +145,7 @@ impl Controller {
         registry: ReplicaRegistry,
         ledger: ResourceLedger,
         runtime: Arc<dyn Runtime>,
-        bridge: Arc<IngressState>,
+        ingress: Arc<IngressState>,
         health: Arc<dyn HealthChecker>,
         store: SqliteStore,
         usage: Box<dyn UsageSource>,
@@ -156,7 +156,7 @@ impl Controller {
             registry,
             ledger,
             runtime,
-            bridge,
+            ingress,
             health,
             store,
             usage,
@@ -189,7 +189,7 @@ impl Controller {
             &mut self.registry,
             &mut self.ledger,
             self.runtime.as_ref(),
-            self.bridge.as_ref(),
+            self.ingress.as_ref(),
             self.health.as_ref(),
         )
         .await
@@ -235,10 +235,10 @@ impl Controller {
                         status.socket_path.clone(),
                     );
                     self.registry.set_state(id, ReplicaState::Healthy);
-                    self.bridge
+                    self.ingress
                         .add_replica(&ms.service_id.to_string(), id, status.socket_path.clone())
                         .await;
-                    self.bridge
+                    self.ingress
                         .set_replica_healthy(&ms.service_id.to_string(), id, true)
                         .await;
                     events.push(AutoscaleEvent::Adopted {
@@ -286,7 +286,7 @@ impl Controller {
                     &mut self.registry,
                     &mut self.ledger,
                     self.runtime.as_ref(),
-                    self.bridge.as_ref(),
+                    self.ingress.as_ref(),
                     self.health.as_ref(),
                 )
                 .await
@@ -363,7 +363,7 @@ impl Controller {
                         &mut self.registry,
                         &mut self.ledger,
                         self.runtime.as_ref(),
-                        self.bridge.as_ref(),
+                        self.ingress.as_ref(),
                         self.health.as_ref(),
                     )
                     .await
@@ -378,7 +378,7 @@ impl Controller {
                                 &mut self.registry,
                                 &mut self.ledger,
                                 self.runtime.as_ref(),
-                                self.bridge.as_ref(),
+                                self.ingress.as_ref(),
                             )
                             .await;
                             events.push(AutoscaleEvent::RolloutStep {
@@ -411,7 +411,7 @@ impl Controller {
                         &mut self.registry,
                         &mut self.ledger,
                         self.runtime.as_ref(),
-                        self.bridge.as_ref(),
+                        self.ingress.as_ref(),
                     )
                     .await;
                     match launch_replica(
@@ -419,7 +419,7 @@ impl Controller {
                         &mut self.registry,
                         &mut self.ledger,
                         self.runtime.as_ref(),
-                        self.bridge.as_ref(),
+                        self.ingress.as_ref(),
                         self.health.as_ref(),
                     )
                     .await
@@ -480,7 +480,7 @@ impl Controller {
                 // only, so it must not block scale-to-zero.
                 if ms.policy.min_replicas == 0 {
                     let idle_secs =
-                        match self.bridge.last_activity(&ms.service_id.to_string()).await {
+                        match self.ingress.last_activity(&ms.service_id.to_string()).await {
                             Some(t) => Instant::now().saturating_duration_since(t).as_secs(),
                             None => u64::MAX,
                         };
@@ -507,7 +507,7 @@ impl Controller {
                                 &mut self.registry,
                                 &mut self.ledger,
                                 self.runtime.as_ref(),
-                                self.bridge.as_ref(),
+                                self.ingress.as_ref(),
                             )
                             .await;
                         }
@@ -553,7 +553,7 @@ impl Controller {
                     &mut self.registry,
                     &mut self.ledger,
                     self.runtime.as_ref(),
-                    self.bridge.as_ref(),
+                    self.ingress.as_ref(),
                     self.health.as_ref(),
                 )
                 .await
@@ -601,7 +601,7 @@ impl Controller {
                     &mut self.registry,
                     &mut self.ledger,
                     self.runtime.as_ref(),
-                    self.bridge.as_ref(),
+                    self.ingress.as_ref(),
                 )
                 .await
                 {
@@ -982,7 +982,7 @@ mod tests {
             &mut ctrl.registry,
             &mut ctrl.ledger,
             ctrl.runtime.as_ref(),
-            ctrl.bridge.as_ref(),
+            ctrl.ingress.as_ref(),
             ctrl.health.as_ref(),
         )
         .await
@@ -1004,7 +1004,7 @@ mod tests {
             &mut ctrl.registry,
             &mut ctrl.ledger,
             ctrl.runtime.as_ref(),
-            ctrl.bridge.as_ref(),
+            ctrl.ingress.as_ref(),
             ctrl.health.as_ref(),
         )
         .await
@@ -1149,7 +1149,7 @@ mod tests {
 
         // Backdate activity past idle_timeout_s (600s).
         let idle = std::time::Instant::now() - Duration::from_secs(700);
-        ctrl.bridge
+        ctrl.ingress
             .set_last_activity(&ms.service_id.to_string(), idle)
             .await;
 
@@ -1179,7 +1179,7 @@ mod tests {
         assert_eq!(ctrl.registry.replica_count(svc), 1);
 
         // Recent activity: not idle.
-        ctrl.bridge
+        ctrl.ingress
             .set_last_activity(&ms.service_id.to_string(), std::time::Instant::now())
             .await;
 
@@ -1209,7 +1209,7 @@ mod tests {
 
         // Idle by activity, but metrics are high → must not scale to zero.
         let idle = std::time::Instant::now() - Duration::from_secs(700);
-        ctrl.bridge
+        ctrl.ingress
             .set_last_activity(&ms.service_id.to_string(), idle)
             .await;
 
@@ -1278,7 +1278,7 @@ mod tests {
 
         assert_eq!(ctrl.registry.replica_count(svc), 1);
         assert_eq!(ctrl.registry.healthy_count(svc), 1);
-        assert_eq!(ctrl.bridge.healthy_count(&svc.to_string()).await, 1);
+        assert_eq!(ctrl.ingress.healthy_count(&svc.to_string()).await, 1);
     }
 
     #[tokio::test]
@@ -1427,7 +1427,7 @@ mod tests {
             .find(|r| r.index == 0 && r.deployment_id == d_active)
             .expect("adopted replica present");
         assert_eq!(adopted.state, ReplicaState::Healthy);
-        assert_eq!(ctrl.bridge.healthy_count(&svc.to_string()).await, 1);
+        assert_eq!(ctrl.ingress.healthy_count(&svc.to_string()).await, 1);
         assert!(events.contains(&AutoscaleEvent::Adopted {
             service: "web".to_string(),
             replica_index: 0,
@@ -1594,6 +1594,6 @@ mod tests {
 
         let guard = shared.0.lock().await;
         assert_eq!(guard.registry.replica_count(svc), 1);
-        assert_eq!(guard.bridge.healthy_count(&svc.to_string()).await, 1);
+        assert_eq!(guard.ingress.healthy_count(&svc.to_string()).await, 1);
     }
 }

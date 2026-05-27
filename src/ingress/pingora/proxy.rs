@@ -230,15 +230,20 @@ impl ProxyHttp for DeniaProxy {
         }
 
         let host = request_host(session);
-        let service = match self.state.routes().resolve(&host) {
-            Some(route) => route.service_name.clone(),
+        // Resolve the Host to its route, capturing BOTH the pool lookup key
+        // (`service_id` = `service.id.to_string()`, what `add_replica` keys by
+        // and the activator parses as a UUID) and the human `service_name` (for
+        // access logging only). Keying the pool by `service_name` was the C1
+        // BLOCKER: every request missed the pool and 503'd.
+        let (service_key, service_name) = match self.state.routes().resolve(&host) {
+            Some(route) => (route.service_id.clone(), route.service_name.clone()),
             None => {
                 // Unknown host → 404.
                 session.respond_error(404).await?;
                 return Err(Error::new(ErrorType::HTTPStatus(404)));
             }
         };
-        ctx.service_name = Some(service.clone());
+        ctx.service_name = Some(service_name);
 
         // Unauthenticated cold-start trigger (audit B2/A3): a request on the
         // public `:80`/`:443` can wake any scaled-to-zero *routed* service. This
@@ -246,7 +251,7 @@ impl ProxyHttp for DeniaProxy {
         // concurrent waiters) and `ACTIVATION_WAIT`, so it cannot fan out into
         // unbounded launches. Cross-service abuse rate-limiting is intentionally
         // out of scope (documented in ADR-020); do NOT add a rate limiter here.
-        let resolved = self.state.resolve_or_activate(&service).await;
+        let resolved = self.state.resolve_or_activate(&service_key).await;
         match classify_resolution(resolved) {
             UpstreamChoice::Uds(socket) => {
                 let peer = HttpPeer::new_uds(&socket.to_string_lossy(), false, host)

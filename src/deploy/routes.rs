@@ -66,10 +66,13 @@ pub fn apply_routes(state: &crate::app::AppState) -> Result<(), DeployError> {
             continue;
         };
         snapshot.insert(
-            route_key,
+            route_key.clone(),
             RouteSpec {
                 route_key: prev.route_key.clone(),
                 service_name: svc.name.clone(),
+                // Proxy pool lookup key = service.id.to_string(), matching the
+                // `add_replica` key so Host -> route.service_id -> pool hit (C1).
+                service_id: route_key,
                 domains: hostnames,
                 tls: svc.tls_enabled,
             },

@@ -97,6 +97,17 @@ pub fn validate_domain(domain: &str) -> Result<String, IngressError> {
 pub struct RouteSpec {
     pub route_key: String,
     pub service_name: String,
+    /// Pool lookup key: the owning service's id as `service.id.to_string()`.
+    ///
+    /// This MUST match exactly the key used by `IngressState::add_replica`
+    /// (coordinator/lifecycle) and parsed by the autoscale catalog
+    /// (`Uuid::parse_str`). The proxy hot path resolves a `Host` to a
+    /// `RouteSpec` and dials the pool via this key — NOT `service_name`, which
+    /// is human-facing and only unique within a project (F-3). Kept out of the
+    /// public `/v1/ingress/routes` response (`#[serde(skip)]`) so the API shape
+    /// stays `route_key, service_name, domains, tls`.
+    #[serde(skip)]
+    pub service_id: String,
     pub domains: Vec<String>,
     pub tls: bool,
 }
@@ -560,6 +571,7 @@ mod route_table_tests {
         t.upsert(RouteSpec {
             route_key: "svc-1".into(),
             service_name: "api".into(),
+            service_id: "svc-1".into(),
             domains: vec!["api.example.com".into()],
             tls: true,
         });
@@ -577,6 +589,7 @@ mod route_table_tests {
         t.upsert(RouteSpec {
             route_key: "svc-1".into(),
             service_name: "api".into(),
+            service_id: "svc-1".into(),
             domains: vec!["api.example.com".into(), "www.api.example.com".into()],
             tls: false,
         });
@@ -594,12 +607,14 @@ mod route_table_tests {
         t.upsert(RouteSpec {
             route_key: "svc-old".into(),
             service_name: "old".into(),
+            service_id: "svc-old".into(),
             domains: vec!["app.example.com".into()],
             tls: false,
         });
         t.upsert(RouteSpec {
             route_key: "svc-new".into(),
             service_name: "new".into(),
+            service_id: "svc-new".into(),
             domains: vec!["app.example.com".into()],
             tls: true,
         });
@@ -684,6 +699,7 @@ mod validation_tests {
         assert_eq!(
             t.try_upsert(RouteSpec {
                 route_key: "k".into(),
+                service_id: "k".into(),
                 service_name: "  ".into(),
                 domains: vec!["a.example.com".into()],
                 tls: false,
@@ -699,6 +715,7 @@ mod validation_tests {
         assert_eq!(
             t.try_upsert(RouteSpec {
                 route_key: "k".into(),
+                service_id: "k".into(),
                 service_name: "api".into(),
                 domains: vec![],
                 tls: false,
@@ -713,6 +730,7 @@ mod validation_tests {
         assert!(matches!(
             t.try_upsert(RouteSpec {
                 route_key: "k".into(),
+                service_id: "k".into(),
                 service_name: "api".into(),
                 domains: vec!["good.example.com".into(), "ev`il.com".into()],
                 tls: false,
@@ -728,6 +746,7 @@ mod validation_tests {
         let mut t = RouteTable::default();
         t.try_upsert(RouteSpec {
             route_key: "k".into(),
+            service_id: "k".into(),
             service_name: "api".into(),
             domains: vec!["API.Example.COM".into()],
             tls: false,
@@ -741,6 +760,7 @@ mod validation_tests {
         let mut t = RouteTable::default();
         t.try_upsert(RouteSpec {
             route_key: "k".into(),
+            service_id: "k".into(),
             service_name: "api".into(),
             domains: vec!["api.example.com".into()],
             tls: false,
@@ -824,6 +844,7 @@ mod assembly_tests {
         table.upsert(RouteSpec {
             route_key: "svc-1".into(),
             service_name: "api".into(),
+            service_id: "svc-1".into(),
             domains: vec!["api.example.com".into()],
             tls: true,
         });
@@ -840,6 +861,77 @@ mod assembly_tests {
         // Swapping a fresh (empty) cert store is observable too.
         state.swap_certs(CertStore::default());
         assert!(state.certs().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod join_tests {
+    //! End-to-end join: the path the C1 BLOCKER broke. A request `Host` resolves
+    //! to a `RouteSpec`, whose pool key (`service_id`) must address the replica
+    //! pool that `add_replica` registered. If the proxy keyed by `service_name`
+    //! (the old bug), this lookup misses the pool and 503s.
+    use super::*;
+
+    #[tokio::test]
+    async fn resolve_host_then_pool_lookup_by_service_id_returns_socket() {
+        let state = IngressState::default();
+
+        // Pools are keyed by service.id.to_string() (coordinator/lifecycle).
+        let service_id = Uuid::now_v7();
+        let service_key = service_id.to_string();
+        let replica_id = Uuid::now_v7();
+        let socket = PathBuf::from("/run/denia/join.sock");
+
+        state
+            .add_replica(&service_key, replica_id, socket.clone())
+            .await;
+        state
+            .set_replica_healthy(&service_key, replica_id, true)
+            .await;
+
+        // The route carries the human service_name AND the pool key (service_id).
+        let mut table = RouteTable::default();
+        table
+            .try_upsert(RouteSpec {
+                route_key: format!("svc-{service_id}"),
+                service_name: "api".into(),
+                service_id: service_key.clone(),
+                domains: vec!["api.example.com".into()],
+                tls: false,
+            })
+            .expect("upsert");
+        state.swap_routes(table);
+
+        // Host -> route -> pool key -> pool hit (the full proxy path).
+        let route = state.routes().resolve("api.example.com").cloned();
+        let route = route.expect("host resolves to a route");
+
+        // The pool key is the service_id, NOT the human service_name. Keying by
+        // service_name (the C1 bug) misses the pool entirely.
+        assert_ne!(
+            route.service_id, route.service_name,
+            "pool key must be the service id, not the human name"
+        );
+        let resolved = state
+            .resolve_or_activate(&route.service_id)
+            .await
+            .expect("resolve");
+        assert_eq!(
+            resolved,
+            Some(socket),
+            "resolving via the route's pool key must hit the registered replica, not 503"
+        );
+
+        // And the buggy lookup (by service_name) must miss the pool: no activator
+        // is set, so it resolves to None (the 503 the BLOCKER caused).
+        assert_eq!(
+            state
+                .resolve_or_activate(&route.service_name)
+                .await
+                .unwrap(),
+            None,
+            "keying by the human service_name misses the pool (reproduces C1)"
+        );
     }
 }
 

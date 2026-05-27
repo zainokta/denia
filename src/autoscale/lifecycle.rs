@@ -34,15 +34,16 @@ pub enum LifecycleError {
     Health,
 }
 
-/// Reserve budget, start the runtime, register the replica, wire the bridge, and
-/// gate on a health check. On any failure after the reservation, all partial
-/// state (ledger, runtime, registry, bridge) is rolled back so nothing leaks.
+/// Reserve budget, start the runtime, register the replica, wire the ingress
+/// pool, and gate on a health check. On any failure after the reservation, all
+/// partial state (ledger, runtime, registry, ingress) is rolled back so nothing
+/// leaks.
 pub async fn launch_replica(
     spec: &LaunchSpec,
     registry: &mut ReplicaRegistry,
     ledger: &mut ResourceLedger,
     runtime: &dyn Runtime,
-    bridge: &IngressState,
+    ingress: &IngressState,
     health: &dyn HealthChecker,
 ) -> Result<Uuid, LifecycleError> {
     // 1. Reserve before spawning so concurrent scale-ups can't double-spend.
@@ -83,12 +84,12 @@ pub async fn launch_replica(
         status.socket_path.clone(),
     );
 
-    // Bridge/route/runtime state is keyed by service_id (globally unique), not
+    // Ingress/route/runtime state is keyed by service_id (globally unique), not
     // service.name (project-scoped), to prevent cross-project collisions (F-3).
     let service_key = spec.service_id.to_string();
 
-    // 4. Register the endpoint (unhealthy) in the bridge pool.
-    bridge
+    // 4. Register the endpoint (unhealthy) in the ingress pool.
+    ingress
         .add_replica(&service_key, replica_id, status.socket_path.clone())
         .await;
 
@@ -103,13 +104,13 @@ pub async fn launch_replica(
         let _ = runtime.stop(&instance).await;
         ledger.release(&spec.limits);
         registry.remove(replica_id);
-        bridge.remove_replica(&service_key, replica_id).await;
+        ingress.remove_replica(&service_key, replica_id).await;
         return Err(LifecycleError::Health);
     }
 
     // 6. Promote to Healthy and start taking traffic.
     registry.set_state(replica_id, ReplicaState::Healthy);
-    bridge
+    ingress
         .set_replica_healthy(&service_key, replica_id, true)
         .await;
     Ok(replica_id)
@@ -117,7 +118,8 @@ pub async fn launch_replica(
 
 /// Gracefully drain and tear down a replica: stop new connections, wait out a
 /// bounded grace window, stop the runtime, then always release the ledger and
-/// remove from the registry/bridge so resources never leak even if `stop` errs.
+/// remove from the registry/ingress pool so resources never leak even if `stop`
+/// errs.
 #[allow(clippy::too_many_arguments)]
 pub async fn drain_replica(
     service_key: &str,
@@ -128,11 +130,11 @@ pub async fn drain_replica(
     registry: &mut ReplicaRegistry,
     ledger: &mut ResourceLedger,
     runtime: &dyn Runtime,
-    bridge: &IngressState,
+    ingress: &IngressState,
 ) -> Result<(), LifecycleError> {
     // 1. Stop directing new connections at this replica.
     registry.set_state(replica_id, ReplicaState::Draining);
-    bridge
+    ingress
         .set_replica_healthy(service_key, replica_id, false)
         .await;
 
@@ -147,7 +149,7 @@ pub async fn drain_replica(
     // 4. Always release and remove.
     ledger.release(limits);
     registry.remove(replica_id);
-    bridge.remove_replica(service_key, replica_id).await;
+    ingress.remove_replica(service_key, replica_id).await;
     Ok(())
 }
 
@@ -216,7 +218,7 @@ mod tests {
         let mut registry = ReplicaRegistry::default();
         let mut ledger = ledger();
         let runtime = FakeRuntime::default();
-        let bridge = IngressState::default();
+        let ingress = IngressState::default();
         let health = FakeHealthChecker::healthy();
 
         let id = launch_replica(
@@ -224,7 +226,7 @@ mod tests {
             &mut registry,
             &mut ledger,
             &runtime,
-            &bridge,
+            &ingress,
             &health,
         )
         .await
@@ -238,7 +240,7 @@ mod tests {
             .expect("replica present");
         assert_eq!(replica.state, ReplicaState::Healthy);
         assert!(ledger.committed_cpu() > 0);
-        assert_eq!(bridge.healthy_count(&spec.service_id.to_string()).await, 1);
+        assert_eq!(ingress.healthy_count(&spec.service_id.to_string()).await, 1);
         assert_eq!(runtime.started_requests().len(), 1);
     }
 
@@ -248,7 +250,7 @@ mod tests {
         let mut registry = ReplicaRegistry::default();
         let mut ledger = ledger();
         let runtime = FakeRuntime::default();
-        let bridge = IngressState::default();
+        let ingress = IngressState::default();
         let health = FailingHealthChecker;
 
         let err = launch_replica(
@@ -256,7 +258,7 @@ mod tests {
             &mut registry,
             &mut ledger,
             &runtime,
-            &bridge,
+            &ingress,
             &health,
         )
         .await
@@ -266,7 +268,9 @@ mod tests {
         assert_eq!(ledger.committed_cpu(), 0);
         assert_eq!(ledger.committed_mem(), 0);
         assert_eq!(registry.replica_count(spec.service_id), 0);
-        assert_eq!(bridge.healthy_count(&spec.service_name).await, 0);
+        // C4: assert on the real pool key (service_id), not service_name (which
+        // is never a pool key, so the old assertion was trivially 0).
+        assert_eq!(ingress.healthy_count(&spec.service_id.to_string()).await, 0);
         let stopped = runtime.stopped_instances();
         assert_eq!(stopped.len(), 1);
         assert_eq!(stopped[0].service_name, spec.service_name);
@@ -291,7 +295,7 @@ mod tests {
         ledger.try_reserve(&spec.limits).expect("prefill");
 
         let runtime = FakeRuntime::default();
-        let bridge = IngressState::default();
+        let ingress = IngressState::default();
         let health = FakeHealthChecker::healthy();
 
         let err = launch_replica(
@@ -299,7 +303,7 @@ mod tests {
             &mut registry,
             &mut ledger,
             &runtime,
-            &bridge,
+            &ingress,
             &health,
         )
         .await
@@ -316,7 +320,7 @@ mod tests {
         let mut registry = ReplicaRegistry::default();
         let mut ledger = ledger();
         let runtime = FakeRuntime::default();
-        let bridge = IngressState::default();
+        let ingress = IngressState::default();
         let health = FakeHealthChecker::healthy();
 
         let id = launch_replica(
@@ -324,7 +328,7 @@ mod tests {
             &mut registry,
             &mut ledger,
             &runtime,
-            &bridge,
+            &ingress,
             &health,
         )
         .await
@@ -345,7 +349,7 @@ mod tests {
             &mut registry,
             &mut ledger,
             &runtime,
-            &bridge,
+            &ingress,
         )
         .await
         .expect("drain ok");
@@ -353,7 +357,8 @@ mod tests {
         assert_eq!(ledger.committed_cpu(), 0);
         assert_eq!(ledger.committed_mem(), 0);
         assert_eq!(registry.replica_count(spec.service_id), 0);
-        assert_eq!(bridge.healthy_count(&spec.service_name).await, 0);
+        // C4: assert on the real pool key (service_id), not service_name.
+        assert_eq!(ingress.healthy_count(&spec.service_id.to_string()).await, 0);
         let stopped = runtime.stopped_instances();
         assert!(stopped.iter().any(|i| i == &instance));
     }
