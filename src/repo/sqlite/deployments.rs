@@ -254,7 +254,11 @@ impl SqliteDeploymentRepo {
         update_deployment_status_q(&conn, deployment_id, status)
     }
 
-    pub fn promote_deployment(&self, service_id: Uuid, deployment_id: Uuid) -> Result<(), RepoError> {
+    pub fn promote_deployment(
+        &self,
+        service_id: Uuid,
+        deployment_id: Uuid,
+    ) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         promote_deployment_q(&conn, service_id, deployment_id)
     }

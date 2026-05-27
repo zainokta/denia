@@ -446,7 +446,12 @@ impl SqliteUserRepo {
         delete_session_q(&conn, token_hash)
     }
 
-    pub fn set_membership(&self, user_id: Uuid, project_id: Uuid, role: Role) -> Result<(), RepoError> {
+    pub fn set_membership(
+        &self,
+        user_id: Uuid,
+        project_id: Uuid,
+        role: Role,
+    ) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         set_membership_q(&conn, user_id, project_id, role)
     }
