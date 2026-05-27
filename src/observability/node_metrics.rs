@@ -196,7 +196,7 @@ impl NodeMetricsReader {
 }
 
 fn read_disk(path: &Path) -> Result<(u64, u64), NodeMetricsError> {
-    let stat = rustix::fs::statvfs(path).map_err(NodeMetricsError::Io)?;
+    let stat = rustix::fs::statvfs(path).map_err(|e| NodeMetricsError::Io(e.into()))?;
     let block_size = stat.f_frsize as u64;
     let total = (stat.f_blocks as u64).saturating_mul(block_size);
     let available = (stat.f_bavail as u64).saturating_mul(block_size);
