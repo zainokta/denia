@@ -6,6 +6,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::Serialize;
+use serde_json::json;
 use std::convert::Infallible;
 use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
@@ -21,6 +22,10 @@ use crate::metrics::CgroupMetricsReader;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/services", get(list_services).post(put_service))
+        .route(
+            "/services/{service_id}",
+            get(get_service).delete(delete_service),
+        )
         .route("/services/{service_id}/logs", get(service_logs))
         .route(
             "/services/{service_id}/logs/stream",
@@ -60,7 +65,7 @@ async fn list_services(
 async fn put_service(
     State(state): State<AppState>,
     principal: Principal,
-    Json(service): Json<ServiceConfig>,
+    Json(mut service): Json<ServiceConfig>,
 ) -> Result<Json<ServiceConfig>, ApiError> {
     ensure_role(&state, &principal, service.project_id, Role::Operator)?;
     if let crate::domain::ServiceSource::ExternalImage(src) = &service.source {
@@ -76,7 +81,47 @@ async fn put_service(
             }
         }
     }
+    // Resolve the id server-side. The client never supplies a UUIDv7 (browsers
+    // can only mint v4), so on a nil id we reuse the existing row's id for the
+    // same (project_id, name) — the upsert keys on that pair and never updates
+    // the PK — and otherwise mint a fresh v7. A non-nil id is the update path.
+    if service.id.is_nil() {
+        let existing = state
+            .services
+            .list_services()?
+            .into_iter()
+            .find(|s| s.project_id == service.project_id && s.name == service.name);
+        service.id = match existing {
+            Some(found) => found.id,
+            None => uuid::Uuid::now_v7(),
+        };
+    }
     Ok(Json(state.services.put_service(service)?))
+}
+
+async fn get_service(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<ServiceConfig>, ApiError> {
+    let Some(service) = state.services.get_service(service_id)? else {
+        return Err(ApiError::NotFound("service not found".to_string()));
+    };
+    ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
+    Ok(Json(service))
+}
+
+async fn delete_service(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Some(service) = state.services.get_service(service_id)? else {
+        return Err(ApiError::NotFound("service not found".to_string()));
+    };
+    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
+    state.services.delete_service(service_id)?;
+    Ok(Json(json!({"deleted": true})))
 }
 
 async fn lifecycle_command(
@@ -411,5 +456,197 @@ mod tests {
         let listed: Vec<ServiceConfig> = serde_json::from_str(&body_string(list).await).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "web");
+    }
+
+    use crate::domain::{ExternalImageSource, HealthCheck, Project, ServiceConfig, ServiceSource};
+
+    /// Build a service-create JSON body that omits `id`, so the server must
+    /// resolve it. Mirrors what the web client POSTs.
+    fn service_create_body(project_id: uuid::Uuid, name: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "project_id": project_id,
+            "name": name,
+            "domains": [format!("{name}.example.com")],
+            "source": {
+                "type": "external_image",
+                "image": "nginx",
+                "credential": null,
+            },
+            "internal_port": 80,
+            "health_check": { "path": "/health", "timeout_seconds": 5 },
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_without_id_mints_v7_then_get_roundtrips() {
+        let state = test_state();
+        let project = Project::new("team-create", None).unwrap();
+        state.projects.put_project(project.clone()).unwrap();
+        let body = service_create_body(project.id, "web");
+
+        let app = build_router(state);
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::OK);
+        let created: ServiceConfig = serde_json::from_str(&body_string(create).await).unwrap();
+        assert!(!created.id.is_nil(), "server must mint an id");
+        assert_eq!(
+            created.id.get_version(),
+            Some(uuid::Version::SortRand),
+            "minted id must be a UUIDv7"
+        );
+
+        let get = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/services/{}", created.id))
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+        let fetched: ServiceConfig = serde_json::from_str(&body_string(get).await).unwrap();
+        assert_eq!(fetched.id, created.id);
+    }
+
+    #[tokio::test]
+    async fn get_unknown_service_returns_404() {
+        let resp = build_router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/services/{}", uuid::Uuid::now_v7()))
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_service_then_get_returns_404() {
+        let state = test_state();
+        let project = Project::new("team-del", None).unwrap();
+        state.projects.put_project(project.clone()).unwrap();
+        let svc = ServiceConfig::new(
+            project.id,
+            "delsvc",
+            vec!["delsvc.example.com".into()],
+            ServiceSource::ExternalImage(ExternalImageSource {
+                image: "nginx".into(),
+                credential: None,
+                registry_id: None,
+                image_ref: None,
+            }),
+            80,
+            HealthCheck::new("/health", 5),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        let service_id = svc.id;
+        state.services.put_service(svc).unwrap();
+
+        let app = build_router(state);
+        let delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/services/{service_id}"))
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::OK);
+
+        let get = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/services/{service_id}"))
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_service_unauthenticated_returns_401() {
+        let resp = build_router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/services/{}", uuid::Uuid::now_v7()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn create_without_id_twice_reuses_existing_id() {
+        let state = test_state();
+        let project = Project::new("team-stable", None).unwrap();
+        state.projects.put_project(project.clone()).unwrap();
+
+        let app = build_router(state);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(service_create_body(project.id, "stable")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_cfg: ServiceConfig = serde_json::from_str(&body_string(first).await).unwrap();
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(service_create_body(project.id, "stable")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_cfg: ServiceConfig = serde_json::from_str(&body_string(second).await).unwrap();
+
+        assert_eq!(
+            second_cfg.id, first_cfg.id,
+            "re-POST with same (project_id, name) and nil id must reuse the existing id"
+        );
     }
 }
