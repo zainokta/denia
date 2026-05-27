@@ -126,7 +126,11 @@ describe('Auth schema', () => {
     Schema.decodeUnknownEffect(Me)({
       principal: {
         kind: 'user',
-        user: { id: 1, username: 'alice', created_at: '2026-01-01T00:00:00Z' },
+        user: {
+          id: '019e68f7-82c7-76d0-bebc-7e7a679fe485',
+          username: 'alice',
+          created_at: '2026-01-01T00:00:00Z',
+        },
       },
       is_super_admin: false,
       admin_initialized: true,
@@ -791,7 +795,7 @@ describe('Ingress ApiClient methods', () => {
 
 describe('ApiClient bootstrap', () => {
   const BOOTSTRAP_USER = {
-    id: 1,
+    id: '019e68f7-82c7-76d0-bebc-7e7a679fe485',
     username: 'root',
     created_at: '2026-05-27T00:00:00Z',
   }

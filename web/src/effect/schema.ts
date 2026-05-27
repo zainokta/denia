@@ -11,7 +11,7 @@ export const Role = Schema.Literals(['viewer', 'operator', 'admin'])
 export type Role = typeof Role.Type
 
 export class User extends Schema.Class<User>('User')({
-  id: Schema.Number,
+  id: Schema.String,
   username: Schema.String,
   created_at: Schema.String,
 }) {}
