@@ -90,9 +90,7 @@ async fn proxies_known_host_to_uds_and_404s_unknown() {
     let service_key = "websvc"; // pool key == RouteSpec.service_id (no activator needed)
     let replica = Uuid::now_v7();
     state.add_replica(service_key, replica, tmp.clone()).await;
-    state
-        .set_replica_healthy(service_key, replica, true)
-        .await;
+    state.set_replica_healthy(service_key, replica, true).await;
     let mut table = RouteTable::default();
     table
         .try_upsert(RouteSpec {
@@ -134,7 +132,10 @@ async fn proxies_known_host_to_uds_and_404s_unknown() {
     // --- known host → proxied to the UDS workload ---
     let ok = http_get(http_addr, "test.local").await;
     assert!(ok.contains("200 OK"), "expected 200, got:\n{ok}");
-    assert!(ok.contains("hello-from-uds"), "expected UDS body, got:\n{ok}");
+    assert!(
+        ok.contains("hello-from-uds"),
+        "expected UDS body, got:\n{ok}"
+    );
 
     // --- unknown host → 404 from the proxy ---
     let nf = http_get(http_addr, "nope.local").await;
