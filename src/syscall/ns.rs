@@ -563,12 +563,10 @@ impl SyncPipes {
 }
 
 fn pipe_cloexec() -> Result<[RawFd; 2], SyscallError> {
-    let mut fds = [-1, -1];
-    let result = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    if result < 0 {
-        return Err(SyscallError::Io(std::io::Error::last_os_error()));
-    }
-    Ok(fds)
+    use rustix::fd::IntoRawFd;
+    use rustix::pipe::{PipeFlags, pipe_with};
+    let (reader, writer) = pipe_with(PipeFlags::CLOEXEC).map_err(|e| SyscallError::Io(e.into()))?;
+    Ok([reader.into_raw_fd(), writer.into_raw_fd()])
 }
 
 fn close_fd(fd: RawFd) {
@@ -698,7 +696,7 @@ unsafe fn child_stage1(
 ) -> ! {
     pipes.close_parent_ends();
 
-    let stdio = unsafe { open_child_stdio(plan, pipes) };
+    let stdio = open_child_stdio(plan, pipes);
 
     if write_byte(pipes.child_ready_write, b'C').is_err() {
         unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
@@ -728,31 +726,29 @@ unsafe fn child_stage1(
         }
         if pid > 0 {
             close_fd(pipes.child_error_write);
-            unsafe { wait_for_stage2(pid) };
+            wait_for_stage2(pid);
         }
     }
 
     unsafe { child_exec(plan, pipes, argv, env, &stdio) };
 }
 
-unsafe fn wait_for_stage2(pid: libc::pid_t) -> ! {
-    let mut status = 0;
+fn wait_for_stage2(pid: libc::pid_t) -> ! {
+    let pid = rustix::process::Pid::from_raw(pid).expect("pid from fork must be non-zero");
     loop {
-        let result = unsafe { libc::waitpid(pid, &mut status, 0) };
-        if result == pid {
-            if libc::WIFEXITED(status) {
-                unsafe { libc::_exit(libc::WEXITSTATUS(status)) };
+        match rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty()) {
+            Ok(Some((_, status))) => {
+                if let Some(code) = status.exit_status() {
+                    unsafe { libc::_exit(code) };
+                }
+                if let Some(sig) = status.terminating_signal() {
+                    unsafe { libc::_exit(128 + sig) };
+                }
+                unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
             }
-            if libc::WIFSIGNALED(status) {
-                unsafe { libc::_exit(128 + libc::WTERMSIG(status)) };
-            }
-            unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
+            Err(rustix::io::Errno::INTR) => continue,
+            _ => unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) },
         }
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::EINTR) {
-            continue;
-        }
-        unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
     }
 }
 
@@ -763,98 +759,68 @@ unsafe fn child_exec(
     env: &[*const libc::c_char],
     stdio: &ChildStdio,
 ) -> ! {
-    if plan.setup.clone_flags & libc::CLONE_NEWNS != 0 {
-        let propagation = libc::MS_PRIVATE | libc::MS_REC;
-        if unsafe {
-            libc::mount(
-                std::ptr::null(),
-                c"/".as_ptr(),
-                std::ptr::null(),
-                propagation,
-                std::ptr::null(),
-            )
-        } < 0
-        {
-            unsafe { child_setup_fail(pipes, b'P') };
-        }
+    if plan.setup.clone_flags & libc::CLONE_NEWNS != 0
+        && rustix::mount::mount_change(
+            c"/",
+            rustix::mount::MountPropagationFlags::PRIVATE
+                | rustix::mount::MountPropagationFlags::REC,
+        )
+        .is_err()
+    {
+        unsafe { child_setup_fail(pipes, b'P') };
     }
 
     if let Some(stdout_fd) = stdio.stdout_fd {
-        unsafe { redirect_stdio_fd(pipes, stdout_fd, libc::STDOUT_FILENO) };
+        redirect_stdio_fd(pipes, stdout_fd, libc::STDOUT_FILENO);
     }
     if let Some(stderr_fd) = stdio.stderr_fd {
-        unsafe { redirect_stdio_fd(pipes, stderr_fd, libc::STDERR_FILENO) };
+        redirect_stdio_fd(pipes, stderr_fd, libc::STDERR_FILENO);
     }
 
-    if unsafe {
-        libc::mount(
-            plan.rootfs.as_ptr(),
-            plan.rootfs.as_ptr(),
-            std::ptr::null(),
-            libc::MS_BIND | libc::MS_REC,
-            std::ptr::null(),
-        )
-    } < 0
-    {
+    if rustix::mount::mount_bind_recursive(&plan.rootfs, &plan.rootfs).is_err() {
         unsafe { child_setup_fail(pipes, b'R') };
     }
 
-    let old_root = plan.rootfs.to_bytes_with_nul();
-    let old_root_path = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(old_root) };
-    let mut old_root_buf = old_root_path.to_bytes().to_vec();
+    let old_root = plan.rootfs.to_bytes_with_nul().to_vec();
+    let mut old_root_buf = old_root.clone();
+    old_root_buf.truncate(old_root_buf.len() - 1);
     old_root_buf.extend_from_slice(b"/.old_root\0");
-    let old_root_target = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(&old_root_buf) };
+    let old_root_target =
+        std::ffi::CStr::from_bytes_with_nul(&old_root_buf).expect("old_root path has valid NUL");
 
-    if unsafe { libc::mkdir(old_root_target.as_ptr(), 0o755) } < 0 {
+    if std::fs::create_dir(old_root_target.to_string_lossy().as_ref()).is_err() {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() != Some(libc::EEXIST) {
             unsafe { child_setup_fail(pipes, b'R') };
         }
     }
 
-    if unsafe {
-        libc::syscall(
-            libc::SYS_pivot_root,
-            plan.rootfs.as_ptr(),
-            old_root_target.as_ptr(),
-        )
-    } < 0
-    {
+    if rustix::process::pivot_root(&plan.rootfs, old_root_target).is_err() {
         unsafe { child_setup_fail(pipes, b'R') };
     }
 
-    if unsafe { libc::chdir(c"/".as_ptr()) } < 0 {
+    if rustix::process::chdir(c"/").is_err() {
         unsafe { child_setup_fail(pipes, b'W') };
     }
 
-    if unsafe { libc::umount2(c"/.old_root".as_ptr(), libc::MNT_DETACH) } < 0 {
+    if rustix::mount::unmount(c"/.old_root", rustix::mount::UnmountFlags::DETACH).is_err() {
         unsafe { child_setup_fail(pipes, b'R') };
     }
     let _ = unsafe { libc::rmdir(c"/.old_root".as_ptr()) };
 
-    if unsafe { libc::chdir(plan.workdir.as_ptr()) } < 0 {
+    if rustix::process::chdir(&plan.workdir).is_err() {
         unsafe { child_setup_fail(pipes, b'W') };
     }
 
-    if plan.setup.mount_proc
-        && unsafe {
-            libc::mount(
-                plan.proc_fs_type.as_ptr(),
-                plan.proc_mount_target.as_ptr(),
-                plan.proc_fs_type.as_ptr(),
-                (libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV) as libc::c_ulong,
-                std::ptr::null(),
-            )
-        } < 0
-    {
+    if plan.setup.mount_proc && mount_proc(&plan.proc_fs_type, &plan.proc_mount_target).is_err() {
         unsafe { child_setup_fail(pipes, b'p') };
     }
 
-    if plan.setup_dev && unsafe { setup_dev_tmpfs() } < 0 {
+    if plan.setup_dev && setup_dev_tmpfs().is_err() {
         unsafe { child_setup_fail(pipes, b'D') };
     }
 
-    if plan.mask_proc && unsafe { mask_proc_paths() } < 0 {
+    if plan.mask_proc && mask_proc_paths().is_err() {
         unsafe { child_setup_fail(pipes, b'm') };
     }
 
@@ -865,7 +831,7 @@ unsafe fn child_exec(
         unsafe { child_setup_fail(pipes, b'B') };
     }
 
-    if unsafe { apply_rlimits(plan.max_pids, plan.max_fds, plan.max_procs) } < 0 {
+    if apply_rlimits(plan.max_pids, plan.max_fds, plan.max_procs).is_err() {
         unsafe { child_setup_fail(pipes, b'L') };
     }
 
@@ -877,28 +843,37 @@ unsafe fn child_exec(
     unsafe { child_setup_fail(pipes, b'E') };
 }
 
-unsafe fn setup_dev_tmpfs() -> libc::c_int {
+fn mount_proc(fs_type: &CString, target: &CString) -> Result<(), rustix::io::Errno> {
+    rustix::mount::mount(
+        fs_type,
+        target,
+        fs_type,
+        rustix::mount::MountFlags::NOSUID
+            | rustix::mount::MountFlags::NOEXEC
+            | rustix::mount::MountFlags::NODEV,
+        Option::<&std::ffi::CStr>::None,
+    )
+}
+
+fn setup_dev_tmpfs() -> Result<(), rustix::io::Errno> {
+    rustix::mount::mount(
+        c"tmpfs",
+        c"/dev",
+        c"tmpfs",
+        rustix::mount::MountFlags::NOSUID | rustix::mount::MountFlags::NOEXEC,
+        Some(c"mode=755,size=65536"),
+    )?;
     unsafe {
-        if libc::mount(
-            c"tmpfs".as_ptr(),
-            c"/dev".as_ptr(),
-            c"tmpfs".as_ptr(),
-            libc::MS_NOSUID | libc::MS_NOEXEC,
-            c"mode=755,size=65536".as_ptr().cast(),
-        ) < 0
-        {
-            return -1;
-        }
         create_dev_node(c"/dev/null", 1, 3, 0o666);
         create_dev_node(c"/dev/zero", 1, 5, 0o666);
         create_dev_node(c"/dev/full", 1, 7, 0o666);
         create_dev_node(c"/dev/random", 1, 8, 0o666);
         create_dev_node(c"/dev/urandom", 1, 9, 0o666);
         create_dev_node(c"/dev/tty", 5, 0, 0o666);
-        let _ = libc::mkdir(c"/dev/pts".as_ptr(), 0o755);
-        let _ = libc::mkdir(c"/dev/shm".as_ptr(), 0o1777);
     }
-    0
+    let _ = std::fs::create_dir_all("/dev/pts");
+    let _ = std::fs::create_dir_all("/dev/shm");
+    Ok(())
 }
 
 unsafe fn create_dev_node(path: &std::ffi::CStr, major: u32, minor: u32, mode: libc::mode_t) {
@@ -910,7 +885,7 @@ unsafe fn create_dev_node(path: &std::ffi::CStr, major: u32, minor: u32, mode: l
     }
 }
 
-unsafe fn mask_proc_paths() -> libc::c_int {
+fn mask_proc_paths() -> Result<(), rustix::io::Errno> {
     let targets: &[&std::ffi::CStr] = &[
         c"/proc/sys",
         c"/proc/sysrq-trigger",
@@ -921,51 +896,43 @@ unsafe fn mask_proc_paths() -> libc::c_int {
         c"/proc/timer_list",
         c"/proc/sched_debug",
     ];
-    unsafe {
-        for &target in targets {
-            let _ = libc::mount(
-                c"/dev/null".as_ptr(),
-                target.as_ptr(),
-                std::ptr::null(),
-                libc::MS_BIND | libc::MS_REC,
-                std::ptr::null(),
-            );
-        }
+    for &target in targets {
+        let _ = rustix::mount::mount_bind_recursive(c"/dev/null", target);
     }
-    0
+    Ok(())
 }
 
-unsafe fn apply_rlimits(
+fn apply_rlimits(
     _max_pids: Option<u64>,
     max_fds: Option<u64>,
     max_procs: Option<u64>,
-) -> libc::c_int {
-    unsafe {
-        if let Some(max) = max_fds {
-            let rlim = libc::rlimit {
-                rlim_cur: max,
-                rlim_max: max,
-            };
-            if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) < 0 {
-                return -1;
-            }
-        }
-        if let Some(max) = max_procs {
-            let rlim = libc::rlimit {
-                rlim_cur: max,
-                rlim_max: max,
-            };
-            if libc::setrlimit(libc::RLIMIT_NPROC, &rlim) < 0 {
-                return -1;
-            }
-        }
-        let core_rlim = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        let _ = libc::setrlimit(libc::RLIMIT_CORE, &core_rlim);
+) -> Result<(), rustix::io::Errno> {
+    if let Some(max) = max_fds {
+        rustix::process::setrlimit(
+            rustix::process::Resource::Nofile,
+            rustix::process::Rlimit {
+                current: Some(max),
+                maximum: Some(max),
+            },
+        )?;
     }
-    0
+    if let Some(max) = max_procs {
+        rustix::process::setrlimit(
+            rustix::process::Resource::Nproc,
+            rustix::process::Rlimit {
+                current: Some(max),
+                maximum: Some(max),
+            },
+        )?;
+    }
+    let _ = rustix::process::setrlimit(
+        rustix::process::Resource::Core,
+        rustix::process::Rlimit {
+            current: Some(0),
+            maximum: Some(0),
+        },
+    );
+    Ok(())
 }
 
 struct ChildStdio {
@@ -973,39 +940,37 @@ struct ChildStdio {
     stderr_fd: Option<RawFd>,
 }
 
-unsafe fn open_child_stdio(plan: &NativeLaunchPlan, pipes: &SyncPipes) -> ChildStdio {
+fn open_child_stdio(plan: &NativeLaunchPlan, pipes: &SyncPipes) -> ChildStdio {
     ChildStdio {
         stdout_fd: plan
             .stdout_path
             .as_deref()
-            .map(|path| unsafe { open_stdio_file(pipes, path) }),
+            .map(|path| open_stdio_file(pipes, path)),
         stderr_fd: plan
             .stderr_path
             .as_deref()
-            .map(|path| unsafe { open_stdio_file(pipes, path) }),
+            .map(|path| open_stdio_file(pipes, path)),
     }
 }
 
-unsafe fn open_stdio_file(pipes: &SyncPipes, path: &std::ffi::CStr) -> RawFd {
-    let fd = unsafe {
-        libc::open(
-            path.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
-            0o644,
-        )
-    };
-    if fd < 0 {
-        unsafe { child_setup_fail(pipes, b'O') };
+fn open_stdio_file(pipes: &SyncPipes, path: &std::ffi::CStr) -> RawFd {
+    use rustix::fd::IntoRawFd;
+    match rustix::fs::open(
+        path,
+        rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::APPEND,
+        rustix::fs::Mode::from_bits(0o644).expect("valid mode"),
+    ) {
+        Ok(fd) => fd.into_raw_fd(),
+        Err(_) => unsafe { child_setup_fail(pipes, b'O') },
     }
-    fd
 }
 
-unsafe fn redirect_stdio_fd(pipes: &SyncPipes, fd: RawFd, target_fd: libc::c_int) {
+fn redirect_stdio_fd(pipes: &SyncPipes, fd: RawFd, target_fd: libc::c_int) {
     if unsafe { libc::dup2(fd, target_fd) } < 0 {
-        let _ = unsafe { libc::close(fd) };
+        close_fd(fd);
         unsafe { child_setup_fail(pipes, b'O') };
     }
-    let _ = unsafe { libc::close(fd) };
+    close_fd(fd);
 }
 
 const CHILD_SETUP_EXIT_CODE: i32 = 127;
