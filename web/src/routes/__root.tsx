@@ -35,8 +35,11 @@ const PUBLIC_ROUTES = ['/login', '/setup']
 
 function hasAuth(): boolean {
   if (getToken()) return true
+  // DEV-ONLY: a build-time token grants access. Guarded by `import.meta.env.DEV`
+  // so Vite strips this branch (and the token literal) from production builds.
   if (
     typeof import.meta !== 'undefined' &&
+    import.meta.env.DEV &&
     typeof import.meta.env.VITE_DENIA_TOKEN === 'string' &&
     import.meta.env.VITE_DENIA_TOKEN.length > 0
   )

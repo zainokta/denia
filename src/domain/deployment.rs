@@ -75,6 +75,7 @@ pub struct RuntimeStartRequest {
 impl RuntimeStartRequest {
     pub fn instance_id(&self) -> RuntimeInstanceId {
         RuntimeInstanceId {
+            service_id: self.service_id,
             service_name: self.service_name.clone(),
             replica_index: self.replica_index,
         }
@@ -83,16 +84,36 @@ impl RuntimeStartRequest {
 
 /// Identity of a single running replica of a service.
 ///
-/// A service may run multiple replicas (autoscaling); each replica is keyed by
-/// its `service_name` and zero-based `replica_index`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A service may run multiple replicas (autoscaling). The *identity* of a
+/// replica is `(service_id, replica_index)` — `service_name` is carried for
+/// display/logging only and is deliberately excluded from equality and hashing,
+/// because service names are only unique within a project and would otherwise
+/// let two projects' same-named services collide in runtime state (F-3).
+#[derive(Debug, Clone)]
 pub struct RuntimeInstanceId {
+    pub service_id: Uuid,
     pub service_name: String,
     pub replica_index: u32,
 }
 
+impl PartialEq for RuntimeInstanceId {
+    fn eq(&self, other: &Self) -> bool {
+        self.service_id == other.service_id && self.replica_index == other.replica_index
+    }
+}
+
+impl Eq for RuntimeInstanceId {}
+
+impl std::hash::Hash for RuntimeInstanceId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.service_id.hash(state);
+        self.replica_index.hash(state);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStatus {
+    pub service_id: Uuid,
     pub service_name: String,
     pub deployment_id: Uuid,
     pub state: String,

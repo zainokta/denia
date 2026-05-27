@@ -139,12 +139,27 @@ fn sqlite_store_persists_local_artifacts_by_digest() {
 
 #[tokio::test]
 async fn artifact_acquirer_builds_git_source_with_buildkit() {
-    let runner = FakeCommandRunner::new(vec![CommandOutput {
-        status: 0,
-        stdout: "sha256:build123\n".to_string(),
-        stderr: String::new(),
-    }]);
-    let config = AppConfig::for_test("test-token");
+    // git clone, git checkout, then buildctl build.
+    let runner = FakeCommandRunner::new(vec![
+        CommandOutput {
+            status: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+        CommandOutput {
+            status: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+        CommandOutput {
+            status: 0,
+            stdout: "sha256:build123\n".to_string(),
+            stderr: String::new(),
+        },
+    ]);
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let mut config = AppConfig::for_test("test-token");
+    config.artifact_dir = tmp.path().to_path_buf();
     let acquirer = ArtifactAcquirer::new(config.clone());
 
     let artifact = acquirer
@@ -161,7 +176,12 @@ async fn artifact_acquirer_builds_git_source_with_buildkit() {
         .expect("artifact");
 
     assert_eq!(artifact.digest, "sha256:build123");
-    assert!(runner.commands()[0].starts_with("buildctl build"));
+    let commands = runner.commands();
+    // Build must clone the declared repo first, not consume host paths directly.
+    assert!(commands[0].starts_with("git clone"));
+    assert!(commands[0].contains("git@example.com:acme/api.git"));
+    assert!(commands[1].contains("checkout"));
+    assert!(commands[2].starts_with("buildctl build"));
 }
 
 #[tokio::test]
@@ -279,11 +299,12 @@ fn log_store_appends_and_reads_service_lines() {
 #[test]
 fn sops_secret_store_resolves_secret_paths_under_data_dir() {
     let store = SopsSecretStore::new("/var/lib/denia");
-    let path = store.secret_path(&SecretRef::new("git-main"));
+    let project_id = uuid::Uuid::parse_str("0190b3a0-0000-7000-8000-000000000000").unwrap();
+    let path = store.secret_path(project_id, &SecretRef::new("git-main"));
 
     assert_eq!(
         path.to_string_lossy(),
-        "/var/lib/denia/secrets/git-main.sops.yaml"
+        format!("/var/lib/denia/secrets/{project_id}/git-main.sops.yaml")
     );
 }
 
@@ -316,10 +337,12 @@ async fn sops_secret_store_decrypts_payload_with_runner() {
         stderr: String::new(),
     }]);
 
+    let project_id = uuid::Uuid::parse_str("0190b3a0-0000-7000-8000-000000000000").unwrap();
     let payload = store
         .decrypt(
             &runner,
             std::path::Path::new("sops"),
+            project_id,
             &SecretRef::new("registry-main"),
         )
         .await
@@ -328,7 +351,9 @@ async fn sops_secret_store_decrypts_payload_with_runner() {
     assert_eq!(payload.value, "registry-token");
     assert_eq!(
         runner.commands(),
-        vec!["sops --decrypt /var/lib/denia/secrets/registry-main.sops.yaml"]
+        vec![format!(
+            "sops --decrypt /var/lib/denia/secrets/{project_id}/registry-main.sops.yaml"
+        )]
     );
 }
 

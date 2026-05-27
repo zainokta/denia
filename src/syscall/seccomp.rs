@@ -101,66 +101,67 @@ fn build_program(syscalls: &[u32]) -> Vec<SockFilter> {
 }
 
 fn denylist() -> Vec<u32> {
-    let mut s = Vec::new();
+    // Use libc::SYS_* constants rather than hand-written numbers: the constants
+    // are correct for each target architecture, so the filter can never silently
+    // block (or miss) the wrong syscall due to a transposed number.
+    let mut s: Vec<libc::c_long> = Vec::new();
     #[cfg(target_arch = "x86_64")]
     {
         s.extend_from_slice(&[
-            101, // ptrace
-            139, // sethostname (redundant with UTS ns, defense-in-depth)
-            156, // setsid
-            177, // mount
-            178, // umount2
-            175, // init_module
-            176, // delete_module
-            246, // kexec_load
-            298, // kexec_file_load
-            133, // mknod
-            259, // mknodat
-            154, // uselib
-            180, // swapon
-            167, // swapoff
-            169, // nfsservctl
-            206, // putpmsg (unused, attack surface reduction)
-            304, // kcmp
-            313, // finit_module
-            321, // bpf
-            401, // open_tree
-            402, // move_mount
-            403, // fsopen
-            404, // fsconfig
-            405, // fsmount
-            312, // memfd_create
+            libc::SYS_ptrace,
+            libc::SYS_sethostname, // redundant with UTS ns, defense-in-depth
+            libc::SYS_setsid,
+            libc::SYS_mount,
+            libc::SYS_umount2,
+            libc::SYS_init_module,
+            libc::SYS_delete_module,
+            libc::SYS_kexec_load,
+            libc::SYS_kexec_file_load,
+            libc::SYS_mknod,
+            libc::SYS_mknodat,
+            libc::SYS_uselib,
+            libc::SYS_swapon,
+            libc::SYS_swapoff,
+            libc::SYS_nfsservctl,
+            libc::SYS_putpmsg, // unused, attack surface reduction
+            libc::SYS_kcmp,
+            libc::SYS_finit_module,
+            libc::SYS_bpf,
+            libc::SYS_open_tree,
+            libc::SYS_move_mount,
+            libc::SYS_fsopen,
+            libc::SYS_fsconfig,
+            libc::SYS_fsmount,
+            libc::SYS_memfd_create,
         ]);
     }
     #[cfg(target_arch = "aarch64")]
     {
         s.extend_from_slice(&[
-            117, // ptrace
-            160, // sethostname
-            157, // setsid
-            40,  // mount
-            39,  // umount2
-            105, // init_module
-            106, // delete_module
-            107, // kexec_load
-            294, // kexec_file_load
-            34,  // mknodat
-            224, // uselib (not present on all aarch64 kernels, harmless if absent)
-            225, // swapon
-            226, // swapoff
-            180, // nfsservctl
-            282, // kcmp
-            273, // finit_module
-            280, // bpf
-            43,  // open_tree
-            429, // move_mount
-            430, // fsopen
-            431, // fsconfig
-            432, // fsmount
-            279, // memfd_create
+            libc::SYS_ptrace,
+            libc::SYS_sethostname,
+            libc::SYS_setsid,
+            libc::SYS_mount,
+            libc::SYS_umount2,
+            libc::SYS_init_module,
+            libc::SYS_delete_module,
+            libc::SYS_kexec_load,
+            libc::SYS_kexec_file_load,
+            libc::SYS_mknodat,
+            libc::SYS_swapon,
+            libc::SYS_swapoff,
+            libc::SYS_kcmp,
+            libc::SYS_finit_module,
+            libc::SYS_bpf,
+            libc::SYS_open_tree,
+            libc::SYS_move_mount,
+            libc::SYS_fsopen,
+            libc::SYS_fsconfig,
+            libc::SYS_fsmount,
+            libc::SYS_memfd_create,
         ]);
     }
-    s
+    s.into_iter().map(|nr| nr as u32).collect()
 }
 
 #[cfg(test)]
@@ -186,6 +187,23 @@ mod tests {
     fn denylist_is_non_empty_on_supported_arch() {
         let syscalls = denylist();
         assert!(!syscalls.is_empty());
+    }
+
+    #[test]
+    fn denylist_blocks_mount_family_with_correct_numbers() {
+        let syscalls = denylist();
+        for nr in [
+            libc::SYS_mount,
+            libc::SYS_umount2,
+            libc::SYS_ptrace,
+            libc::SYS_bpf,
+            libc::SYS_init_module,
+        ] {
+            assert!(
+                syscalls.contains(&(nr as u32)),
+                "denylist missing syscall {nr}"
+            );
+        }
     }
 
     #[test]

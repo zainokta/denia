@@ -1,6 +1,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -25,6 +26,7 @@ impl LogStore {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(0o600)
             .open(self.dir.join(format!("{service_name}.log")))?;
         file.write_all(line.as_bytes())
     }

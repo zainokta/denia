@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::OpenOptions,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -311,7 +311,7 @@ impl Runtime for LinuxRuntime {
         let plan = self.plan(&request)?;
         self.prepare(&plan, &request)?;
         let status_socket_path = plan.socket_path.clone();
-        let log_path = match self.service_log_path(&request.service_name) {
+        let log_path = match self.service_log_path(request.service_id) {
             Ok(path) => path,
             Err(error) => {
                 let _ = self.cleanup(&plan);
@@ -361,6 +361,7 @@ impl Runtime for LinuxRuntime {
         }
 
         Ok(RuntimeStatus {
+            service_id: request.service_id,
             service_name: request.service_name,
             deployment_id: request.deployment_id,
             state: "running".to_string(),
@@ -517,6 +518,7 @@ impl Runtime for LinuxRuntime {
             .map(|(instance, tracked)| {
                 let TrackedProcess::NativePid(pid) = tracked.process;
                 RuntimeStatus {
+                    service_id: instance.service_id,
                     service_name: instance.service_name.clone(),
                     deployment_id: tracked.plan.deployment_id,
                     state: "running".to_string(),
@@ -555,10 +557,17 @@ impl LinuxRuntime {
         Ok(())
     }
 
-    fn service_log_path(&self, service_name: &str) -> std::io::Result<PathBuf> {
+    fn service_log_path(&self, service_id: uuid::Uuid) -> std::io::Result<PathBuf> {
         std::fs::create_dir_all(&self.log_dir)?;
-        let path = self.log_dir.join(format!("{service_name}.log"));
-        OpenOptions::new().create(true).append(true).open(&path)?;
+        // Log files are named by service_id (globally unique), not service.name
+        // (unique only within a project), to prevent cross-project log mixing and
+        // disclosure (F-3).
+        let path = self.log_dir.join(format!("{service_id}.log"));
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)?;
         Ok(path)
     }
 }

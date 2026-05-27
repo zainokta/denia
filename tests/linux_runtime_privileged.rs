@@ -416,6 +416,7 @@ async fn linux_runtime_start_uses_native_namespace_and_cgroup_gate() {
     wait_for_path(&status.socket_path);
     runtime
         .stop(&RuntimeInstanceId {
+            service_id: status.service_id,
             service_name: "true-service".to_string(),
             replica_index: 0,
         })

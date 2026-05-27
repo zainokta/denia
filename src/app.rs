@@ -395,5 +395,11 @@ async fn security_headers(request: Request, next: Next) -> Response {
         header::HeaderName::from_static("cross-origin-resource-policy"),
         header::HeaderValue::from_static("same-origin"),
     );
+    headers.insert(
+        header::HeaderName::from_static("permissions-policy"),
+        header::HeaderValue::from_static(
+            "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()",
+        ),
+    );
     response
 }

@@ -4,12 +4,13 @@ use argon2::{
 };
 use rand::RngExt;
 use sha2::{Digest, Sha256};
+use std::sync::LazyLock;
 use thiserror::Error;
 
 use crate::state::StateError;
 
 const ARGON2_MEMORY: u32 = 47104;
-const ARGON2_ITERATIONS: u32 = 1;
+const ARGON2_ITERATIONS: u32 = 3;
 const ARGON2_PARALLELISM: u32 = 1;
 
 #[derive(Debug, Error)]
@@ -44,6 +45,18 @@ pub fn hash_password(password: &str) -> Result<String, AuthError> {
         .map_err(|_| AuthError::InvalidCredentials)?
         .to_string();
     Ok(format!("argon2id:{}", hash))
+}
+
+/// Precomputed Argon2id hash used to equalize login timing when a username does
+/// not exist, preventing user enumeration via response-time side channel.
+static DUMMY_HASH: LazyLock<String> =
+    LazyLock::new(|| hash_password("denia-timing-equalizer").expect("dummy hash"));
+
+/// Run an Argon2id verification against a constant hash and discard the result.
+/// Callers invoke this on the "user not found" path so its timing matches the
+/// "user found, wrong password" path.
+pub fn verify_dummy_password() {
+    let _ = verify_password(&DUMMY_HASH, "wrong-password");
 }
 
 pub fn verify_password(hash: &str, password: &str) -> bool {

@@ -14,6 +14,10 @@ use crate::repo::error::RepoError;
 use crate::repo::sqlite::pool::SqlitePool;
 use crate::state::{SqliteStore, StateError};
 
+/// Absolute maximum lifetime of a session regardless of activity. The sliding
+/// `expires_at` window can never push a session past `created_at + this`.
+const ABSOLUTE_SESSION_HOURS: i64 = 24 * 7;
+
 pub(super) fn create_user_q(
     conn: &Connection,
     username: &str,
@@ -145,7 +149,12 @@ pub(super) fn verify_login_q(
                 Err(RepoError::InvalidCredentials)
             }
         }
-        None => Err(RepoError::InvalidCredentials),
+        None => {
+            // Equalize timing with the wrong-password path to prevent username
+            // enumeration via response-time side channel.
+            crate::auth::verify_dummy_password();
+            Err(RepoError::InvalidCredentials)
+        }
     }
 }
 
@@ -156,10 +165,16 @@ pub(super) fn create_session_q(
 ) -> Result<Session, RepoError> {
     let token = crate::auth::generate_token();
     let token_hash = crate::auth::hash_token(&token);
-    let expires_at = Utc::now() + chrono::TimeDelta::hours(ttl_hours);
+    let now = Utc::now();
+    let expires_at = now + chrono::TimeDelta::hours(ttl_hours);
     conn.execute(
-        "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?1, ?2, ?3)",
-        params![&token_hash, user_id.to_string(), expires_at.to_rfc3339()],
+        "INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            &token_hash,
+            user_id.to_string(),
+            expires_at.to_rfc3339(),
+            now.to_rfc3339()
+        ],
     )?;
     Ok(Session {
         token,
@@ -283,18 +298,33 @@ pub(super) fn user_for_session_q(
     let row = {
         let conn = pool.connection()?;
         conn.query_row(
-            "SELECT user_id, expires_at FROM sessions WHERE token_hash = ?1",
+            "SELECT user_id, expires_at, created_at FROM sessions WHERE token_hash = ?1",
             params![token_hash],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
         )
         .optional()?
     };
-    let (user_id_str, expires_at_str) = match row {
+    let (user_id_str, expires_at_str, created_at_str) = match row {
         Some(r) => r,
         None => return Ok(None),
     };
     let expires_at: chrono::DateTime<Utc> = expires_at_str.parse()?;
-    if Utc::now() > expires_at {
+    let now = Utc::now();
+    // Reject if the sliding window lapsed OR the absolute lifetime cap is hit.
+    let absolute_expired = match created_at_str {
+        Some(created) => {
+            let created_at: chrono::DateTime<Utc> = created.parse()?;
+            now > created_at + chrono::TimeDelta::hours(ABSOLUTE_SESSION_HOURS)
+        }
+        None => false,
+    };
+    if now > expires_at || absolute_expired {
         let conn = pool.connection()?;
         conn.execute(
             "DELETE FROM sessions WHERE token_hash = ?1",
@@ -312,7 +342,26 @@ pub(super) fn touch_session_q(
     token_hash: &str,
     ttl_hours: i64,
 ) -> Result<bool, RepoError> {
-    let expires_at = Utc::now() + chrono::TimeDelta::hours(ttl_hours);
+    // Clamp the refreshed sliding window to the session's absolute lifetime so
+    // continual activity can't extend a session indefinitely.
+    let now = Utc::now();
+    let sliding = now + chrono::TimeDelta::hours(ttl_hours);
+    let created_at: Option<String> = conn
+        .query_row(
+            "SELECT created_at FROM sessions WHERE token_hash = ?1",
+            params![token_hash],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let expires_at = match created_at {
+        Some(created) => {
+            let created_at: chrono::DateTime<Utc> = created.parse()?;
+            let absolute = created_at + chrono::TimeDelta::hours(ABSOLUTE_SESSION_HOURS);
+            sliding.min(absolute)
+        }
+        None => sliding,
+    };
     let affected = conn.execute(
         "UPDATE sessions SET expires_at = ?1 WHERE token_hash = ?2",
         params![expires_at.to_rfc3339(), token_hash],

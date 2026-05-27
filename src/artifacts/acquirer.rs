@@ -265,9 +265,71 @@ impl ArtifactAcquirer {
         else {
             unreachable!("git acquisition requires a buildkit source");
         };
-        let _ = (repo_url, git_ref);
-        let context = format!("context={context_path}");
-        let dockerfile = format!("dockerfile={dockerfile_path}");
+
+        // Clone the *declared* repo/ref into a Denia-owned checkout, then resolve
+        // the build paths inside that checkout. This binds the build to the
+        // declared git source and stops BuildKit from consuming arbitrary
+        // host-local paths as context/dockerfile (F-1).
+        let checkout = self
+            .config
+            .artifact_dir
+            .join("git-checkouts")
+            .join(uuid::Uuid::now_v7().to_string());
+        std::fs::create_dir_all(&checkout)?;
+        let checkout_str = checkout.to_string_lossy().into_owned();
+        let git = self.config.git_binary.to_string_lossy().into_owned();
+
+        let build_result = self
+            .build_from_git_checkout(
+                runner,
+                &git,
+                &checkout,
+                &checkout_str,
+                repo_url,
+                git_ref,
+                context_path,
+                dockerfile_path,
+            )
+            .await;
+        // Always clean up the checkout, success or failure.
+        let _ = std::fs::remove_dir_all(&checkout);
+        build_result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn build_from_git_checkout(
+        &self,
+        runner: &dyn CommandRunner,
+        git: &str,
+        checkout: &std::path::Path,
+        checkout_str: &str,
+        repo_url: &str,
+        git_ref: &str,
+        context_path: &str,
+        dockerfile_path: &str,
+    ) -> Result<String, ArtifactAcquireError> {
+        runner
+            .run(
+                git,
+                &[
+                    "clone",
+                    "--quiet",
+                    "--no-checkout",
+                    "--",
+                    repo_url,
+                    checkout_str,
+                ],
+            )
+            .await?;
+        runner
+            .run(git, &["-C", checkout_str, "checkout", "--quiet", git_ref])
+            .await?;
+
+        let context_dir = confine_under(checkout, context_path)?;
+        let dockerfile_dir = confine_under(checkout, dockerfile_path)?;
+
+        let context = format!("context={}", context_dir.to_string_lossy());
+        let dockerfile = format!("dockerfile={}", dockerfile_dir.to_string_lossy());
         let output = format!(
             "type=oci,dest={}",
             self.config.artifact_dir.to_string_lossy()
@@ -324,6 +386,45 @@ fn rootfs_bundle_from_oci_config(
         env: oci_spec.env,
         workdir: oci_spec.workdir,
     })
+}
+
+/// Resolve `rel` under `root`, refusing anything that could escape the checkout.
+/// `rel` is already validated at the API boundary (non-empty, relative, no
+/// `..`); this re-checks lexically and, when the target exists (post-clone),
+/// canonicalizes to also defeat in-repo symlink escapes.
+fn confine_under(
+    root: &std::path::Path,
+    rel: &str,
+) -> Result<std::path::PathBuf, ArtifactAcquireError> {
+    use std::path::Component;
+    let rel_path = std::path::Path::new(rel);
+    let escapes = rel_path.is_absolute()
+        || rel_path.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        });
+    if escapes {
+        return Err(git_path_escape(rel));
+    }
+    let joined = root.join(rel_path);
+    if joined.exists() {
+        let canonical_root = std::fs::canonicalize(root)?;
+        let canonical = std::fs::canonicalize(&joined)?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err(git_path_escape(rel));
+        }
+        return Ok(canonical);
+    }
+    Ok(joined)
+}
+
+fn git_path_escape(rel: &str) -> ArtifactAcquireError {
+    ArtifactAcquireError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("git build path escapes checkout: {rel}"),
+    ))
 }
 
 fn short_digest(input: &str) -> String {

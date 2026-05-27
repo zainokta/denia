@@ -7,6 +7,9 @@ use crate::domain::error::DomainError;
 use crate::domain::project::Project;
 use crate::secrets::SecretRef;
 
+/// Marker substituted for env values when redacting for lower-privilege callers.
+pub const REDACTED_ENV_VALUE: &str = "***redacted***";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceLimits {
     pub cpu_millis: u32,
@@ -109,6 +112,22 @@ impl GitSource {
     }
 }
 
+/// Service names are used to derive filesystem paths (logs, sockets) and route
+/// keys, so restrict them to a safe charset and reject empties. This is the
+/// authoritative check enforced at API/storage boundaries.
+pub fn validate_service_name(name: &str) -> Result<(), DomainError> {
+    if name.trim().is_empty() {
+        return Err(DomainError::EmptyName);
+    }
+    let safe = name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
+    if !safe {
+        return Err(DomainError::InvalidName(name.to_string()));
+    }
+    Ok(())
+}
+
 fn validate_build_path(path: &str, field: &str) -> Result<(), DomainError> {
     if path.is_empty() {
         return Err(DomainError::InvalidGitBuildPath {
@@ -206,27 +225,7 @@ impl ServiceConfig {
         env: Vec<(String, String)>,
     ) -> Result<Self, DomainError> {
         let name = name.into();
-        if name.trim().is_empty() {
-            return Err(DomainError::EmptyName);
-        }
-        if domains.is_empty() {
-            return Err(DomainError::MissingDomain);
-        }
-        for domain in &domains {
-            if let Err(e) = crate::verification::validate_hostname(domain) {
-                return Err(DomainError::InvalidHostname(format!(
-                    "domain '{domain}': {e}"
-                )));
-            }
-        }
-        if internal_port == 0 {
-            return Err(DomainError::InvalidPort);
-        }
-        health_check.validate()?;
-        if let ServiceSource::Git(git) = &source {
-            git.validate()?;
-        }
-        Ok(Self {
+        let config = Self {
             id: Uuid::now_v7(),
             project_id,
             name,
@@ -238,7 +237,46 @@ impl ServiceConfig {
             env,
             tls_enabled: false,
             autoscale: None,
-        })
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate every invariant of a service config. Safe to call on a config
+    /// that was deserialized at an API boundary (which bypasses `new`).
+    pub fn validate(&self) -> Result<(), DomainError> {
+        validate_service_name(&self.name)?;
+        if self.domains.is_empty() {
+            return Err(DomainError::MissingDomain);
+        }
+        for domain in &self.domains {
+            if let Err(e) = crate::verification::validate_hostname(domain) {
+                return Err(DomainError::InvalidHostname(format!(
+                    "domain '{domain}': {e}"
+                )));
+            }
+        }
+        if self.internal_port == 0 {
+            return Err(DomainError::InvalidPort);
+        }
+        self.health_check.validate()?;
+        match &self.source {
+            ServiceSource::Git(git) => git.validate()?,
+            ServiceSource::ExternalImage(img) => img.validate()?,
+        }
+        if let Some(policy) = &self.autoscale {
+            policy.validate()?;
+        }
+        Ok(())
+    }
+
+    /// Replace every env *value* with a redaction marker, keeping keys so the
+    /// UI can still show which variables exist. Used before returning configs to
+    /// project members below Operator role (F-7).
+    pub fn redact_env(&mut self) {
+        for (_key, value) in self.env.iter_mut() {
+            *value = REDACTED_ENV_VALUE.to_string();
+        }
     }
 
     pub fn effective_env(&self, project: &Project) -> BTreeMap<String, String> {
@@ -290,6 +328,55 @@ mod tests {
         );
         let cfg: ServiceConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg.id, id);
+    }
+
+    #[test]
+    fn validate_rejects_unsafe_service_names() {
+        assert_eq!(
+            validate_service_name("../traefik").unwrap_err(),
+            DomainError::InvalidName("../traefik".into())
+        );
+        assert_eq!(
+            validate_service_name("web/x").unwrap_err(),
+            DomainError::InvalidName("web/x".into())
+        );
+        assert_eq!(
+            validate_service_name("").unwrap_err(),
+            DomainError::EmptyName
+        );
+        assert!(validate_service_name("web-1_api").is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_absolute_and_parent_git_build_paths() {
+        let mk = |ctx: &str, dockerfile: &str| ServiceConfig {
+            id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            name: "web".into(),
+            domains: vec!["x.example.com".into()],
+            source: ServiceSource::Git(GitSource {
+                repo_url: "https://example.com/acme/api.git".into(),
+                git_ref: "main".into(),
+                dockerfile_path: dockerfile.into(),
+                context_path: ctx.into(),
+                credential: SecretRef::new("deploy-key"),
+            }),
+            internal_port: 80,
+            health_check: HealthCheck::new("/health", 5),
+            resource_limits: None,
+            env: Vec::new(),
+            tls_enabled: false,
+            autoscale: None,
+        };
+        assert!(matches!(
+            mk("/var/lib/denia", "Dockerfile").validate().unwrap_err(),
+            DomainError::InvalidGitBuildPath { .. }
+        ));
+        assert!(matches!(
+            mk(".", "../../etc").validate().unwrap_err(),
+            DomainError::InvalidGitBuildPath { .. }
+        ));
+        assert!(mk(".", "Dockerfile").validate().is_ok());
     }
 
     #[test]

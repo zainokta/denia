@@ -194,7 +194,7 @@ where
             let payload = match &registry.credential_ref {
                 Some(secret_ref) => Some(
                     secret_store
-                        .decrypt(runner, sops_binary, secret_ref)
+                        .decrypt(runner, sops_binary, registry.project_id, secret_ref)
                         .await?,
                 ),
                 None => None,
@@ -215,7 +215,7 @@ where
             let auth = match &source.credential {
                 Some(secret_ref) => {
                     let payload = secret_store
-                        .decrypt(runner, sops_binary, secret_ref)
+                        .decrypt(runner, sops_binary, service.project_id, secret_ref)
                         .await?;
                     crate::oci::credentials::resolve_registry_auth(
                         crate::domain::RegistryAuthKind::Basic,
@@ -277,18 +277,20 @@ where
 
         self.runtime
             .stop(&RuntimeInstanceId {
+                service_id: service.id,
                 service_name: service.name.clone(),
                 replica_index: 0,
             })
             .await?;
         if let Some(routing) = &self.routing {
-            routing.manager.deactivate(&service.name).await?;
+            let route_key = service.id.to_string();
+            routing.manager.deactivate(&route_key).await?;
             let yaml = {
                 let mut routes = routing
                     .routes
                     .lock()
                     .map_err(|_| DeployError::BridgeLockPoisoned)?;
-                routes.remove(&service.name);
+                routes.remove(&route_key);
                 render_file_provider_config(
                     &routes.values().cloned().collect::<Vec<_>>(),
                     &routing.ingress_options,
@@ -316,11 +318,15 @@ where
         let Some(routing) = &self.routing else {
             return Ok(());
         };
+        // Key bridge/route state by service_id, not service.name — names are only
+        // unique within a project, so two projects' same-named services would
+        // otherwise share runtime/ingress state (F-3).
+        let route_key = service.id.to_string();
         let bridge_target = routing
             .bridge
             .lock()
             .map_err(|_| DeployError::BridgeLockPoisoned)?
-            .assign(&service.name, socket_path.to_path_buf())
+            .assign(&route_key, socket_path.to_path_buf())
             .ok_or(DeployError::BridgePortExhausted)?;
         routing.manager.activate(bridge_target.clone()).await?;
 
@@ -337,7 +343,7 @@ where
             .lock()
             .map_err(|_| DeployError::BridgeLockPoisoned)?;
         routes.insert(
-            service.name.clone(),
+            route_key,
             RouteSpec {
                 route_key: format!("svc-{}", service.id),
                 service_name: service.name.clone(),

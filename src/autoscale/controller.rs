@@ -219,9 +219,7 @@ impl Controller {
         let running = self.runtime.list_running().await.unwrap_or_default();
 
         for status in &running {
-            let managed = services
-                .iter()
-                .find(|m| m.service_name == status.service_name);
+            let managed = services.iter().find(|m| m.service_id == status.service_id);
             // ADOPT only when the service is still managed, its deployment
             // matches, AND the ledger has budget. Otherwise (unknown service,
             // stale deployment, or no budget) the workload is an orphan.
@@ -238,10 +236,10 @@ impl Controller {
                     );
                     self.registry.set_state(id, ReplicaState::Healthy);
                     self.bridge
-                        .add_replica(&ms.service_name, id, status.socket_path.clone())
+                        .add_replica(&ms.service_id.to_string(), id, status.socket_path.clone())
                         .await;
                     self.bridge
-                        .set_replica_healthy(&ms.service_name, id, true)
+                        .set_replica_healthy(&ms.service_id.to_string(), id, true)
                         .await;
                     events.push(AutoscaleEvent::Adopted {
                         service: ms.service_name.clone(),
@@ -254,6 +252,7 @@ impl Controller {
 
             if !adopt {
                 let instance = RuntimeInstanceId {
+                    service_id: status.service_id,
                     service_name: status.service_name.clone(),
                     replica_index: status.replica_index,
                 };
@@ -351,6 +350,7 @@ impl Controller {
                 let total = self.registry.replica_count(ms.service_id) as u32;
                 let (old_id, old_index) = old[0];
                 let instance = RuntimeInstanceId {
+                    service_id: ms.service_id,
                     service_name: ms.service_name.clone(),
                     replica_index: old_index,
                 };
@@ -370,7 +370,7 @@ impl Controller {
                     {
                         Ok(_) => {
                             let _ = drain_replica(
-                                &ms.service_name,
+                                &ms.service_id.to_string(),
                                 old_id,
                                 &instance,
                                 &ms.limits,
@@ -403,7 +403,7 @@ impl Controller {
                     // Multiple replicas: drain-then-launch (maxUnavailable=1, no
                     // surge) so the rollout stays within the resource budget.
                     let _ = drain_replica(
-                        &ms.service_name,
+                        &ms.service_id.to_string(),
                         old_id,
                         &instance,
                         &ms.limits,
@@ -479,10 +479,11 @@ impl Controller {
                 // activator wakes it on the next request. Memory is scale-up
                 // only, so it must not block scale-to-zero.
                 if ms.policy.min_replicas == 0 {
-                    let idle_secs = match self.bridge.last_activity(&ms.service_name).await {
-                        Some(t) => Instant::now().saturating_duration_since(t).as_secs(),
-                        None => u64::MAX,
-                    };
+                    let idle_secs =
+                        match self.bridge.last_activity(&ms.service_id.to_string()).await {
+                            Some(t) => Instant::now().saturating_duration_since(t).as_secs(),
+                            None => u64::MAX,
+                        };
                     let metrics_low = u.avg_cpu_pct < ms.policy.target_cpu_pct as u32;
                     if idle_secs > ms.policy.idle_timeout_s as u64 && metrics_low {
                         let replicas: Vec<(Uuid, u32)> = self
@@ -493,11 +494,12 @@ impl Controller {
                             .collect();
                         for (replica_id, index) in replicas {
                             let instance = RuntimeInstanceId {
+                                service_id: ms.service_id,
                                 service_name: ms.service_name.clone(),
                                 replica_index: index,
                             };
                             let _ = drain_replica(
-                                &ms.service_name,
+                                &ms.service_id.to_string(),
                                 replica_id,
                                 &instance,
                                 &ms.limits,
@@ -586,11 +588,12 @@ impl Controller {
                     break;
                 };
                 let instance = RuntimeInstanceId {
+                    service_id: ms.service_id,
                     service_name: ms.service_name.clone(),
                     replica_index: replica.index,
                 };
                 match drain_replica(
-                    &ms.service_name,
+                    &ms.service_id.to_string(),
                     replica.id,
                     &instance,
                     &ms.limits,
@@ -807,7 +810,8 @@ mod tests {
         )
     }
 
-    /// In-memory [`ServiceCatalog`] backed by a name→[`ManagedService`] map.
+    /// In-memory [`ServiceCatalog`] backed by an id→[`ManagedService`] map
+    /// (keyed by `service_id.to_string()`, matching production identity, F-3).
     #[derive(Default)]
     struct FakeCatalog {
         services: HashMap<String, ManagedService>,
@@ -816,14 +820,14 @@ mod tests {
     impl FakeCatalog {
         fn with(ms: ManagedService) -> Self {
             let mut services = HashMap::new();
-            services.insert(ms.service_name.clone(), ms);
+            services.insert(ms.service_id.to_string(), ms);
             Self { services }
         }
     }
 
     impl ServiceCatalog for FakeCatalog {
-        fn resolve(&self, service_name: &str) -> Option<ManagedService> {
-            self.services.get(service_name).cloned()
+        fn resolve(&self, service_key: &str) -> Option<ManagedService> {
+            self.services.get(service_key).cloned()
         }
 
         fn all(&self) -> Vec<ManagedService> {
@@ -1145,7 +1149,9 @@ mod tests {
 
         // Backdate activity past idle_timeout_s (600s).
         let idle = std::time::Instant::now() - Duration::from_secs(700);
-        ctrl.bridge.set_last_activity(&ms.service_name, idle).await;
+        ctrl.bridge
+            .set_last_activity(&ms.service_id.to_string(), idle)
+            .await;
 
         let events = ctrl.tick(std::slice::from_ref(&ms), 1000).await;
 
@@ -1174,7 +1180,7 @@ mod tests {
 
         // Recent activity: not idle.
         ctrl.bridge
-            .set_last_activity(&ms.service_name, std::time::Instant::now())
+            .set_last_activity(&ms.service_id.to_string(), std::time::Instant::now())
             .await;
 
         let events = ctrl.tick(std::slice::from_ref(&ms), 1000).await;
@@ -1203,7 +1209,9 @@ mod tests {
 
         // Idle by activity, but metrics are high → must not scale to zero.
         let idle = std::time::Instant::now() - Duration::from_secs(700);
-        ctrl.bridge.set_last_activity(&ms.service_name, idle).await;
+        ctrl.bridge
+            .set_last_activity(&ms.service_id.to_string(), idle)
+            .await;
 
         let events = ctrl.tick(std::slice::from_ref(&ms), 1000).await;
 
@@ -1264,11 +1272,13 @@ mod tests {
             Arc::new(FakeCatalog::with(ms.clone())),
         );
 
-        ctrl.activate_one("web").await.expect("activation ok");
+        ctrl.activate_one(&svc.to_string())
+            .await
+            .expect("activation ok");
 
         assert_eq!(ctrl.registry.replica_count(svc), 1);
         assert_eq!(ctrl.registry.healthy_count(svc), 1);
-        assert_eq!(ctrl.bridge.healthy_count("web").await, 1);
+        assert_eq!(ctrl.bridge.healthy_count(&svc.to_string()).await, 1);
     }
 
     #[tokio::test]
@@ -1289,7 +1299,7 @@ mod tests {
         );
 
         let err = ctrl
-            .activate_one("web")
+            .activate_one(&svc.to_string())
             .await
             .expect_err("capacity should deny");
         match err {
@@ -1322,7 +1332,9 @@ mod tests {
         assert_eq!(ctrl.registry.replica_count(svc), 1);
         assert_eq!(runtime.started_requests().len(), 1);
 
-        ctrl.activate_one("web").await.expect("activation ok");
+        ctrl.activate_one(&svc.to_string())
+            .await
+            .expect("activation ok");
 
         // No second replica launched: count and runtime start count both unchanged.
         assert_eq!(ctrl.registry.replica_count(svc), 1);
@@ -1354,6 +1366,7 @@ mod tests {
     /// reports it, simulating a replica that survived a control-plane restart.
     async fn prestart(
         runtime: &FakeRuntime,
+        service_id: Uuid,
         service_name: &str,
         deployment_id: Uuid,
         replica_index: u32,
@@ -1362,7 +1375,7 @@ mod tests {
         runtime
             .start(RuntimeStartRequest {
                 service_name: service_name.to_string(),
-                service_id: Uuid::now_v7(),
+                service_id,
                 deployment_id,
                 artifact: artifact(),
                 internal_port: 8080,
@@ -1389,11 +1402,11 @@ mod tests {
 
         let runtime = Arc::new(FakeRuntime::default());
         // One replica at the active deployment -> ADOPT.
-        prestart(&runtime, "web", d_active, 0).await;
+        prestart(&runtime, svc, "web", d_active, 0).await;
         // One replica at a stale deployment -> ORPHAN (stop).
-        prestart(&runtime, "web", d_old, 1).await;
+        prestart(&runtime, svc, "web", d_old, 1).await;
         // One replica for an unknown service -> ORPHAN (stop).
-        prestart(&runtime, "ghost", d_active, 0).await;
+        prestart(&runtime, Uuid::now_v7(), "ghost", d_active, 0).await;
 
         let mut ctrl = controller_full(
             ledger(4000, 4 << 30),
@@ -1414,7 +1427,7 @@ mod tests {
             .find(|r| r.index == 0 && r.deployment_id == d_active)
             .expect("adopted replica present");
         assert_eq!(adopted.state, ReplicaState::Healthy);
-        assert_eq!(ctrl.bridge.healthy_count("web").await, 1);
+        assert_eq!(ctrl.bridge.healthy_count(&svc.to_string()).await, 1);
         assert!(events.contains(&AutoscaleEvent::Adopted {
             service: "web".to_string(),
             replica_index: 0,
@@ -1574,10 +1587,13 @@ mod tests {
         );
 
         let shared = SharedController(Arc::new(tokio::sync::Mutex::new(ctrl)));
-        shared.activate("web").await.expect("activation ok");
+        shared
+            .activate(&svc.to_string())
+            .await
+            .expect("activation ok");
 
         let guard = shared.0.lock().await;
         assert_eq!(guard.registry.replica_count(svc), 1);
-        assert_eq!(guard.bridge.healthy_count("web").await, 1);
+        assert_eq!(guard.bridge.healthy_count(&svc.to_string()).await, 1);
     }
 }

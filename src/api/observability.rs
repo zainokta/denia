@@ -116,5 +116,6 @@ async fn list_service_requests(
         return Err(ApiError::NotFound("service not found".to_string()));
     };
     ensure_role(&state, &principal, service.project_id, Role::Operator)?;
-    Ok(Json(state.access_log.recent(&service.name)))
+    // Access logs are keyed by service_id (the bridge identity), not name (F-3).
+    Ok(Json(state.access_log.recent(&service.id.to_string())))
 }

@@ -63,13 +63,16 @@ impl RepoServiceCatalog {
 }
 
 impl ServiceCatalog for RepoServiceCatalog {
-    fn resolve(&self, service_name: &str) -> Option<ManagedService> {
+    fn resolve(&self, service_key: &str) -> Option<ManagedService> {
+        // The bridge identity is the service_id (globally unique), not the name
+        // (project-scoped) — see F-3. Resolve by parsed id.
+        let service_id = uuid::Uuid::parse_str(service_key).ok()?;
         let svc = self
             .services
             .list_services()
             .ok()?
             .into_iter()
-            .find(|s| s.name == service_name)?;
+            .find(|s| s.id == service_id)?;
         self.build(&svc)
     }
 
@@ -224,14 +227,15 @@ mod tests {
     }
 
     #[test]
-    fn catalog_resolve_by_name() {
+    fn catalog_resolve_by_id() {
         let f = fixture();
         let svc = service(f.project_id, "web", Some(policy()));
         f.services.put_service(svc.clone()).unwrap();
         promote_with_artifact(&f, svc.id, "sha256:cc");
 
-        let ms = f.catalog.resolve("web").expect("resolved");
+        let ms = f.catalog.resolve(&svc.id.to_string()).expect("resolved");
         assert_eq!(ms.service_id, svc.id);
-        assert!(f.catalog.resolve("missing").is_none());
+        assert!(f.catalog.resolve(&Uuid::now_v7().to_string()).is_none());
+        assert!(f.catalog.resolve("not-a-uuid").is_none());
     }
 }
