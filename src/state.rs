@@ -33,6 +33,8 @@ pub enum StateError {
     RegistryNotFound,
     #[error("registry is referenced by one or more services")]
     RegistryInUse,
+    #[error("admin already initialized")]
+    AdminAlreadyInitialized,
 }
 
 impl From<RepoError> for StateError {
@@ -50,6 +52,7 @@ impl From<RepoError> for StateError {
             RepoError::InvalidStatus(s) => StateError::InvalidStatus(s),
             RepoError::RegistryNotFound => StateError::RegistryNotFound,
             RepoError::RegistryInUse => StateError::RegistryInUse,
+            RepoError::AdminAlreadyInitialized => StateError::AdminAlreadyInitialized,
         }
     }
 }
@@ -144,10 +147,10 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn migrate_advances_to_version_6() {
+    fn migrate_advances_to_version_7() {
         let store = SqliteStore::open_in_memory().unwrap();
         store.migrate().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 6);
+        assert_eq!(store.schema_version().unwrap(), 7);
     }
 
     #[test]

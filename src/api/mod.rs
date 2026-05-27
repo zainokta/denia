@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod bootstrap;
 pub mod credentials;
 pub mod deployments;
 pub mod domains;

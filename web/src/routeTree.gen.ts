@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as SetupRouteImport } from './routes/setup'
 import { Route as ObservabilityRouteImport } from './routes/observability'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as IngressRouteImport } from './routes/ingress'
@@ -22,6 +23,11 @@ import { Route as ServicesServiceIdRouteImport } from './routes/services/$servic
 import { Route as ProjectsProjectIdRouteImport } from './routes/projects/$projectId'
 import { Route as JobsJobIdRouteImport } from './routes/jobs/$jobId'
 
+const SetupRoute = SetupRouteImport.update({
+  id: '/setup',
+  path: '/setup',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ObservabilityRoute = ObservabilityRouteImport.update({
   id: '/observability',
   path: '/observability',
@@ -88,6 +94,7 @@ export interface FileRoutesByFullPath {
   '/ingress': typeof IngressRoute
   '/login': typeof LoginRoute
   '/observability': typeof ObservabilityRoute
+  '/setup': typeof SetupRoute
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
@@ -102,6 +109,7 @@ export interface FileRoutesByTo {
   '/ingress': typeof IngressRoute
   '/login': typeof LoginRoute
   '/observability': typeof ObservabilityRoute
+  '/setup': typeof SetupRoute
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
@@ -117,6 +125,7 @@ export interface FileRoutesById {
   '/ingress': typeof IngressRoute
   '/login': typeof LoginRoute
   '/observability': typeof ObservabilityRoute
+  '/setup': typeof SetupRoute
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
@@ -133,6 +142,7 @@ export interface FileRouteTypes {
     | '/ingress'
     | '/login'
     | '/observability'
+    | '/setup'
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
@@ -147,6 +157,7 @@ export interface FileRouteTypes {
     | '/ingress'
     | '/login'
     | '/observability'
+    | '/setup'
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
@@ -161,6 +172,7 @@ export interface FileRouteTypes {
     | '/ingress'
     | '/login'
     | '/observability'
+    | '/setup'
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
@@ -176,6 +188,7 @@ export interface RootRouteChildren {
   IngressRoute: typeof IngressRoute
   LoginRoute: typeof LoginRoute
   ObservabilityRoute: typeof ObservabilityRoute
+  SetupRoute: typeof SetupRoute
   JobsJobIdRoute: typeof JobsJobIdRoute
   ProjectsProjectIdRoute: typeof ProjectsProjectIdRoute
   ServicesServiceIdRoute: typeof ServicesServiceIdRoute
@@ -188,6 +201,13 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/setup': {
+      id: '/setup'
+      path: '/setup'
+      fullPath: '/setup'
+      preLoaderRoute: typeof SetupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/observability': {
       id: '/observability'
       path: '/observability'
@@ -280,6 +300,7 @@ const rootRouteChildren: RootRouteChildren = {
   IngressRoute: IngressRoute,
   LoginRoute: LoginRoute,
   ObservabilityRoute: ObservabilityRoute,
+  SetupRoute: SetupRoute,
   JobsJobIdRoute: JobsJobIdRoute,
   ProjectsProjectIdRoute: ProjectsProjectIdRoute,
   ServicesServiceIdRoute: ServicesServiceIdRoute,

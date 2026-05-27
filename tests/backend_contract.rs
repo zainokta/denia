@@ -1151,3 +1151,133 @@ async fn registry_api_delete_blocked_if_referenced() {
 // `state.registries.registry(unknown_id)` returns `None` (see state::tests::registry_*),
 // and `ExternalImageSource::validate` rejects partial registry fields
 // (see domain::tests::external_image_source_resolution_matrix).
+
+#[tokio::test]
+async fn bootstrap_requires_admin_token() {
+    let store = SqliteStore::open_in_memory().expect("open sqlite");
+    store.migrate().expect("migrate");
+    let app = build_router(AppState::new(AppConfig::for_test("test-token"), &store));
+
+    let resp = app
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri("/v1/bootstrap")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "username": "root", "password": "supersecret"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), http::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn bootstrap_creates_first_admin_then_conflicts() {
+    let store = SqliteStore::open_in_memory().expect("open sqlite");
+    store.migrate().expect("migrate");
+    let app = build_router(AppState::new(AppConfig::for_test("test-token"), &store));
+
+    let body = || {
+        axum::body::Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "username": "root", "password": "supersecret"
+            }))
+            .unwrap(),
+        )
+    };
+    let req = || {
+        http::Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/bootstrap")
+            .header(http::header::AUTHORIZATION, "Bearer test-token")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(body())
+            .unwrap()
+    };
+
+    let first = app.clone().oneshot(req()).await.unwrap();
+    assert_eq!(first.status(), http::StatusCode::CREATED);
+
+    let second = app.oneshot(req()).await.unwrap();
+    assert_eq!(second.status(), http::StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn bootstrap_rejects_short_password() {
+    let store = SqliteStore::open_in_memory().expect("open sqlite");
+    store.migrate().expect("migrate");
+    let app = build_router(AppState::new(AppConfig::for_test("test-token"), &store));
+
+    let resp = app
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri("/v1/bootstrap")
+                .header(http::header::AUTHORIZATION, "Bearer test-token")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "username": "root", "password": "short"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn me_reports_admin_initialized_flag() {
+    let store = SqliteStore::open_in_memory().expect("open sqlite");
+    store.migrate().expect("migrate");
+    let app = build_router(AppState::new(AppConfig::for_test("test-token"), &store));
+
+    let me = |app: axum::Router| async move {
+        let resp = app
+            .oneshot(
+                http::Request::builder()
+                    .uri("/v1/me")
+                    .header(http::header::AUTHORIZATION, "Bearer test-token")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+    };
+
+    let before = me(app.clone()).await;
+    assert_eq!(before["admin_initialized"], serde_json::json!(false));
+
+    app.clone()
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri("/v1/bootstrap")
+                .header(http::header::AUTHORIZATION, "Bearer test-token")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "username": "root", "password": "supersecret"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let after = me(app).await;
+    assert_eq!(after["admin_initialized"], serde_json::json!(true));
+}
