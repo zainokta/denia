@@ -75,8 +75,26 @@ Commits `a1e6853..6ed7e45`.
 | C2 | MAJOR | Rewritten `coordinator_registers_route_and_replica_on_promotion` asserts route + pool separately but never exercises the `resolve(host)→resolve_or_activate` join, so it structurally cannot catch C1. | ✅ add end-to-end test |
 | C3 | MINOR | `controller.rs`/`lifecycle.rs` field/param still named `bridge: Arc<IngressState>` — stale; rename to `ingress`. | ✅ fix |
 | C4 | MINOR | `lifecycle.rs` tests assert `healthy_count(&service_name)` (wrong key) — trivially passes, masks regressions. Assert on `service_id.to_string()`. | ✅ fix |
-| C5 | MINOR | `DENIA_ACME_DIRECTORY_URL` defaults to LE **production** — document the staging override to avoid rate-limit burns in non-prod. | ⏸️ Chunk E docs |
+| C5 | MINOR | `DENIA_ACME_DIRECTORY_URL` defaults to LE **production** — document the staging override to avoid rate-limit burns in non-prod. | ✅ documented (ADR-020 + README + AGENTS.md) |
 
 **Resolution (commit `10b94ad`):** C1 ✅ — `RouteSpec` gained `service_id: String` (`#[serde(skip)]`, set to `service.id.to_string()` in coordinator + routes); `proxy.rs::upstream_peer` now keys `resolve_or_activate` by `route.service_id` (pool key), `service_name` kept for access log only. C2 ✅ — end-to-end join test in `state.rs` (resolve(host)→pool key→resolve_or_activate returns socket; name-keyed lookup returns `None`); confirmed red pre-fix, green post-fix. C3 ✅ — `bridge`→`ingress` rename. C4 ✅ — lifecycle tests assert on `service_id`. 319 tests pass, clippy clean. C5 (LE-staging docs) ⏸️ Chunk E.
 
 **Security PASS (verified):** proxy binds only `0.0.0.0:80`/`:443`; control plane stays on `bind_addr` (loopback) — not newly exposed. Certs boot-loaded before `:443` accepts (no empty-store window). ACME issuance gated to `tls_enabled` + `list_verified_hostnames` only; `validate_domain` re-applied. Challenge hop dials the fixed `control_backend` SocketAddr (host/path never influence upstream) → no SSRF/open-proxy. Bind failure logs + control plane survives; no insecure fallback (no API-on-public-port, no TLS-disable). `/v1/ingress/config` + Traefik files removed cleanly; no dead RBAC entry.
+
+---
+
+## Phase 8 — verification (2026-05-28)
+
+- **Docs:** ADR-020 written; ADR-016 marked Superseded (header + index); root `CLAUDE.md`/`AGENTS.md` + `README.md` ingress sections rewritten for Pingora.
+- **Live e2e:** new `tests/pingora_ingress_e2e.rs` spins up the real Pingora `Server` on ephemeral ports against a fake UDS workload — known `Host` → 200 + UDS body, unknown `Host` → 404. PASSES (`--ignored`, no root needed); independently confirms the C1 service-id routing fix end-to-end.
+- **Rust:** `cargo fmt --all --check` clean · `cargo clippy --all-targets --all-features` no issues · `cargo build` clean · `cargo test` **319 passed / 6 ignored / 0 failed**.
+- **Frontend:** `pnpm typecheck` clean · `pnpm build` ok (dist/client regenerated) · `pnpm test` 96 passed / **11 failed = PRE-EXISTING, unrelated** (`-detail.test.tsx` router `useLinkProps`/`isServer`; `api-client.test.tsx` `Deployment.id` numeric-vs-string — from earlier RBAC/observability wip, not this migration).
+- **Privileged real `:80`/`:443` + workload-namespace e2e:** not runnable in this sandbox (no root). The unprivileged live-proxy e2e above covers the data path; a rootful host should additionally run `DENIA_RUN_PRIVILEGED_TESTS=1 cargo test --test linux_runtime_privileged -- --ignored`.
+
+### Open / deferred (accepted)
+- **A3/B2** unauthenticated cold-start activation — bounded (single-flight + `ACTIVATION_WAIT`), rate-limiting out of scope; documented in ADR-020.
+- **A7** key zeroization — not feasible (foreign-owned key bytes); mitigated by no-log/no-derive + 0600 at-rest; residual risk inside host-root trust boundary.
+- **A8** single-writer `swap_routes`/`swap_certs` — documented; only the control plane writes.
+- **A9** `cargo audit` — not installed in this environment; recommend running in CI before release.
+
+**Sign-off: all BLOCKER/MAJOR findings (A1, B1, C1) resolved and re-verified. Migration is functionally complete and clippy/test-green. GO, conditional on running `cargo audit` + the rootful privileged suite on a real host before production deploy.**
