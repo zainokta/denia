@@ -62,6 +62,9 @@ pub async fn launch_replica(
         cpu_millis: spec.limits.cpu_millis,
         memory_bytes: spec.limits.memory_bytes,
         env: spec.env.clone(),
+        pids_max: None,
+        memory_swap_max: None,
+        io_weight: None,
         replica_index: spec.replica_index,
     };
     let status = match runtime.start(request).await {

@@ -1370,6 +1370,9 @@ mod tests {
                 cpu_millis: 0,
                 memory_bytes: 0,
                 env: Vec::new(),
+                pids_max: None,
+                memory_swap_max: None,
+                io_weight: None,
                 replica_index,
             })
             .await
