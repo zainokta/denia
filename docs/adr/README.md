@@ -34,6 +34,7 @@ Each ADR should include:
 | [014](014-per-service-registry.md) | Per-Service OCI Registry Configuration | Proposed | 2026-05-26 |
 | [015](015-streaming-oci-layer-staging.md) | Streaming OCI Layer Staging | Proposed | 2026-05-27 |
 | [016](016-managed-traefik.md) | Denia-Managed Traefik | Accepted | 2026-05-27 |
+| [017](017-service-crud-api.md) | Service CRUD API | Proposed | 2026-05-27 |
 
 ## Contributing
 
