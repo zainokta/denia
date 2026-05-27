@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct TraefikStaticOptions {
@@ -37,6 +38,16 @@ certificatesResolvers:\n\
     )
 }
 
+pub fn backoff_delay(attempt: u32) -> Duration {
+    let secs = 1u64.checked_shl(attempt).unwrap_or(u64::MAX).min(30);
+    Duration::from_secs(secs)
+}
+
+/// A spawn/exit failure that must NOT be retried (port already bound).
+pub fn is_fatal_bind_error(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::AddrInUse
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +70,21 @@ mod tests {
         assert!(y.contains("address: \":443\""));
         assert!(y.contains("directory: \"/var/lib/denia/traefik/dynamic\""));
         assert!(y.contains("watch: true"));
+    }
+
+    #[test]
+    fn backoff_is_capped_and_monotonic() {
+        assert_eq!(super::backoff_delay(0), std::time::Duration::from_secs(1));
+        assert!(super::backoff_delay(1) >= std::time::Duration::from_secs(2));
+        assert_eq!(super::backoff_delay(20), std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn addr_in_use_is_fatal() {
+        let e = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        assert!(super::is_fatal_bind_error(&e));
+        let other = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(!super::is_fatal_bind_error(&other));
     }
 
     #[test]
