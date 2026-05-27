@@ -17,7 +17,7 @@ const createUser = (input: { username: string; password: string }) =>
     return yield* api.createUser(input.username, input.password)
   })
 
-const deleteUser = (id: number) =>
+const deleteUser = (id: string) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
     return yield* api.deleteUser(id)
@@ -53,7 +53,7 @@ function SettingsUsers() {
   })
 
   const deleteMut = useMutation({
-    mutationFn: (id: number) => runQuery(deleteUser(id)),
+    mutationFn: (id: string) => runQuery(deleteUser(id)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
     },

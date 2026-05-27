@@ -64,7 +64,7 @@ export class ApiClient extends Context.Service<
       username: string,
       password: string,
     ) => Effect.Effect<User, ApiError | DecodeError>
-    readonly deleteUser: (id: number) => Effect.Effect<void, ApiError>
+    readonly deleteUser: (id: string) => Effect.Effect<void, ApiError>
     readonly listApiTokens: Effect.Effect<
       ReadonlyArray<ApiToken>,
       ApiError | DecodeError
@@ -436,7 +436,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, User)
       })
 
-    const deleteUser = (id: number) =>
+    const deleteUser = (id: string) =>
       Effect.gen(function* () {
         const response = yield* http
           .del(url(`/v1/users/${id}`), { headers: authHeaders() })
