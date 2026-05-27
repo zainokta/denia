@@ -1,3 +1,4 @@
 /target
 .repos/effect
 codedb.snapshot
+.worktree/
