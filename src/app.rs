@@ -330,7 +330,6 @@ impl AppState {
 pub fn build_router(state: AppState) -> Router {
     let rate_limiter = LoginRateLimiter::default();
     let admin_rate_limiter = AdminRateLimiter::default();
-    let challenge_rate_limiter = LoginRateLimiter::new(20, 60);
     let auth_public = api::auth::public_router().route_layer(middleware::from_fn_with_state(
         rate_limiter,
         rate_limit_login,
@@ -358,19 +357,21 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/healthz", get(api::health::healthz))
+        // ACME HTTP-01 and denia domain-verification challenge routes are served
+        // WITHOUT the per-IP login rate limiter (audit B1). Let's Encrypt
+        // validates from multiple distributed vantage points and retries, so a
+        // ~5/min per-IP bucket would return 429 and silently break cert
+        // issuance/renewal once `:80` is publicly reachable. Both handlers do
+        // exact-match in-memory lookups and serve only non-secret verification
+        // tokens / post-validation key authorizations, so they are safe to
+        // expose unthrottled.
         .route(
             "/.well-known/denia-challenge/{token}",
-            get(api::domains::challenge_handler).route_layer(middleware::from_fn_with_state(
-                challenge_rate_limiter.clone(),
-                rate_limit_login,
-            )),
+            get(api::domains::challenge_handler),
         )
         .route(
             "/.well-known/acme-challenge/{token}",
-            get(api::domains::acme_challenge_handler).route_layer(middleware::from_fn_with_state(
-                challenge_rate_limiter,
-                rate_limit_login,
-            )),
+            get(api::domains::acme_challenge_handler),
         )
         .nest("/v1", auth_public.merge(authed))
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))

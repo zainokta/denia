@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -150,7 +150,7 @@ impl AcmeDriver {
         if email.trim().is_empty() {
             return Err(AcmeError::EmailRequired);
         }
-        std::fs::create_dir_all(tls_dir).map_err(|e| AcmeError::Io(e.to_string()))?;
+        create_private_dir_all(tls_dir)?;
         let account_key_path = tls_dir.join(ACCOUNT_KEY_FILE);
 
         // Load or create the account key, then build the key pair twice from the
@@ -261,11 +261,27 @@ fn load_or_create_account_key_der(path: &Path) -> Result<PrivatePkcs8KeyDer<'sta
 /// [`validate_domain`] rejects them).
 pub fn persist_cert(tls_dir: &Path, domain: &str, cert: &IssuedCert) -> Result<PathBuf, AcmeError> {
     let domain = validate_domain(domain)?;
+    // Ensure the parent tls dir exists at 0700 too, in case `persist_cert` runs
+    // before the driver created it.
+    create_private_dir_all(tls_dir)?;
     let dir = tls_dir.join(&domain);
-    std::fs::create_dir_all(&dir).map_err(|e| AcmeError::Io(e.to_string()))?;
+    create_private_dir_all(&dir)?;
     write_secret_file(&dir.join(FULLCHAIN_FILE), cert.fullchain_pem.as_bytes())?;
     write_secret_file(&dir.join(KEY_FILE), cert.key_pem.as_bytes())?;
     Ok(dir)
+}
+
+/// Recursively create `dir` (and any missing parents) at mode 0700 so the
+/// directory tree holding private key material is not world- or
+/// group-traversable (audit B3, defense-in-depth). `DirBuilder::mode` only
+/// applies to directories this call actually creates; pre-existing directories
+/// keep their current mode, which matches `create_dir_all` semantics.
+fn create_private_dir_all(dir: &Path) -> Result<(), AcmeError> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| AcmeError::Io(e.to_string()))
 }
 
 /// Atomically write `bytes` to `path` at mode 0600 (temp file in the same
@@ -444,6 +460,20 @@ VR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiEA7rINC49fiLX2DYAE06Cm\n\
             assert!(p.exists(), "{name} written");
             let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "{name} must be 0600, got {mode:o}");
+        }
+    }
+
+    #[test]
+    fn persist_cert_creates_dirs_at_mode_0700() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Use a nested tls_dir that does not yet exist so create_private_dir_all
+        // actually creates it (and the per-domain dir) at 0700.
+        let tls_dir = tmp.path().join("tls");
+        let dir = persist_cert(&tls_dir, "api.example.com", &issued()).unwrap();
+
+        for d in [tls_dir.as_path(), dir.as_path()] {
+            let mode = std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{d:?} must be 0700, got {mode:o}");
         }
     }
 
