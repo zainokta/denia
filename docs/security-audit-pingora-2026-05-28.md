@@ -28,3 +28,5 @@ Diff: `24b59a4^..a687c34`. Both reviewers: **AMBER**.
 | A10 | MINOR | Test gaps vs old bridge: no concurrent single-flight activation test (gate concurrency unexercised), no `remove_replica` cursor-bounds test, no `set_last_activity` round-trip. | ✅ add concurrent single-flight test (Chunk A follow-up) |
 
 **Key handling — PASS:** `ParsedCert` omits `Debug`/`Serialize`; `IngressState` has no `Debug`; no `tracing` touches key bytes.
+
+**Resolution (commit `f2766e8`):** A1, A2, A4, A5, A10 ✅ fixed — `validate_domain` (rejects empty/whitespace/control/backtick/CRLF/wildcard/non-ASCII/overlong/dot-edges, returns lowercased), `RouteTable::try_upsert` + `CertStore::try_insert`, lowercase lookups in `resolve`/`get`, `resolve_or_activate` wrapped in `timeout(ACTIVATION_WAIT)` → `ActivationError::Timeout`, concurrent single-flight test (16 racers → 1 activation). 309 tests pass. **Carry-forward for Chunk C:** callers (coordinator/routes) MUST use `try_upsert` (not the infallible `upsert`, which silently skips invalid domains) and surface `InvalidDomain` at the API boundary. A3/A6/A7/A8/A9 remain ⏸️ per target chunk.
