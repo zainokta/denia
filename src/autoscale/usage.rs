@@ -84,11 +84,11 @@ impl UsageSampler {
                 None => 0,
             };
             self.prev.insert(r.id, (snap.cpu_usage_usec, now));
-            let mem = if limits.memory_bytes == 0 {
-                0
-            } else {
-                ((snap.memory_current_bytes.saturating_mul(100)) / limits.memory_bytes) as u32
-            };
+            let mem = snap
+                .memory_current_bytes
+                .saturating_mul(100)
+                .checked_div(limits.memory_bytes)
+                .unwrap_or(0) as u32;
             pairs.push((cpu, mem));
         }
         ServiceUsage::aggregate(&pairs)

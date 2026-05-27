@@ -1,6 +1,5 @@
 fn ceil_div(a: u64, b: u64) -> u64 {
-    let b = b.max(1);
-    (a + b - 1) / b
+    a.div_ceil(b.max(1))
 }
 
 /// Scale-up candidate: max of CPU-driven and memory-driven desired (memory only if a target is set),
