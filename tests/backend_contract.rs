@@ -8,11 +8,11 @@ use denia::{
         CredentialKind, DeploymentRequest, ExternalImageSource, GitSource, HealthCheck,
         ResourceLimits, ServiceConfig, ServiceSource,
     },
+    ingress::pingora::{RouteSpec, RouteTable},
     logs::LogStore,
     metrics::{parse_cpu_stat, parse_memory_current},
     secrets::{SecretPayload, SecretRef, SopsSecretStore},
     state::SqliteStore,
-    traefik::{RouteSpec, render_file_provider_config},
 };
 use tower::util::ServiceExt;
 use uuid::Uuid;
@@ -246,26 +246,33 @@ async fn artifact_acquirer_pulls_external_image() {
 }
 
 #[test]
-fn traefik_config_routes_domains_to_loopback_bridge_ports() {
-    let yaml = render_file_provider_config(
-        &[RouteSpec {
+fn route_table_resolves_verified_host_to_service() {
+    // Ingress is now an in-memory route table (no Traefik YAML). A verified host
+    // resolves to its owning service; an unknown host does not.
+    let mut table = RouteTable::default();
+    table
+        .try_upsert(RouteSpec {
             route_key: "svc-web".to_string(),
             service_name: "web".to_string(),
             domains: vec!["web.example.test".to_string()],
-            bridge_port: 19080,
             tls: false,
-        }],
-        &denia::traefik::IngressRenderOptions {
-            acme_resolver: "le".to_string(),
-            control_domain: None,
-            control_tls: false,
-            control_backend_addr: "http://127.0.0.1:7180".to_string(),
-        },
-    )
-    .expect("traefik yaml");
+        })
+        .expect("upsert valid route");
 
-    assert!(yaml.contains("Host(`web.example.test`)"));
-    assert!(yaml.contains("http://127.0.0.1:19080"));
+    assert_eq!(
+        table
+            .resolve("web.example.test")
+            .map(|r| r.service_name.as_str()),
+        Some("web")
+    );
+    // Host matching is case-insensitive (audit A2).
+    assert_eq!(
+        table
+            .resolve("WEB.EXAMPLE.TEST")
+            .map(|r| r.service_name.as_str()),
+        Some("web")
+    );
+    assert!(table.resolve("nope.example.test").is_none());
 }
 
 #[test]

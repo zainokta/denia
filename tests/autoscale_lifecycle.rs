@@ -19,9 +19,9 @@ use denia::autoscale::controller::{
 use denia::autoscale::ledger::{Headroom, HostCapacity, ResourceLedger};
 use denia::autoscale::registry::{Replica, ReplicaRegistry};
 use denia::autoscale::usage::ServiceUsage;
-use denia::bridge::LoopbackBridgeSupervisor;
 use denia::domain::{AutoscalePolicy, HealthCheck, ResourceLimits};
 use denia::health::FakeHealthChecker;
+use denia::ingress::pingora::IngressState;
 use denia::runtime::FakeRuntime;
 use denia::state::SqliteStore;
 use uuid::Uuid;
@@ -154,9 +154,7 @@ fn build_controller(
         ReplicaRegistry::default(),
         ledger,
         Arc::new(FakeRuntime::default()),
-        Arc::new(LoopbackBridgeSupervisor::with_access_log(
-            AccessLogStore::new(),
-        )),
+        Arc::new(IngressState::with_access_log(AccessLogStore::new())),
         Arc::new(FakeHealthChecker::healthy()),
         store,
         Box::new(usage),
