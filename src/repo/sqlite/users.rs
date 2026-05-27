@@ -479,6 +479,28 @@ impl SqliteUserRepo {
         list_memberships_for_user_q(&conn, user_id)
     }
 
+    pub fn bootstrap_admin(&self, username: &str, password_hash: &str) -> Result<User, RepoError> {
+        let mut conn = self.pool.connection()?;
+        let tx = conn.transaction()?;
+        let already: Option<String> = tx
+            .query_row(
+                "SELECT value FROM system_settings WHERE key = 'admin_initialized'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if already.as_deref() == Some("true") {
+            return Err(RepoError::AdminAlreadyInitialized);
+        }
+        let user = create_user_q(&tx, username, password_hash, true)?;
+        tx.execute(
+            "INSERT INTO system_settings (key, value) VALUES ('admin_initialized', 'true')",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(user)
+    }
+
     pub fn is_admin_initialized(&self) -> Result<bool, RepoError> {
         let conn = self.pool.connection()?;
         let value: Option<String> = conn

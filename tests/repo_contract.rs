@@ -255,6 +255,36 @@ fn admin_initialized_is_false_on_fresh_store() {
     assert!(!users.is_admin_initialized().unwrap());
 }
 
+#[test]
+fn bootstrap_admin_creates_super_admin_and_sets_flag() {
+    let store = migrated_store();
+    let users = SqliteUserRepo::new(store.pool());
+
+    let user = users.bootstrap_admin("root", "hash").unwrap();
+    assert!(user.is_super_admin);
+    assert_eq!(user.username, "root");
+    assert!(users.is_admin_initialized().unwrap());
+}
+
+#[test]
+fn bootstrap_admin_is_rejected_once_initialized_even_after_user_deletion() {
+    let store = migrated_store();
+    let users = SqliteUserRepo::new(store.pool());
+
+    let user = users.bootstrap_admin("root", "hash").unwrap();
+    // delete_user guards against removing the LAST super-admin, so seed a
+    // second one before deleting the bootstrapped user.
+    users.create_user("ops", "hash2", true).unwrap();
+    users.delete_user(user.id).unwrap();
+
+    let err = users.bootstrap_admin("root2", "hash3").unwrap_err();
+    assert!(matches!(
+        err,
+        denia::repo::RepoError::AdminAlreadyInitialized
+    ));
+    assert!(users.is_admin_initialized().unwrap());
+}
+
 // --- Domains (token lookup path) ------------------------------------------
 
 #[test]

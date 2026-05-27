@@ -32,6 +32,8 @@ pub enum StateError {
     RegistryNotFound,
     #[error("registry is referenced by one or more services")]
     RegistryInUse,
+    #[error("admin already initialized")]
+    AdminAlreadyInitialized,
 }
 
 impl From<RepoError> for StateError {
@@ -49,6 +51,7 @@ impl From<RepoError> for StateError {
             RepoError::InvalidStatus(s) => StateError::InvalidStatus(s),
             RepoError::RegistryNotFound => StateError::RegistryNotFound,
             RepoError::RegistryInUse => StateError::RegistryInUse,
+            RepoError::AdminAlreadyInitialized => StateError::AdminAlreadyInitialized,
         }
     }
 }

@@ -30,4 +30,6 @@ pub enum RepoError {
     RegistryNotFound,
     #[error("registry is referenced by one or more services")]
     RegistryInUse,
+    #[error("admin already initialized")]
+    AdminAlreadyInitialized,
 }
