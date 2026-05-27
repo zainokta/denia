@@ -35,6 +35,7 @@ Each ADR should include:
 | [015](015-streaming-oci-layer-staging.md) | Streaming OCI Layer Staging | Proposed | 2026-05-27 |
 | [016](016-managed-traefik.md) | Denia-Managed Traefik | Accepted | 2026-05-27 |
 | [017](017-service-crud-api.md) | Service CRUD API | Proposed | 2026-05-27 |
+| [018](018-autoscaling.md) | Autoscaling | Accepted | 2026-05-27 |
 
 ## Contributing
 
