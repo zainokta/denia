@@ -2,22 +2,30 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
 use serde::Serialize;
+use std::convert::Infallible;
+use std::time::Duration;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::ApiError;
 use crate::app::AppState;
 use crate::auth::{Principal, ensure_role};
 use crate::deploy::DeploymentCoordinator;
 use crate::domain::{Role, ServiceConfig};
-use crate::logs::LogStore;
+use crate::logs::{LogStore, LogTailer};
 use crate::metrics::CgroupMetricsReader;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/services", get(list_services).post(put_service))
         .route("/services/{service_id}/logs", get(service_logs))
+        .route(
+            "/services/{service_id}/logs/stream",
+            get(service_logs_stream),
+        )
         .route("/services/{service_id}/metrics", get(service_metrics))
         .route("/services/{service_id}/{action}", post(lifecycle_command))
 }
@@ -121,6 +129,53 @@ async fn service_logs(
     }
 }
 
+async fn service_logs_stream(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<impl axum::response::IntoResponse, ApiError> {
+    let Some(service) = state.services.get_service(service_id)? else {
+        return Err(ApiError::NotFound("service not found".to_string()));
+    };
+    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
+
+    let log_path =
+        std::path::Path::new(&state.config.log_dir).join(format!("{}.log", service.name));
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(256);
+
+    tokio::spawn(async move {
+        let mut tailer = LogTailer::new(&log_path);
+
+        if let Ok(lines) = tokio::task::block_in_place(|| tailer.backlog(200)) {
+            for line in lines {
+                if tx.send(Ok(Event::default().data(line))).await.is_err() {
+                    return;
+                }
+            }
+        }
+
+        let mut interval = tokio::time::interval(Duration::from_millis(300));
+        loop {
+            interval.tick().await;
+            let result = tokio::task::block_in_place(|| tailer.poll());
+            match result {
+                Ok(lines) => {
+                    for line in lines {
+                        if tx.send(Ok(Event::default().data(line))).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(_) => continue, // transient read error; retry next tick
+            }
+        }
+    });
+
+    Ok(Sse::new(ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
 async fn service_metrics(
     State(state): State<AppState>,
     principal: Principal,
@@ -190,6 +245,114 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn log_stream_unauthenticated_returns_401() {
+        let resp = build_router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/services/{}/logs/stream", uuid::Uuid::now_v7()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn log_stream_emits_backlog_then_live() {
+        use crate::domain::{
+            ExternalImageSource, HealthCheck, Project, ServiceConfig, ServiceSource,
+        };
+        use tokio_stream::StreamExt;
+
+        let state = test_state();
+        let log_dir = state.config.log_dir.clone();
+        let project = Project::new("team-stream", None).unwrap();
+        state.projects.put_project(project.clone()).unwrap();
+        let svc = ServiceConfig::new(
+            project.id,
+            "streamsvc",
+            vec!["stream.example.com".into()],
+            ServiceSource::ExternalImage(ExternalImageSource {
+                image: "nginx".into(),
+                credential: None,
+                registry_id: None,
+                image_ref: None,
+            }),
+            80,
+            HealthCheck::new("/health", 5),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        let service_id = svc.id;
+        state.services.put_service(svc).unwrap();
+
+        // Seed a backlog line in the service log file.
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let log_path = log_dir.join("streamsvc.log");
+        std::fs::write(&log_path, "backlog-line\n").unwrap();
+
+        let resp = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/services/{service_id}/logs/stream"))
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(ct.starts_with("text/event-stream"), "content-type was {ct}");
+
+        // Read bounded frames under a timeout; the stream itself never ends.
+        let mut stream = resp.into_body().into_data_stream();
+        let mut seen = String::new();
+
+        // Backlog frame.
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("backlog frame timed out")
+            .expect("stream ended")
+            .unwrap();
+        seen.push_str(&String::from_utf8_lossy(&frame));
+
+        // Append a live line; poll interval is 300ms.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path)
+                .unwrap();
+            f.write_all(b"live-line\n").unwrap();
+        }
+
+        // Drain a few more frames (skipping keep-alive comments) for the live line.
+        for _ in 0..10 {
+            if seen.contains("live-line") {
+                break;
+            }
+            if let Ok(Some(Ok(frame))) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), stream.next()).await
+            {
+                seen.push_str(&String::from_utf8_lossy(&frame));
+            }
+        }
+
+        assert!(seen.contains("backlog-line"), "missing backlog in: {seen}");
+        assert!(seen.contains("live-line"), "missing live line in: {seen}");
+        // Dropping `stream` here cancels the tailer task.
     }
 
     #[tokio::test]
