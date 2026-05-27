@@ -133,10 +133,10 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn migrate_advances_to_version_6() {
+    fn migrate_advances_to_version_7() {
         let store = SqliteStore::open_in_memory().unwrap();
         store.migrate().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 6);
+        assert_eq!(store.schema_version().unwrap(), 7);
     }
 
     #[test]
