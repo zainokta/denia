@@ -8,7 +8,6 @@ use uuid::Uuid;
 
 use crate::domain::{Registry, ServiceConfig};
 use crate::repo::error::RepoError;
-use crate::repo::registry_repo::RegistryRepo;
 use crate::repo::sqlite::pool::SqlitePool;
 use crate::state::{SqliteStore, StateError};
 
@@ -128,6 +127,7 @@ impl SqliteStore {
     }
 }
 
+#[derive(Clone)]
 pub struct SqliteRegistryRepo {
     pool: SqlitePool,
 }
@@ -138,28 +138,28 @@ impl SqliteRegistryRepo {
     }
 }
 
-impl RegistryRepo for SqliteRegistryRepo {
-    fn create_registry(&self, registry: &Registry) -> Result<(), RepoError> {
+impl SqliteRegistryRepo {
+    pub fn create_registry(&self, registry: &Registry) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         create_registry_q(&conn, registry)
     }
 
-    fn update_registry(&self, registry: &Registry) -> Result<(), RepoError> {
+    pub fn update_registry(&self, registry: &Registry) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         update_registry_q(&conn, registry)
     }
 
-    fn registry(&self, id: Uuid) -> Result<Option<Registry>, RepoError> {
+    pub fn registry(&self, id: Uuid) -> Result<Option<Registry>, RepoError> {
         let conn = self.pool.connection()?;
         registry_q(&conn, id)
     }
 
-    fn registries_for_project(&self, project_id: Uuid) -> Result<Vec<Registry>, RepoError> {
+    pub fn registries_for_project(&self, project_id: Uuid) -> Result<Vec<Registry>, RepoError> {
         let conn = self.pool.connection()?;
         registries_for_project_q(&conn, project_id)
     }
 
-    fn delete_registry(&self, id: Uuid) -> Result<(), RepoError> {
+    pub fn delete_registry(&self, id: Uuid) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         delete_registry_q(&conn, id)
     }

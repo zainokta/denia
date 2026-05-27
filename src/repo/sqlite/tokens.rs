@@ -13,7 +13,6 @@ use crate::domain::{ApiToken, User};
 use crate::repo::error::RepoError;
 use crate::repo::sqlite::pool::SqlitePool;
 use crate::repo::sqlite::users::get_user_q;
-use crate::repo::token_repo::TokenRepo;
 use crate::state::{SqliteStore, StateError};
 
 pub(super) fn create_api_token_q(
@@ -128,6 +127,7 @@ impl SqliteStore {
     }
 }
 
+#[derive(Clone)]
 pub struct SqliteTokenRepo {
     pool: SqlitePool,
 }
@@ -138,22 +138,22 @@ impl SqliteTokenRepo {
     }
 }
 
-impl TokenRepo for SqliteTokenRepo {
-    fn create_api_token(&self, user_id: Uuid, name: &str) -> Result<ApiToken, RepoError> {
+impl SqliteTokenRepo {
+    pub fn create_api_token(&self, user_id: Uuid, name: &str) -> Result<ApiToken, RepoError> {
         let conn = self.pool.connection()?;
         create_api_token_q(&conn, user_id, name)
     }
 
-    fn user_for_api_token(&self, token_hash: &str) -> Result<Option<User>, RepoError> {
+    pub fn user_for_api_token(&self, token_hash: &str) -> Result<Option<User>, RepoError> {
         user_for_api_token_q(&self.pool, token_hash)
     }
 
-    fn list_api_tokens(&self, user_id: Uuid) -> Result<Vec<ApiToken>, RepoError> {
+    pub fn list_api_tokens(&self, user_id: Uuid) -> Result<Vec<ApiToken>, RepoError> {
         let conn = self.pool.connection()?;
         list_api_tokens_q(&conn, user_id)
     }
 
-    fn revoke_api_token(&self, token_id: Uuid) -> Result<(), RepoError> {
+    pub fn revoke_api_token(&self, token_id: Uuid) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         revoke_api_token_q(&conn, token_id)
     }

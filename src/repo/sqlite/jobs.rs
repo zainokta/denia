@@ -9,7 +9,6 @@ use uuid::Uuid;
 
 use crate::domain::{Job, JobRun, JobRunStatus};
 use crate::repo::error::RepoError;
-use crate::repo::job_repo::JobRepo;
 use crate::repo::sqlite::pool::SqlitePool;
 use crate::state::{SqliteStore, StateError};
 
@@ -266,6 +265,7 @@ impl SqliteStore {
     }
 }
 
+#[derive(Clone)]
 pub struct SqliteJobRepo {
     pool: SqlitePool,
 }
@@ -276,39 +276,39 @@ impl SqliteJobRepo {
     }
 }
 
-impl JobRepo for SqliteJobRepo {
-    fn put_job(&self, job: Job) -> Result<Job, RepoError> {
+impl SqliteJobRepo {
+    pub fn put_job(&self, job: Job) -> Result<Job, RepoError> {
         let conn = self.pool.connection()?;
         put_job_q(&conn, &job)?;
         Ok(job)
     }
 
-    fn get_job(&self, job_id: Uuid) -> Result<Option<Job>, RepoError> {
+    pub fn get_job(&self, job_id: Uuid) -> Result<Option<Job>, RepoError> {
         let conn = self.pool.connection()?;
         get_job_q(&conn, job_id)
     }
 
-    fn list_jobs(&self, project_id: Uuid) -> Result<Vec<Job>, RepoError> {
+    pub fn list_jobs(&self, project_id: Uuid) -> Result<Vec<Job>, RepoError> {
         let conn = self.pool.connection()?;
         list_jobs_q(&conn, project_id)
     }
 
-    fn delete_job(&self, job_id: Uuid) -> Result<(), RepoError> {
+    pub fn delete_job(&self, job_id: Uuid) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         delete_job_q(&conn, job_id)
     }
 
-    fn create_job_run(&self, job_id: Uuid) -> Result<JobRun, RepoError> {
+    pub fn create_job_run(&self, job_id: Uuid) -> Result<JobRun, RepoError> {
         let conn = self.pool.connection()?;
         create_job_run_q(&conn, job_id)
     }
 
-    fn list_job_runs(&self, job_id: Uuid) -> Result<Vec<JobRun>, RepoError> {
+    pub fn list_job_runs(&self, job_id: Uuid) -> Result<Vec<JobRun>, RepoError> {
         let conn = self.pool.connection()?;
         list_job_runs_q(&conn, job_id)
     }
 
-    fn update_job_run(
+    pub fn update_job_run(
         &self,
         run_id: Uuid,
         status: JobRunStatus,
@@ -318,22 +318,22 @@ impl JobRepo for SqliteJobRepo {
         update_job_run_q(&conn, run_id, status, exit_code)
     }
 
-    fn active_run(&self, job_id: Uuid) -> Result<Option<JobRun>, RepoError> {
+    pub fn active_run(&self, job_id: Uuid) -> Result<Option<JobRun>, RepoError> {
         let conn = self.pool.connection()?;
         active_run_q(&conn, job_id)
     }
 
-    fn fail_orphan_runs(&self) -> Result<usize, RepoError> {
+    pub fn fail_orphan_runs(&self) -> Result<usize, RepoError> {
         let conn = self.pool.connection()?;
         fail_orphan_runs_q(&conn)
     }
 
-    fn claim_due_jobs(&self, now: chrono::DateTime<Utc>) -> Result<Vec<Job>, RepoError> {
+    pub fn claim_due_jobs(&self, now: chrono::DateTime<Utc>) -> Result<Vec<Job>, RepoError> {
         let conn = self.pool.connection()?;
         claim_due_jobs_q(&conn, now)
     }
 
-    fn set_job_next_run(
+    pub fn set_job_next_run(
         &self,
         job_id: Uuid,
         next_run_at: Option<chrono::DateTime<Utc>>,

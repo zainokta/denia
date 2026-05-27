@@ -8,7 +8,6 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::domain::{DomainStatus, ServiceDomain};
-use crate::repo::domain_repo::DomainRepo;
 use crate::repo::error::RepoError;
 use crate::repo::sqlite::pool::SqlitePool;
 use crate::state::{SqliteStore, StateError};
@@ -259,6 +258,7 @@ fn row_to_service_domain(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServiceDom
     })
 }
 
+#[derive(Clone)]
 pub struct SqliteDomainRepo {
     pool: SqlitePool,
 }
@@ -269,23 +269,23 @@ impl SqliteDomainRepo {
     }
 }
 
-impl DomainRepo for SqliteDomainRepo {
-    fn put_service_domain(&self, d: &ServiceDomain) -> Result<(), RepoError> {
+impl SqliteDomainRepo {
+    pub fn put_service_domain(&self, d: &ServiceDomain) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         put_service_domain_q(&conn, d)
     }
 
-    fn get_service_domain(&self, id: Uuid) -> Result<Option<ServiceDomain>, RepoError> {
+    pub fn get_service_domain(&self, id: Uuid) -> Result<Option<ServiceDomain>, RepoError> {
         let conn = self.pool.connection()?;
         get_service_domain_q(&conn, id)
     }
 
-    fn get_service_domain_by_token(&self, token: &str) -> Result<Option<ServiceDomain>, RepoError> {
+    pub fn get_service_domain_by_token(&self, token: &str) -> Result<Option<ServiceDomain>, RepoError> {
         let conn = self.pool.connection()?;
         get_service_domain_by_token_q(&conn, token)
     }
 
-    fn list_service_domains_by_service(
+    pub fn list_service_domains_by_service(
         &self,
         service_id: Uuid,
     ) -> Result<Vec<ServiceDomain>, RepoError> {
@@ -293,7 +293,7 @@ impl DomainRepo for SqliteDomainRepo {
         list_service_domains_by_service_q(&conn, service_id)
     }
 
-    fn update_service_domain_status(
+    pub fn update_service_domain_status(
         &self,
         id: Uuid,
         status: DomainStatus,
@@ -304,17 +304,17 @@ impl DomainRepo for SqliteDomainRepo {
         update_service_domain_status_q(&conn, id, status, verified_at, last_error)
     }
 
-    fn delete_service_domain(&self, id: Uuid) -> Result<(), RepoError> {
+    pub fn delete_service_domain(&self, id: Uuid) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         delete_service_domain_q(&conn, id)
     }
 
-    fn list_verified_hostnames(&self, service_id: Uuid) -> Result<Vec<String>, RepoError> {
+    pub fn list_verified_hostnames(&self, service_id: Uuid) -> Result<Vec<String>, RepoError> {
         let conn = self.pool.connection()?;
         list_verified_hostnames_q(&conn, service_id)
     }
 
-    fn list_all_service_domains(&self) -> Result<Vec<ServiceDomain>, RepoError> {
+    pub fn list_all_service_domains(&self) -> Result<Vec<ServiceDomain>, RepoError> {
         let conn = self.pool.connection()?;
         list_all_service_domains_q(&conn)
     }

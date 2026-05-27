@@ -9,7 +9,6 @@ use uuid::Uuid;
 
 use crate::artifacts::ArtifactRecord;
 use crate::domain::{Deployment, DeploymentRequest, DeploymentStatus};
-use crate::repo::deployment_repo::DeploymentRepo;
 use crate::repo::error::RepoError;
 use crate::repo::sqlite::pool::SqlitePool;
 use crate::state::{SqliteStore, StateError};
@@ -224,6 +223,7 @@ impl SqliteStore {
     }
 }
 
+#[derive(Clone)]
 pub struct SqliteDeploymentRepo {
     pool: SqlitePool,
 }
@@ -234,18 +234,18 @@ impl SqliteDeploymentRepo {
     }
 }
 
-impl DeploymentRepo for SqliteDeploymentRepo {
-    fn create_deployment(&self, request: DeploymentRequest) -> Result<Deployment, RepoError> {
+impl SqliteDeploymentRepo {
+    pub fn create_deployment(&self, request: DeploymentRequest) -> Result<Deployment, RepoError> {
         let conn = self.pool.connection()?;
         create_deployment_q(&conn, request)
     }
 
-    fn list_deployments(&self, service_id: Uuid) -> Result<Vec<Deployment>, RepoError> {
+    pub fn list_deployments(&self, service_id: Uuid) -> Result<Vec<Deployment>, RepoError> {
         let conn = self.pool.connection()?;
         list_deployments_q(&conn, service_id)
     }
 
-    fn update_deployment_status(
+    pub fn update_deployment_status(
         &self,
         deployment_id: Uuid,
         status: DeploymentStatus,
@@ -254,27 +254,27 @@ impl DeploymentRepo for SqliteDeploymentRepo {
         update_deployment_status_q(&conn, deployment_id, status)
     }
 
-    fn promote_deployment(&self, service_id: Uuid, deployment_id: Uuid) -> Result<(), RepoError> {
+    pub fn promote_deployment(&self, service_id: Uuid, deployment_id: Uuid) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         promote_deployment_q(&conn, service_id, deployment_id)
     }
 
-    fn promoted_deployment(&self, service_id: Uuid) -> Result<Option<Uuid>, RepoError> {
+    pub fn promoted_deployment(&self, service_id: Uuid) -> Result<Option<Uuid>, RepoError> {
         let conn = self.pool.connection()?;
         promoted_deployment_q(&conn, service_id)
     }
 
-    fn clear_promoted_deployment(&self, service_id: Uuid) -> Result<(), RepoError> {
+    pub fn clear_promoted_deployment(&self, service_id: Uuid) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         clear_promoted_deployment_q(&conn, service_id)
     }
 
-    fn put_artifact(&self, artifact: ArtifactRecord) -> Result<ArtifactRecord, RepoError> {
+    pub fn put_artifact(&self, artifact: ArtifactRecord) -> Result<ArtifactRecord, RepoError> {
         let conn = self.pool.connection()?;
         put_artifact_q(&conn, artifact)
     }
 
-    fn list_artifacts(&self) -> Result<Vec<ArtifactRecord>, RepoError> {
+    pub fn list_artifacts(&self) -> Result<Vec<ArtifactRecord>, RepoError> {
         let conn = self.pool.connection()?;
         list_artifacts_q(&conn)
     }

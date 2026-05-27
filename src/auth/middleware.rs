@@ -7,7 +7,7 @@ use axum::{
 use subtle::ConstantTimeEq;
 
 use crate::app::AppState;
-use crate::repo::{TokenRepo, UserRepo};
+use crate::repo::sqlite::{SqliteTokenRepo, SqliteUserRepo};
 
 use super::credentials::hash_token;
 use super::principal::Principal;
@@ -26,8 +26,8 @@ pub(crate) async fn require_auth(
 
     if let Some(token) = token
         && let Some(principal) = resolve_auth(
-            state.users.as_ref(),
-            state.tokens.as_ref(),
+            &state.users,
+            &state.tokens,
             &token,
             &state.config.admin_token,
         )
@@ -40,8 +40,8 @@ pub(crate) async fn require_auth(
 }
 
 pub fn resolve_auth(
-    users: &dyn UserRepo,
-    tokens: &dyn TokenRepo,
+    users: &SqliteUserRepo,
+    tokens: &SqliteTokenRepo,
     token: &str,
     admin_token: &str,
 ) -> Option<Principal> {

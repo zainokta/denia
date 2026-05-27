@@ -19,14 +19,9 @@ use crate::{
     deploy::{DeploymentRepos, SharedRoutes},
     health::{FakeHealthChecker, HealthChecker},
     rate_limit::{LoginRateLimiter, rate_limit_login},
-    repo::{
-        CredentialRepo, DeploymentRepo, DomainRepo, JobRepo, ProjectRepo, RegistryRepo,
-        ServiceRepo, TokenRepo, UserRepo,
-        sqlite::{
-            SqliteCredentialRepo, SqliteDeploymentRepo, SqliteDomainRepo, SqliteJobRepo,
-            SqliteProjectRepo, SqliteRegistryRepo, SqliteServiceRepo, SqliteTokenRepo,
-            SqliteUserRepo,
-        },
+    repo::sqlite::{
+        SqliteCredentialRepo, SqliteDeploymentRepo, SqliteDomainRepo, SqliteJobRepo,
+        SqliteProjectRepo, SqliteRegistryRepo, SqliteServiceRepo, SqliteTokenRepo, SqliteUserRepo,
     },
     runtime::{LinuxRuntime, Runtime},
     state::SqliteStore,
@@ -36,15 +31,15 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     pub config: AppConfig,
-    pub services: Arc<dyn ServiceRepo>,
-    pub domains: Arc<dyn DomainRepo>,
-    pub registries: Arc<dyn RegistryRepo>,
-    pub projects: Arc<dyn ProjectRepo>,
-    pub users: Arc<dyn UserRepo>,
-    pub deployments: Arc<dyn DeploymentRepo>,
-    pub jobs: Arc<dyn JobRepo>,
-    pub tokens: Arc<dyn TokenRepo>,
-    pub credentials: Arc<dyn CredentialRepo>,
+    pub services: SqliteServiceRepo,
+    pub domains: SqliteDomainRepo,
+    pub registries: SqliteRegistryRepo,
+    pub projects: SqliteProjectRepo,
+    pub users: SqliteUserRepo,
+    pub deployments: SqliteDeploymentRepo,
+    pub jobs: SqliteJobRepo,
+    pub tokens: SqliteTokenRepo,
+    pub credentials: SqliteCredentialRepo,
     pub(crate) runtime: Arc<dyn Runtime>,
     pub(crate) health: Arc<dyn HealthChecker>,
     pub(crate) command_runner: Arc<dyn CommandRunner>,
@@ -139,15 +134,15 @@ impl AppState {
         let pool = store.pool();
         Self {
             config,
-            services: Arc::new(SqliteServiceRepo::new(pool.clone())),
-            domains: Arc::new(SqliteDomainRepo::new(pool.clone())),
-            registries: Arc::new(SqliteRegistryRepo::new(pool.clone())),
-            projects: Arc::new(SqliteProjectRepo::new(pool.clone())),
-            users: Arc::new(SqliteUserRepo::new(pool.clone())),
-            deployments: Arc::new(SqliteDeploymentRepo::new(pool.clone())),
-            jobs: Arc::new(SqliteJobRepo::new(pool.clone())),
-            tokens: Arc::new(SqliteTokenRepo::new(pool.clone())),
-            credentials: Arc::new(SqliteCredentialRepo::new(pool)),
+            services: SqliteServiceRepo::new(pool.clone()),
+            domains: SqliteDomainRepo::new(pool.clone()),
+            registries: SqliteRegistryRepo::new(pool.clone()),
+            projects: SqliteProjectRepo::new(pool.clone()),
+            users: SqliteUserRepo::new(pool.clone()),
+            deployments: SqliteDeploymentRepo::new(pool.clone()),
+            jobs: SqliteJobRepo::new(pool.clone()),
+            tokens: SqliteTokenRepo::new(pool.clone()),
+            credentials: SqliteCredentialRepo::new(pool),
             runtime: Arc::new(runtime),
             health: Arc::new(health),
             command_runner: Arc::new(command_runner),
@@ -188,15 +183,6 @@ impl AppState {
 #[cfg(any(test, feature = "test-support"))]
 pub struct AppStateBuilder {
     config: AppConfig,
-    services: Option<Arc<dyn ServiceRepo>>,
-    domains: Option<Arc<dyn DomainRepo>>,
-    registries: Option<Arc<dyn RegistryRepo>>,
-    projects: Option<Arc<dyn ProjectRepo>>,
-    users: Option<Arc<dyn UserRepo>>,
-    deployments: Option<Arc<dyn DeploymentRepo>>,
-    jobs: Option<Arc<dyn JobRepo>>,
-    tokens: Option<Arc<dyn TokenRepo>>,
-    credentials: Option<Arc<dyn CredentialRepo>>,
     runtime: Option<Arc<dyn Runtime>>,
     domain_verifier: Option<Arc<dyn crate::verification::DomainVerifier>>,
 }
@@ -206,56 +192,11 @@ impl AppStateBuilder {
     pub fn new(config: AppConfig) -> Self {
         Self {
             config,
-            services: None,
-            domains: None,
-            registries: None,
-            projects: None,
-            users: None,
-            deployments: None,
-            jobs: None,
-            tokens: None,
-            credentials: None,
             runtime: None,
             domain_verifier: None,
         }
     }
 
-    pub fn services(mut self, repo: Arc<dyn ServiceRepo>) -> Self {
-        self.services = Some(repo);
-        self
-    }
-    pub fn domains(mut self, repo: Arc<dyn DomainRepo>) -> Self {
-        self.domains = Some(repo);
-        self
-    }
-    pub fn registries(mut self, repo: Arc<dyn RegistryRepo>) -> Self {
-        self.registries = Some(repo);
-        self
-    }
-    pub fn projects(mut self, repo: Arc<dyn ProjectRepo>) -> Self {
-        self.projects = Some(repo);
-        self
-    }
-    pub fn users(mut self, repo: Arc<dyn UserRepo>) -> Self {
-        self.users = Some(repo);
-        self
-    }
-    pub fn deployments(mut self, repo: Arc<dyn DeploymentRepo>) -> Self {
-        self.deployments = Some(repo);
-        self
-    }
-    pub fn jobs(mut self, repo: Arc<dyn JobRepo>) -> Self {
-        self.jobs = Some(repo);
-        self
-    }
-    pub fn tokens(mut self, repo: Arc<dyn TokenRepo>) -> Self {
-        self.tokens = Some(repo);
-        self
-    }
-    pub fn credentials(mut self, repo: Arc<dyn CredentialRepo>) -> Self {
-        self.credentials = Some(repo);
-        self
-    }
     pub fn runtime(mut self, runtime: Arc<dyn Runtime>) -> Self {
         self.runtime = Some(runtime);
         self
@@ -268,14 +209,12 @@ impl AppStateBuilder {
         self
     }
 
-    /// Populate all fields, defaulting any unset repo to its in-memory mock and
-    /// any unset infra dependency to a fake/no-op implementation.
+    /// Build an `AppState` backed by an in-memory migrated SQLite store, with
+    /// fake/no-op infra dependencies. Used by handler unit tests.
     pub fn build(self) -> AppState {
-        use crate::repo::mock::{
-            InMemoryCredentialRepo, InMemoryDeploymentRepo, InMemoryDomainRepo, InMemoryJobRepo,
-            InMemoryProjectRepo, InMemoryRegistryRepo, InMemoryServiceRepo, InMemoryTokenRepo,
-            InMemoryUserRepo,
-        };
+        let store = SqliteStore::open_in_memory().expect("open in-memory store");
+        store.migrate().expect("run migrations");
+        let pool = store.pool();
         let ingress_options = IngressRenderOptions {
             acme_resolver: self.config.acme_resolver.clone(),
             control_domain: self.config.control_domain.clone(),
@@ -285,33 +224,15 @@ impl AppStateBuilder {
         let bridge_start_port = self.config.bridge_start_port;
         AppState {
             config: self.config,
-            services: self
-                .services
-                .unwrap_or_else(|| Arc::new(InMemoryServiceRepo::default())),
-            domains: self
-                .domains
-                .unwrap_or_else(|| Arc::new(InMemoryDomainRepo::default())),
-            registries: self
-                .registries
-                .unwrap_or_else(|| Arc::new(InMemoryRegistryRepo::default())),
-            projects: self
-                .projects
-                .unwrap_or_else(|| Arc::new(InMemoryProjectRepo::default())),
-            users: self
-                .users
-                .unwrap_or_else(|| Arc::new(InMemoryUserRepo::default())),
-            deployments: self
-                .deployments
-                .unwrap_or_else(|| Arc::new(InMemoryDeploymentRepo::default())),
-            jobs: self
-                .jobs
-                .unwrap_or_else(|| Arc::new(InMemoryJobRepo::default())),
-            tokens: self
-                .tokens
-                .unwrap_or_else(|| Arc::new(InMemoryTokenRepo::default())),
-            credentials: self
-                .credentials
-                .unwrap_or_else(|| Arc::new(InMemoryCredentialRepo::default())),
+            services: SqliteServiceRepo::new(pool.clone()),
+            domains: SqliteDomainRepo::new(pool.clone()),
+            registries: SqliteRegistryRepo::new(pool.clone()),
+            projects: SqliteProjectRepo::new(pool.clone()),
+            users: SqliteUserRepo::new(pool.clone()),
+            deployments: SqliteDeploymentRepo::new(pool.clone()),
+            jobs: SqliteJobRepo::new(pool.clone()),
+            tokens: SqliteTokenRepo::new(pool.clone()),
+            credentials: SqliteCredentialRepo::new(pool),
             runtime: self
                 .runtime
                 .unwrap_or_else(|| Arc::new(crate::runtime::FakeRuntime::default())),

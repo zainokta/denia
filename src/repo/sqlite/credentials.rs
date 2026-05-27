@@ -7,7 +7,6 @@ use rusqlite::{Connection, params};
 use uuid::Uuid;
 
 use crate::domain::{Credential, CredentialKind};
-use crate::repo::credential_repo::CredentialRepo;
 use crate::repo::error::RepoError;
 use crate::repo::sqlite::pool::SqlitePool;
 use crate::secrets::SecretRef;
@@ -55,6 +54,7 @@ impl SqliteStore {
     }
 }
 
+#[derive(Clone)]
 pub struct SqliteCredentialRepo {
     pool: SqlitePool,
 }
@@ -65,8 +65,8 @@ impl SqliteCredentialRepo {
     }
 }
 
-impl CredentialRepo for SqliteCredentialRepo {
-    fn put_credential(
+impl SqliteCredentialRepo {
+    pub fn put_credential(
         &self,
         name: String,
         kind: CredentialKind,
