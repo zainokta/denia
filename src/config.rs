@@ -166,6 +166,10 @@ impl AppConfig {
         }
     }
 
+    pub fn ingress_resolver_name(&self) -> String {
+        self.acme_resolver.clone()
+    }
+
     pub fn require_acme_email(&self, tls_in_use: bool) -> Result<(), ConfigError> {
         if tls_in_use && self.acme_email.is_none() {
             return Err(ConfigError::AcmeEmailRequired);
