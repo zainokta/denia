@@ -21,7 +21,7 @@ use crate::autoscale::scaler::{CooldownState, clamp_loop, desired_down, desired_
 use crate::autoscale::usage::{ServiceUsage, UsageSampler};
 use crate::domain::{AutoscalePolicy, HealthCheck, ResourceLimits, RuntimeInstanceId};
 use crate::health::HealthChecker;
-use crate::ingress::bridge::LoopbackBridgeSupervisor;
+use crate::ingress::bridge::{ActivationError, ActivationHook, LoopbackBridgeSupervisor};
 use crate::observability::metrics::CgroupMetricsReader;
 use crate::runtime::Runtime;
 use crate::state::SqliteStore;
@@ -48,6 +48,13 @@ pub struct ManagedService {
     pub limits: ResourceLimits,
     pub env: Vec<(String, String)>,
     pub health_check: HealthCheck,
+}
+
+/// Resolves a service name to its full [`ManagedService`] launch context. The
+/// activator only receives a service NAME, but launching a replica needs the
+/// artifact, limits, env, ports, and policy — this lookup supplies them.
+pub trait ServiceCatalog: Send + Sync {
+    fn resolve(&self, service_name: &str) -> Option<ManagedService>;
 }
 
 /// Abstracts metric sampling so the controller is testable without real cgroups.
@@ -95,6 +102,7 @@ pub struct Controller {
     pub health: Arc<dyn HealthChecker>,
     pub store: SqliteStore,
     pub usage: Box<dyn UsageSource>,
+    pub catalog: Arc<dyn ServiceCatalog>,
     pub cooldowns: HashMap<Uuid, CooldownState>,
     pub drain_grace: Duration,
 }
@@ -109,6 +117,7 @@ impl Controller {
         health: Arc<dyn HealthChecker>,
         store: SqliteStore,
         usage: Box<dyn UsageSource>,
+        catalog: Arc<dyn ServiceCatalog>,
         drain_grace: Duration,
     ) -> Self {
         Self {
@@ -119,8 +128,56 @@ impl Controller {
             health,
             store,
             usage,
+            catalog,
             cooldowns: HashMap::new(),
             drain_grace,
+        }
+    }
+
+    /// Cold-start activation: launch exactly ONE replica for a scaled-to-zero
+    /// service and return `Ok` only once it is Healthy. Single-flight is handled
+    /// by the bridge; this just brings up the first replica. Returns `Ok` (no-op)
+    /// if a replica already exists (lost the race) or the policy forbids any.
+    pub async fn activate_one(&mut self, service: &str) -> Result<(), ActivationError> {
+        let ms = self
+            .catalog
+            .resolve(service)
+            .ok_or_else(|| ActivationError::Failed("unknown service".into()))?;
+        let current = self.registry.replica_count(ms.service_id) as u32;
+        if current >= 1 {
+            return Ok(()); // already woke (race) — nothing to do
+        }
+        if ms.policy.max_replicas == 0 {
+            return Ok(()); // defensive; policy.validate forbids, but be safe
+        }
+        let index = 0; // from zero, first replica is index 0
+        let spec = LaunchSpec {
+            service_name: ms.service_name.clone(),
+            service_id: ms.service_id,
+            deployment_id: ms.deployment_id,
+            replica_index: index,
+            artifact: ms.artifact.clone(),
+            internal_port: ms.internal_port,
+            limits: ms.limits.clone(),
+            env: ms.env.clone(),
+            health_check: ms.health_check.clone(),
+        };
+        match launch_replica(
+            &spec,
+            &mut self.registry,
+            &mut self.ledger,
+            self.runtime.as_ref(),
+            self.bridge.as_ref(),
+            self.health.as_ref(),
+        )
+        .await
+        {
+            Ok(_) => Ok(()),
+            Err(LifecycleError::Capacity) => {
+                Err(ActivationError::Failed("insufficient_capacity".into()))
+            }
+            Err(LifecycleError::Health) => Err(ActivationError::Failed("health".into())),
+            Err(LifecycleError::Runtime(e)) => Err(ActivationError::Failed(e)),
         }
     }
 
@@ -335,6 +392,21 @@ impl Controller {
     }
 }
 
+/// Shared handle over a [`Controller`] that satisfies the bridge's
+/// [`ActivationHook`]. The wiring task stores the same `Arc<Mutex<Controller>>`
+/// to drive `tick`, so cold-start activation and the periodic loop serialize on
+/// one lock.
+#[derive(Clone)]
+pub struct SharedController(pub Arc<tokio::sync::Mutex<Controller>>);
+
+#[async_trait::async_trait]
+impl ActivationHook for SharedController {
+    async fn activate(&self, service: &str) -> Result<(), ActivationError> {
+        let mut guard = self.0.lock().await;
+        guard.activate_one(service).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,17 +488,55 @@ mod tests {
         )
     }
 
+    /// In-memory [`ServiceCatalog`] backed by a name→[`ManagedService`] map.
+    #[derive(Default)]
+    struct FakeCatalog {
+        services: HashMap<String, ManagedService>,
+    }
+
+    impl FakeCatalog {
+        fn with(ms: ManagedService) -> Self {
+            let mut services = HashMap::new();
+            services.insert(ms.service_name.clone(), ms);
+            Self { services }
+        }
+    }
+
+    impl ServiceCatalog for FakeCatalog {
+        fn resolve(&self, service_name: &str) -> Option<ManagedService> {
+            self.services.get(service_name).cloned()
+        }
+    }
+
     fn controller(ledger: ResourceLedger, usage: Box<dyn UsageSource>) -> Controller {
+        controller_with_catalog(ledger, usage, Arc::new(FakeCatalog::default()))
+    }
+
+    fn controller_with_catalog(
+        ledger: ResourceLedger,
+        usage: Box<dyn UsageSource>,
+        catalog: Arc<dyn ServiceCatalog>,
+    ) -> Controller {
+        controller_full(ledger, usage, catalog, Arc::new(FakeRuntime::default()))
+    }
+
+    fn controller_full(
+        ledger: ResourceLedger,
+        usage: Box<dyn UsageSource>,
+        catalog: Arc<dyn ServiceCatalog>,
+        runtime: Arc<FakeRuntime>,
+    ) -> Controller {
         let store = SqliteStore::open_in_memory().unwrap();
         store.migrate().unwrap();
         Controller::new(
             ReplicaRegistry::default(),
             ledger,
-            Arc::new(FakeRuntime::default()),
+            runtime,
             Arc::new(LoopbackBridgeSupervisor::default()),
             Arc::new(FakeHealthChecker::healthy()),
             store,
             usage,
+            catalog,
             Duration::ZERO,
         )
     }
@@ -667,5 +777,134 @@ mod tests {
             }]
         );
         assert_eq!(ctrl.store.get_desired_replicas(svc).unwrap(), Some(1));
+    }
+
+    /// Build a scale-from-zero managed service (min=0, max=3) named `web`.
+    fn zero_scaled(svc: Uuid) -> ManagedService {
+        let mut ms = managed(svc);
+        ms.policy = scale_to_zero_policy();
+        ms
+    }
+
+    #[tokio::test]
+    async fn activate_launches_one_replica() {
+        let svc = Uuid::now_v7();
+        let ms = zero_scaled(svc);
+        let mut ctrl = controller_with_catalog(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::with(ms.clone())),
+        );
+
+        ctrl.activate_one("web").await.expect("activation ok");
+
+        assert_eq!(ctrl.registry.replica_count(svc), 1);
+        assert_eq!(ctrl.registry.healthy_count(svc), 1);
+        assert_eq!(ctrl.bridge.healthy_count("web").await, 1);
+    }
+
+    #[tokio::test]
+    async fn activate_capacity_denied() {
+        let svc = Uuid::now_v7();
+        let ms = zero_scaled(svc);
+        let lim = ResourceLimits::default();
+        // Capacity for exactly one replica, pre-filled so nothing fits.
+        let mut led = ledger(lim.cpu_millis, lim.memory_bytes);
+        led.try_reserve(&lim).expect("prefill");
+        let mut ctrl = controller_with_catalog(
+            led,
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::with(ms.clone())),
+        );
+
+        let err = ctrl
+            .activate_one("web")
+            .await
+            .expect_err("capacity should deny");
+        match err {
+            ActivationError::Failed(reason) => assert!(
+                reason.contains("insufficient_capacity"),
+                "reason was {reason}"
+            ),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_eq!(ctrl.registry.replica_count(svc), 0);
+    }
+
+    #[tokio::test]
+    async fn activate_noop_when_already_running() {
+        let svc = Uuid::now_v7();
+        let ms = zero_scaled(svc);
+        let runtime = Arc::new(FakeRuntime::default());
+        let mut ctrl = controller_full(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::with(ms.clone())),
+            runtime.clone(),
+        );
+
+        // Pre-seed one replica via the lifecycle primitive on the controller fields.
+        seed_replica(&mut ctrl, &ms).await;
+        assert_eq!(ctrl.registry.replica_count(svc), 1);
+        assert_eq!(runtime.started_requests().len(), 1);
+
+        ctrl.activate_one("web").await.expect("activation ok");
+
+        // No second replica launched: count and runtime start count both unchanged.
+        assert_eq!(ctrl.registry.replica_count(svc), 1);
+        assert_eq!(runtime.started_requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn activate_unknown_service_errs() {
+        let mut ctrl = controller_with_catalog(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::default()),
+        );
+
+        let err = ctrl
+            .activate_one("nope")
+            .await
+            .expect_err("unknown service");
+        match err {
+            ActivationError::Failed(reason) => assert_eq!(reason, "unknown service"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_controller_delegates() {
+        use crate::ingress::bridge::ActivationHook;
+
+        let svc = Uuid::now_v7();
+        let ms = zero_scaled(svc);
+        let ctrl = controller_with_catalog(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::with(ms.clone())),
+        );
+
+        let shared = SharedController(Arc::new(tokio::sync::Mutex::new(ctrl)));
+        shared.activate("web").await.expect("activation ok");
+
+        let guard = shared.0.lock().await;
+        assert_eq!(guard.registry.replica_count(svc), 1);
+        assert_eq!(guard.bridge.healthy_count("web").await, 1);
     }
 }
