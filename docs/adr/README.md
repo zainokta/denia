@@ -33,10 +33,11 @@ Each ADR should include:
 | [013](013-domain-verification.md) | Domain Support With HTTP File Verification | Accepted | 2026-05-25 |
 | [014](014-per-service-registry.md) | Per-Service OCI Registry Configuration | Proposed | 2026-05-26 |
 | [015](015-streaming-oci-layer-staging.md) | Streaming OCI Layer Staging | Proposed | 2026-05-27 |
-| [016](016-managed-traefik.md) | Denia-Managed Traefik | Accepted | 2026-05-27 |
+| [016](016-managed-traefik.md) | Denia-Managed Traefik | Superseded by ADR-020 | 2026-05-27 |
 | [017](017-service-crud-api.md) | Service CRUD API | Proposed | 2026-05-27 |
 | [018](018-autoscaling.md) | Autoscaling | Accepted | 2026-05-27 |
 | [019](019-runtime-filesystem-isolation.md) | Per-Replica Runtime Filesystem Isolation | Accepted | 2026-05-27 |
+| [020](020-pingora-ingress.md) | In-Process Pingora Ingress | Accepted | 2026-05-28 |
 
 ## Contributing
 
