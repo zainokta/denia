@@ -373,6 +373,17 @@ impl LoopbackBridgeSupervisor {
         pools.get(service).map(|pool| pool.last_activity)
     }
 
+    /// Set the recorded `last_activity` for `service`, creating the pool entry
+    /// if it does not yet exist. Primarily for backdating activity in tests; in
+    /// production the proxy path advances `last_activity` to `Instant::now()`.
+    pub async fn set_last_activity(&self, service: &str, when: Instant) {
+        let mut pools = self.inner.pools.lock().await;
+        pools
+            .entry(service.to_string())
+            .or_insert_with(ServicePool::new)
+            .last_activity = when;
+    }
+
     /// Round-robin the next healthy socket for `service`, advancing the cursor
     /// and updating `last_activity`. `None` if no healthy endpoint exists.
     pub async fn next_socket(&self, service: &str) -> Option<PathBuf> {
@@ -735,6 +746,20 @@ mod tests {
         let _ = sup.next_socket("svc").await.expect("socket");
         let after = sup.last_activity("svc").await.expect("activity");
         assert!(after > before);
+    }
+
+    #[tokio::test]
+    async fn set_last_activity_round_trips() {
+        let sup = LoopbackBridgeSupervisor::default();
+        // No pool yet: set creates the entry, get reads it back.
+        let when = Instant::now() - Duration::from_secs(500);
+        sup.set_last_activity("svc", when).await;
+        assert_eq!(sup.last_activity("svc").await, Some(when));
+
+        // Overwrite with a newer instant.
+        let later = Instant::now();
+        sup.set_last_activity("svc", later).await;
+        assert_eq!(sup.last_activity("svc").await, Some(later));
     }
 
     /// Spawn a Unix listener that replies with a fixed body tagged per socket,
