@@ -103,6 +103,7 @@ impl IntoResponse for ApiError {
                 RepoError::RegistryInUse => (StatusCode::CONFLICT, error.to_string()),
                 RepoError::InvalidCredentials => (StatusCode::UNAUTHORIZED, error.to_string()),
                 RepoError::LastSuperAdmin => (StatusCode::CONFLICT, error.to_string()),
+                RepoError::AdminAlreadyInitialized => (StatusCode::CONFLICT, error.to_string()),
                 _ => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal server error".to_string(),
