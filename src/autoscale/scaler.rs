@@ -31,6 +31,30 @@ pub fn clamp_loop(desired: u32, min: u32, max: u32) -> u32 {
     desired.clamp(min.max(1), max)
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct CooldownState {
+    below_since: Option<u64>,
+}
+
+impl CooldownState {
+    /// Call when the metric is at/above target: cancels any in-progress cooldown.
+    pub fn note_above_target(&mut self, _now_s: u64) {
+        self.below_since = None;
+    }
+
+    /// Call when the metric is below target and a scale-down is desired.
+    /// Returns true once the metric has been continuously below target for `cooldown_s`.
+    pub fn scale_down_allowed(&mut self, now_s: u64, cooldown_s: u64) -> bool {
+        match self.below_since {
+            None => {
+                self.below_since = Some(now_s);
+                false
+            }
+            Some(start) => now_s.saturating_sub(start) >= cooldown_s,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +79,19 @@ mod tests {
         assert_eq!(clamp_loop(0, 1, 5), 1); // loop floor is max(min,1)=1
         assert_eq!(clamp_loop(0, 0, 5), 1); // even with min=0, loop floor is 1
         assert_eq!(clamp_loop(9, 1, 5), 5);
+    }
+
+    #[test]
+    fn cooldown_gates_scale_down_only() {
+        let mut st = CooldownState::default();
+        // first observation below target at t=0 starts the window -> not yet allowed
+        assert!(!st.scale_down_allowed(0, 300));
+        // still within the window
+        assert!(!st.scale_down_allowed(299, 300));
+        // window elapsed -> allowed
+        assert!(st.scale_down_allowed(300, 300));
+        // a breach above target resets the window
+        st.note_above_target(310);
+        assert!(!st.scale_down_allowed(320, 300));
     }
 }
