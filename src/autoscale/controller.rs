@@ -635,6 +635,16 @@ impl Controller {
         events
     }
 
+    /// Total replica count for a service (running + launching + draining).
+    pub fn replica_count(&self, service_id: uuid::Uuid) -> u32 {
+        self.registry.replica_count(service_id) as u32
+    }
+
+    /// Number of replicas in the Healthy state for a service.
+    pub fn healthy_replicas(&self, service_id: uuid::Uuid) -> u32 {
+        self.registry.healthy_count(service_id) as u32
+    }
+
     /// Catalog-driven tick: fetches all managed services from the catalog and
     /// drives one scaling tick for each.
     pub async fn tick_all(&mut self, now_s: u64) -> Vec<AutoscaleEvent> {

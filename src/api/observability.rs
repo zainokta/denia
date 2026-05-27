@@ -28,6 +28,8 @@ struct WorkloadView {
     status: Option<crate::domain::DeploymentStatus>,
     cpu_usage_usec: Option<u64>,
     memory_current_bytes: Option<u64>,
+    replica_count: u32,
+    healthy_replicas: u32,
 }
 
 async fn get_node_metrics(
@@ -83,6 +85,13 @@ async fn list_workloads(
                 .map(|dep| dep.status),
             None => None,
         };
+        let (replica_count, healthy_replicas) = match &state.autoscaler {
+            Some(ctrl) => {
+                let c = ctrl.lock().await;
+                (c.replica_count(service.id), c.healthy_replicas(service.id))
+            }
+            None => (0, 0),
+        };
         workloads.push(WorkloadView {
             service_id: service.id,
             service_name: service.name.clone(),
@@ -91,6 +100,8 @@ async fn list_workloads(
             status,
             cpu_usage_usec: cpu,
             memory_current_bytes: mem,
+            replica_count,
+            healthy_replicas,
         });
     }
     Ok(Json(workloads))
