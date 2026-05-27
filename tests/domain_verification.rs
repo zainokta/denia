@@ -4,8 +4,8 @@ use denia::{
     app::{AppState, build_router},
     config::AppConfig,
     domain::{ExternalImageSource, HealthCheck, ResourceLimits, ServiceConfig, ServiceSource},
+    ingress::pingora::RouteSpec,
     state::SqliteStore,
-    traefik::RouteSpec,
     verification::{DomainVerifier, DomainVerifyError},
 };
 use tower::util::ServiceExt;
@@ -371,33 +371,34 @@ async fn challenge_routes_are_not_login_rate_limited() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 8: verify re-renders traefik when route exists
+// Test 8: verify applies routes to the live route table when an entry exists
+//
+// A service is only routable once it has been deployed (a snapshot entry keyed
+// by service.id exists). After a successful domain verification, `apply_routes`
+// refreshes the verified hostnames and swaps the in-memory route table — no
+// Traefik YAML is written (ADR-020).
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn verify_re_renders_traefik_when_route_exists() {
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-    let tmp_path = tmp.path().to_path_buf();
-
+async fn verify_applies_routes_when_entry_exists() {
     let store = make_store();
     let service = seed_service(&store, "web");
 
-    let mut config = AppConfig::for_test("test-token");
-    config.traefik_dynamic_config_path = tmp_path.clone();
-
+    let config = AppConfig::for_test("test-token");
     let state =
         AppState::new(config, &store).with_domain_verifier(Arc::new(FakeVerifier { ok: true }));
+    let ingress = state.ingress.clone();
 
-    // Pre-insert a RouteSpec so rerender_traefik finds a prev entry with a bridge_port.
+    // Pre-insert a snapshot entry (keyed by service.id, F-3) so apply_routes has
+    // an entry to refresh — mirrors a service that was already deployed.
     {
         let mut routes = state.routes.lock().unwrap();
         routes.insert(
-            service.name.clone(),
+            service.id.to_string(),
             RouteSpec {
                 route_key: format!("svc-{}", service.id),
                 service_name: service.name.clone(),
                 domains: vec![],
-                bridge_port: 19000,
                 tls: false,
             },
         );
@@ -428,14 +429,10 @@ async fn verify_re_renders_traefik_when_route_exists() {
         .unwrap();
     assert_eq!(verify_resp.status(), http::StatusCode::OK);
 
-    // Read the rendered traefik config
-    let yaml = std::fs::read_to_string(&tmp_path).expect("traefik config written");
-    assert!(
-        yaml.contains("Host(`app.example.com`)"),
-        "expected Host rule for app.example.com in:\n{yaml}"
-    );
-    assert!(
-        yaml.contains("denia-challenge"),
-        "expected denia-challenge router in:\n{yaml}"
-    );
+    // The verified host now resolves to the service in the live route table.
+    let table = ingress.routes();
+    let resolved = table
+        .resolve("app.example.com")
+        .expect("verified host routed");
+    assert_eq!(resolved.service_name, "web");
 }

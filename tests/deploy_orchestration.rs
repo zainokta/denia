@@ -1,13 +1,15 @@
+use std::sync::Arc;
+
 use chrono::Utc;
 use denia::{
     artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource},
-    bridge::{BridgeAllocator, BridgeTarget, FakeBridgeManager},
     deploy::{DeploymentCoordinator, DeploymentPlan, DeploymentRepos},
     domain::{
         DeploymentStatus, DomainStatus, ExternalImageSource, HealthCheck, ResourceLimits,
         RuntimeInstanceId, RuntimeStartRequest, ServiceConfig, ServiceDomain, ServiceSource,
     },
     health::FakeHealthChecker,
+    ingress::pingora::IngressState,
     repo::sqlite::{SqliteDeploymentRepo, SqliteDomainRepo, SqliteProjectRepo, SqliteRegistryRepo},
     runtime::{FakeRuntime, Runtime},
     state::SqliteStore,
@@ -38,29 +40,6 @@ fn seed_verified_domain(store: &SqliteStore, service_id: Uuid, hostname: &str) {
             created_at: Utc::now(),
         })
         .unwrap();
-}
-
-#[test]
-fn bridge_allocator_assigns_stable_loopback_ports() {
-    let mut allocator = BridgeAllocator::new(19000);
-
-    let first = allocator
-        .assign("web", "/var/lib/denia/runtime/web/current.sock".into())
-        .expect("first assign");
-    let second = allocator
-        .assign("web", "/var/lib/denia/runtime/web/current.sock".into())
-        .expect("second assign");
-
-    assert_eq!(first.port, 19000);
-    assert_eq!(second.port, 19000);
-    assert_eq!(
-        first,
-        BridgeTarget {
-            service_name: "web".to_string(),
-            port: 19000,
-            socket_path: "/var/lib/denia/runtime/web/current.sock".into(),
-        }
-    );
 }
 
 #[tokio::test]
@@ -177,20 +156,20 @@ async fn coordinator_promotes_only_after_health_check_passes() {
 }
 
 #[tokio::test]
-async fn coordinator_writes_traefik_config_on_promotion() {
+async fn coordinator_registers_route_and_replica_on_promotion() {
+    // Ingress is now the in-process Pingora route table + replica pool (ADR-020);
+    // promotion registers a healthy replica for the workload UDS and upserts the
+    // verified host into the route table — no Traefik YAML is written.
     let store = SqliteStore::open_in_memory().expect("sqlite");
     store.migrate().expect("migrate");
     let runtime = FakeRuntime::default();
     let health = FakeHealthChecker::healthy();
-    let dir = tempfile::tempdir().expect("tempdir");
-    let config_path = dir.path().join("denia.yml");
+    let ingress = Arc::new(IngressState::default());
     let coordinator = DeploymentCoordinator::new_with_routing(
         build_repos(&store),
         runtime,
         health,
-        BridgeAllocator::new(19000),
-        std::sync::Arc::new(FakeBridgeManager::default()),
-        config_path.clone(),
+        ingress.clone(),
     );
 
     let project_id = store.default_project_id().expect("default project");
@@ -226,12 +205,24 @@ async fn coordinator_writes_traefik_config_on_promotion() {
     seed_verified_domain(&store, service.id, "web.example.test");
 
     coordinator
-        .deploy(DeploymentPlan { service, artifact })
+        .deploy(DeploymentPlan {
+            service: service.clone(),
+            artifact,
+        })
         .await
         .expect("deployment");
 
-    let content = std::fs::read_to_string(config_path).expect("read config");
-    assert!(content.contains("Host(`web.example.test`)"));
-    assert!(content.contains("http://127.0.0.1:19000"));
-    assert!(content.contains("svc-"));
+    // The verified host resolves to the service in the live route table.
+    let route = ingress.routes();
+    let resolved = route.resolve("web.example.test").expect("route present");
+    assert_eq!(resolved.service_name, "web");
+    assert_eq!(resolved.route_key, format!("svc-{}", service.id));
+    assert!(!resolved.tls);
+
+    // The workload's UDS is registered as a healthy replica (keyed by service.id).
+    assert_eq!(ingress.healthy_count(&service.id.to_string()).await, 1);
+    assert!(
+        ingress.next_socket(&service.id.to_string()).await.is_some(),
+        "a healthy replica socket must be selectable after promotion"
+    );
 }
