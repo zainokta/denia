@@ -13,6 +13,32 @@ use uuid::Uuid;
 
 use crate::access_log::{AccessEntry, AccessLogStore, parse_request_line, parse_status_line};
 
+/// Maximum time a connection waits for a cold-start activation to produce a
+/// healthy replica before giving up with a 503.
+const ACTIVATION_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Number of times a waiter re-checks `next_socket` after a successful
+/// activation before treating the absence of a socket as a failure. A handful
+/// of short retries covers the brief window where a replica is healthy but its
+/// socket assignment is still settling.
+const POST_ACTIVATION_RETRIES: usize = 5;
+const POST_ACTIVATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Cold-start hook for scale-to-zero services. The controller launches the
+/// service and only returns `Ok` once at least one replica is `Healthy`.
+#[async_trait]
+pub trait ActivationHook: Send + Sync {
+    async fn activate(&self, service: &str) -> Result<(), ActivationError>;
+}
+
+#[derive(Debug, Error)]
+pub enum ActivationError {
+    #[error("activation timed out")]
+    Timeout,
+    #[error("activation failed: {0}")]
+    Failed(String),
+}
+
 /// A single replica's loopback Unix endpoint within a service's bridge pool.
 #[derive(Debug, Clone)]
 pub struct ReplicaEndpoint {
@@ -179,6 +205,13 @@ struct LoopbackBridgeInner {
     tasks: Mutex<BTreeMap<String, BridgeTask>>,
     pools: Mutex<BTreeMap<String, ServicePool>>,
     access_log: AccessLogStore,
+    /// Optional cold-start hook injected by the controller. When unset, the
+    /// listener falls back to closing connections with zero healthy replicas.
+    activator: Mutex<Option<Arc<dyn ActivationHook>>>,
+    /// Per-service single-flight gate. Connections that find no healthy replica
+    /// serialize on the service's gate; the first holder that still sees no
+    /// socket runs the activation, later holders re-check and reuse the result.
+    activation_gates: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
 }
 
 impl LoopbackBridgeInner {
@@ -190,6 +223,58 @@ impl LoopbackBridgeInner {
         pool.last_activity = Instant::now();
         Some(socket)
     }
+
+    /// Fetch (creating if absent) the per-service single-flight activation gate.
+    async fn activation_gate(&self, service: &str) -> Arc<Mutex<()>> {
+        let mut gates = self.activation_gates.lock().await;
+        gates
+            .entry(service.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// Resolve a healthy socket for `service`, triggering a single-flight
+    /// cold-start activation when none is available and an activator is set.
+    ///
+    /// Single-flight: connections serialize on the per-service gate. The first
+    /// holder that still observes no socket calls `activate`; concurrent
+    /// waiters block on the gate, then re-check and reuse the now-healthy
+    /// socket without a second activation. On activation failure the gate is
+    /// released, so the next connection starts a fresh activation (no stuck
+    /// latch). Returns `Ok(None)` only when no activator is configured.
+    async fn resolve_or_activate(&self, service: &str) -> Result<Option<PathBuf>, ActivationError> {
+        if let Some(socket) = self.next_socket(service).await {
+            return Ok(Some(socket));
+        }
+        let activator = { self.activator.lock().await.clone() };
+        let Some(activator) = activator else {
+            return Ok(None);
+        };
+
+        let gate = self.activation_gate(service).await;
+        let _guard = gate.lock().await;
+
+        // Another connection may have activated while we waited on the gate.
+        if let Some(socket) = self.next_socket(service).await {
+            return Ok(Some(socket));
+        }
+
+        activator.activate(service).await?;
+
+        // `activate` only returns Ok once a replica is healthy; allow a few
+        // short retries for the socket selection to settle.
+        for attempt in 0..POST_ACTIVATION_RETRIES {
+            if let Some(socket) = self.next_socket(service).await {
+                return Ok(Some(socket));
+            }
+            if attempt + 1 < POST_ACTIVATION_RETRIES {
+                tokio::time::sleep(POST_ACTIVATION_RETRY_DELAY).await;
+            }
+        }
+        Err(ActivationError::Failed(
+            "activation reported healthy but no socket became available".to_string(),
+        ))
+    }
 }
 
 impl LoopbackBridgeSupervisor {
@@ -199,12 +284,20 @@ impl LoopbackBridgeSupervisor {
                 tasks: Mutex::new(BTreeMap::new()),
                 pools: Mutex::new(BTreeMap::new()),
                 access_log,
+                activator: Mutex::new(None),
+                activation_gates: Mutex::new(BTreeMap::new()),
             }),
         }
     }
 
     pub fn access_log(&self) -> AccessLogStore {
         self.inner.access_log.clone()
+    }
+
+    /// Inject the cold-start activation hook. Until set, connections to a
+    /// scaled-to-zero service are closed rather than triggering a launch.
+    pub async fn set_activator(&self, hook: Arc<dyn ActivationHook>) {
+        *self.inner.activator.lock().await = Some(hook);
     }
 
     /// Insert or replace a replica endpoint (default `healthy = false`),
@@ -337,13 +430,34 @@ impl LoopbackBridge {
             .acquire_owned()
             .await
             .map_err(|_| BridgeError::Io(std::io::Error::other("semaphore closed")))?;
-        let (tcp, _) = self.listener.accept().await?;
+        let (mut tcp, _) = self.listener.accept().await?;
         // Resolve a healthy replica socket per connection. With zero healthy
-        // endpoints, close the connection cleanly (the activator/cold-start
-        // path is a separate, later task).
-        let Some(socket_path) = self.pools.next_socket(&self.service_name).await else {
-            drop(tcp);
-            return Ok(());
+        // endpoints, single-flight a cold-start activation (if an activator is
+        // configured) and hold the connection until a replica is healthy; on
+        // failure/timeout reply 503. With no activator, close cleanly.
+        let resolved = tokio::time::timeout(
+            ACTIVATION_WAIT,
+            self.pools.resolve_or_activate(&self.service_name),
+        )
+        .await;
+        let socket_path = match resolved {
+            Ok(Ok(Some(path))) => path,
+            Ok(Ok(None)) => {
+                // No activator configured: preserve close-on-zero behavior.
+                drop(tcp);
+                return Ok(());
+            }
+            Ok(Err(_)) | Err(_) => {
+                // Activation failed/timed out: 503 this connection. The gate is
+                // already released, so a later connection retries fresh.
+                let _ = tcp
+                    .write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                let _ = tcp.shutdown().await;
+                return Ok(());
+            }
         };
         let unix = match UnixStream::connect(&socket_path).await {
             Ok(unix) => unix,
@@ -716,8 +830,127 @@ mod tests {
         let _ = std::fs::remove_file(&path_b);
     }
 
+    /// Fake activation hook: counts calls and, when configured to succeed,
+    /// registers a healthy replica (backed by a live echo socket) in the
+    /// supervisor so `next_socket` resolves after `activate` returns.
+    struct FakeActivator {
+        sup: LoopbackBridgeSupervisor,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        fail_first: Arc<std::sync::atomic::AtomicBool>,
+        socket_path: PathBuf,
+    }
+
+    #[async_trait]
+    impl ActivationHook for FakeActivator {
+        async fn activate(&self, service: &str) -> Result<(), ActivationError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self
+                .fail_first
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ActivationError::Failed("boom".to_string()));
+            }
+            let id = Uuid::now_v7();
+            self.sup
+                .add_replica(service, id, self.socket_path.clone())
+                .await;
+            self.sup.set_replica_healthy(service, id, true).await;
+            Ok(())
+        }
+    }
+
     #[tokio::test]
-    async fn listener_closes_connection_when_no_healthy_replica() {
+    async fn single_flight_one_launch_for_concurrent_connections() {
+        let sup = LoopbackBridgeSupervisor::default();
+        let path = socket_path("activate-sf");
+        let _count = spawn_echo_socket(path.clone(), "OK");
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook = Arc::new(FakeActivator {
+            sup: sup.clone(),
+            calls: calls.clone(),
+            fail_first: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            socket_path: path.clone(),
+        });
+        sup.set_activator(hook).await;
+
+        // Pool starts with zero replicas (scaled to zero).
+        assert_eq!(sup.healthy_count("svc").await, 0);
+
+        let bridge = LoopbackBridge::bind_with_pool(0, "svc".to_string(), sup.inner.clone())
+            .await
+            .expect("bind");
+        let port = bridge.local_port();
+        let (_tx, rx) = oneshot::channel();
+        tokio::spawn(bridge.serve_until_shutdown(rx));
+
+        // Fire N concurrent connections at the cold service.
+        let mut handles = Vec::new();
+        for _ in 0..6 {
+            handles.push(tokio::spawn(async move { send_request(port).await }));
+        }
+        for h in handles {
+            let resp = h.await.expect("join");
+            assert!(resp.ends_with("OK"), "expected proxied body, got: {resp:?}");
+        }
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one activation for concurrent cold-start connections"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn activation_failure_returns_503_and_resets_latch() {
+        let sup = LoopbackBridgeSupervisor::default();
+        let path = socket_path("activate-503");
+        let _count = spawn_echo_socket(path.clone(), "OK");
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook = Arc::new(FakeActivator {
+            sup: sup.clone(),
+            calls: calls.clone(),
+            fail_first: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            socket_path: path.clone(),
+        });
+        sup.set_activator(hook).await;
+
+        let bridge = LoopbackBridge::bind_with_pool(0, "svc".to_string(), sup.inner.clone())
+            .await
+            .expect("bind");
+        let port = bridge.local_port();
+        let (_tx, rx) = oneshot::channel();
+        tokio::spawn(bridge.serve_until_shutdown(rx));
+
+        // First connection: activation fails → 503.
+        let r1 = send_request(port).await;
+        assert!(
+            r1.contains("503"),
+            "expected 503 on activation failure, got: {r1:?}"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Latch reset: a NEW connection triggers a second (now succeeding)
+        // activation and is proxied.
+        let r2 = send_request(port).await;
+        assert!(
+            r2.ends_with("OK"),
+            "expected proxied body after retry, got: {r2:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "second activation must run (no stuck latch)"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn no_activator_closes_connection() {
         let sup = LoopbackBridgeSupervisor::default();
         sup.add_replica("svc", Uuid::now_v7(), PathBuf::from("/run/denia/none.sock"))
             .await; // unhealthy
