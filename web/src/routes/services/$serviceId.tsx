@@ -1,4 +1,9 @@
-import { createFileRoute, useNavigate, useParams } from '@tanstack/react-router'
+import {
+  createFileRoute,
+  Link,
+  useNavigate,
+  useParams,
+} from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Effect } from 'effect'
@@ -280,9 +285,9 @@ export function ServiceDetail() {
     <main className="page-wrap px-4 pb-12 pt-12">
       <p className="kicker mb-3">
         service{' '}
-        <a href="/services" className="text-[var(--fg-muted)]">
+        <Link to="/services" className="text-[var(--fg-muted)]">
           &larr; back
-        </a>
+        </Link>
       </p>
       <div className="mb-6 flex flex-wrap items-center gap-3">
         <h1 className="text-2xl font-semibold tracking-tight text-[var(--fg)]">
@@ -312,6 +317,7 @@ export function ServiceDetail() {
                 <button
                   type="button"
                   className="btn text-xs"
+                  aria-label="confirm delete service"
                   onClick={() => remove.mutate()}
                   disabled={remove.isPending}
                 >
@@ -320,6 +326,7 @@ export function ServiceDetail() {
                 <button
                   type="button"
                   className="btn text-xs"
+                  aria-label="cancel delete service"
                   onClick={() => setDeleteConfirm(false)}
                 >
                   no
@@ -509,7 +516,7 @@ export function ServiceDetail() {
                 <p className="kicker mb-2">
                   deployments{' '}
                   {deploymentsFetching ? (
-                    <span className="text-[var(--fg-muted)]">fetching...</span>
+                    <span className="text-[var(--fg-muted)]">fetching…</span>
                   ) : (
                     <span className="text-[var(--fg-muted)]">
                       {deployments.length}
@@ -578,7 +585,7 @@ export function ServiceDetail() {
                 <ul className="m-0 list-none">
                   {logs.map((line, i) => (
                     <li
-                      key={i}
+                      key={`${i}:${line}`}
                       className={`flex gap-4 px-4 py-1.5 text-xs ${
                         i > 0 ? 'border-t border-[var(--border)]' : ''
                       }`}
@@ -674,7 +681,7 @@ export function ServiceDetail() {
                     <tbody>
                       {metrics.map((m, i) => (
                         <tr
-                          key={i}
+                          key={`${m.recorded_at}-${i}`}
                           className={
                             i > 0 ? 'border-t border-[var(--border)]' : ''
                           }
@@ -852,6 +859,7 @@ function DomainsSection({
                     <button
                       type="button"
                       className="btn text-xs"
+                      aria-label="confirm remove domain"
                       onClick={() => {
                         onDelete(d.id)
                       }}
@@ -862,6 +870,7 @@ function DomainsSection({
                     <button
                       type="button"
                       className="btn text-xs"
+                      aria-label="cancel remove domain"
                       onClick={() => onDeleteConfirm(null)}
                     >
                       no
@@ -893,6 +902,7 @@ function DomainsSection({
       >
         <input
           type="text"
+          aria-label="domain hostname"
           placeholder="hostname"
           value={hostname}
           onChange={(e) => onHostnameChange(e.target.value)}

@@ -1,4 +1,4 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import { Effect } from 'effect'
 import { useMemo } from 'react'
@@ -193,12 +193,12 @@ export function Dashboard() {
             Create a project, then deploy your first service.
           </p>
           <div className="flex flex-wrap gap-3">
-            <a href="/projects" className="btn btn-primary">
+            <Link to="/projects" className="btn btn-primary">
               Projects
-            </a>
-            <a href="/services" className="btn">
+            </Link>
+            <Link to="/services" className="btn">
               Services
-            </a>
+            </Link>
           </div>
         </section>
       ) : null}
