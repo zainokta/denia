@@ -44,7 +44,7 @@ pub(crate) const SOCKET_PROXY_TARGET: &str = "/.denia/socket-proxy";
 pub(crate) const WORKLOAD_LAUNCHER_TARGET: &str = "/.denia/workload-launcher";
 pub(crate) const GUEST_SERVICE_SOCKET: &str = "/run/denia/service.sock";
 pub(crate) const GUEST_SERVICE_SOCKET_ENV: &str = "DENIA_SERVICE_SOCKET";
-pub(crate) const CGROUP_CONTROLLERS: &[&str] = &["cpu", "memory"];
+pub(crate) const CGROUP_CONTROLLERS: &[&str] = &["cpu", "memory", "pids", "io"];
 
 impl LinuxRuntime {
     pub fn new(runtime_dir: impl Into<PathBuf>) -> Self {
@@ -189,6 +189,24 @@ impl LinuxRuntime {
             "write cgroup memory.max",
             plan.cgroup_path.join("memory.max"),
         ))?;
+        if let Some(swap) = request.memory_swap_max {
+            std::fs::write(
+                plan.cgroup_path.join("memory.swap.max"),
+                format!("{}\n", swap),
+            )
+            .map_err(path_io(
+                "write cgroup memory.swap.max",
+                plan.cgroup_path.join("memory.swap.max"),
+            ))?;
+        }
+        if let Some(pids) = request.pids_max {
+            std::fs::write(plan.cgroup_path.join("pids.max"), format!("{}\n", pids)).map_err(
+                path_io("write cgroup pids.max", plan.cgroup_path.join("pids.max")),
+            )?;
+        }
+        if let Some(weight) = request.io_weight {
+            let _ = std::fs::write(plan.cgroup_path.join("io.weight"), format!("{}\n", weight));
+        }
         Ok(())
     }
 
@@ -383,6 +401,15 @@ impl Runtime for LinuxRuntime {
             cgroup_path.join("memory.max"),
             format!("{}\n", request.memory_bytes),
         )?;
+        if let Some(swap) = request.memory_swap_max {
+            let _ = std::fs::write(cgroup_path.join("memory.swap.max"), format!("{}\n", swap));
+        }
+        if let Some(pids) = request.pids_max {
+            let _ = std::fs::write(cgroup_path.join("pids.max"), format!("{}\n", pids));
+        }
+        if let Some(weight) = request.io_weight {
+            let _ = std::fs::write(cgroup_path.join("io.weight"), format!("{}\n", weight));
+        }
 
         let cleanup = || {
             let _ = std::fs::write(cgroup_path.join("cgroup.kill"), "1\n");
@@ -534,6 +561,9 @@ mod tests {
             cpu_millis: 100,
             memory_bytes: 67108864,
             env: Vec::new(),
+            pids_max: None,
+            memory_swap_max: None,
+            io_weight: None,
         }
     }
 
@@ -805,22 +835,24 @@ mod tests {
         let service = root.join("service");
         let deployment = service.join("deployment");
         std::fs::create_dir_all(&root).expect("root");
-        std::fs::write(root.join("cgroup.controllers"), "cpu memory io\n").expect("controllers");
+        std::fs::write(root.join("cgroup.controllers"), "cpu memory pids io\n")
+            .expect("controllers");
         std::fs::write(root.join("cgroup.subtree_control"), "").expect("subtree");
         std::fs::create_dir_all(&service).expect("service");
-        std::fs::write(service.join("cgroup.controllers"), "cpu memory\n").expect("controllers");
+        std::fs::write(service.join("cgroup.controllers"), "cpu memory pids io\n")
+            .expect("controllers");
         std::fs::write(service.join("cgroup.subtree_control"), "").expect("subtree");
 
         prepare_cgroup_directory(&root, &deployment, CGROUP_CONTROLLERS).expect("prepare cgroup");
 
         assert_eq!(
             std::fs::read_to_string(root.join("cgroup.subtree_control")).expect("root subtree"),
-            "+cpu +memory\n"
+            "+cpu +memory +pids +io\n"
         );
         assert_eq!(
             std::fs::read_to_string(service.join("cgroup.subtree_control"))
                 .expect("service subtree"),
-            "+cpu +memory\n"
+            "+cpu +memory +pids +io\n"
         );
         assert!(deployment.exists());
     }

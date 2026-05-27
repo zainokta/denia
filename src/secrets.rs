@@ -80,6 +80,8 @@ pub enum SecretError {
     Command(#[from] CommandError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("secret path traversal detected")]
+    PathTraversal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,9 +97,22 @@ impl SopsSecretStore {
     }
 
     pub fn secret_path(&self, secret_ref: &SecretRef) -> std::path::PathBuf {
-        self.data_dir
-            .join("secrets")
-            .join(format!("{}.sops.yaml", secret_ref.file_stem()))
+        let secrets_dir = self.data_dir.join("secrets");
+        let candidate = secrets_dir.join(format!("{}.sops.yaml", secret_ref.file_stem()));
+        candidate
+    }
+
+    fn validate_secret_path(&self, path: &std::path::Path) -> Result<(), SecretError> {
+        let secrets_dir = self.data_dir.join("secrets");
+        match (secrets_dir.canonicalize(), path.canonicalize()) {
+            (Ok(canonical_dir), Ok(canonical_path)) => {
+                if !canonical_path.starts_with(&canonical_dir) {
+                    return Err(SecretError::PathTraversal);
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     pub async fn decrypt(
@@ -107,6 +122,7 @@ impl SopsSecretStore {
         secret_ref: &SecretRef,
     ) -> Result<SecretPayload, SecretError> {
         let secret_path = self.secret_path(secret_ref);
+        self.validate_secret_path(&secret_path)?;
         let secret_path = secret_path.to_string_lossy();
         let sops_binary = sops_binary.to_string_lossy();
         let output = runner

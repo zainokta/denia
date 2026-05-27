@@ -86,6 +86,9 @@ async fn fake_runtime_starts_and_stops_service() {
             cpu_millis: 500,
             memory_bytes: 536870912,
             env: Vec::new(),
+            pids_max: None,
+            memory_swap_max: None,
+            io_weight: None,
         })
         .await
         .expect("started");

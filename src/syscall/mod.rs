@@ -1,6 +1,7 @@
 pub mod caps;
 pub mod chown;
 pub mod ns;
+pub mod seccomp;
 pub mod signal;
 
 use std::io;
@@ -28,4 +29,6 @@ pub enum SyscallError {
     ChildSetupTimeout { stage: &'static str },
     #[error("signal delivery failed for pid {pid}: {reason}")]
     Signal { pid: u32, reason: String },
+    #[error("seccomp filter installation failed: {0}")]
+    Seccomp(String),
 }

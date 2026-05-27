@@ -84,6 +84,12 @@ pub struct JobRunRequest {
     pub env: Vec<(String, String)>,
     pub cpu_millis: u32,
     pub memory_bytes: u64,
+    #[serde(default)]
+    pub pids_max: Option<u64>,
+    #[serde(default)]
+    pub memory_swap_max: Option<u64>,
+    #[serde(default)]
+    pub io_weight: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

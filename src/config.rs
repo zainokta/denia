@@ -1,11 +1,44 @@
 use std::{env, net::SocketAddr, path::PathBuf};
 
+use rand::RngExt;
+use sha2::Digest;
 use thiserror::Error;
+
+pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    use sha2::Sha256;
+    const BLOCK_SIZE: usize = 64;
+    let mut key_block = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let hash: [u8; 32] = Sha256::digest(key).into();
+        key_block[..32].copy_from_slice(&hash);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK_SIZE];
+    let mut opad = [0x5cu8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(data);
+    let inner_hash = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_hash);
+    outer.finalize().into()
+}
+
+pub fn compute_admin_token_hash(token: &str, key: &[u8]) -> String {
+    hex::encode(hmac_sha256(key, token.as_bytes()))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
     pub bind_addr: SocketAddr,
-    pub admin_token: String,
+    pub admin_token_hash: String,
+    pub admin_token_hmac_key: [u8; 32],
     pub database_path: PathBuf,
     pub data_dir: PathBuf,
     pub buildkit_binary: PathBuf,
@@ -29,7 +62,7 @@ pub struct AppConfig {
 pub enum ConfigError {
     #[error("DENIA_ADMIN_TOKEN must be set")]
     MissingAdminToken,
-    #[error("DENIA_ADMIN_TOKEN must be at least 32 characters long")]
+    #[error("DENIA_ADMIN_TOKEN must be at least 64 characters long")]
     AdminTokenTooShort,
     #[error("invalid DENIA_BIND_ADDR: {0}")]
     InvalidBindAddr(#[from] std::net::AddrParseError),
@@ -39,7 +72,7 @@ impl AppConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let admin_token =
             env::var("DENIA_ADMIN_TOKEN").map_err(|_| ConfigError::MissingAdminToken)?;
-        if admin_token.len() < 32 {
+        if admin_token.len() < 64 {
             return Err(ConfigError::AdminTokenTooShort);
         }
         let bind_addr = env::var("DENIA_BIND_ADDR")
@@ -89,9 +122,14 @@ impl AppConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|_| data_dir.clone());
 
+        let mut admin_token_hmac_key = [0u8; 32];
+        rand::rng().fill(&mut admin_token_hmac_key);
+        let admin_token_hash = compute_admin_token_hash(&admin_token, &admin_token_hmac_key);
+
         Ok(Self {
             bind_addr,
-            admin_token,
+            admin_token_hash,
+            admin_token_hmac_key,
             database_path,
             data_dir,
             buildkit_binary,
@@ -114,9 +152,14 @@ impl AppConfig {
 
     pub fn for_test(admin_token: impl Into<String>) -> Self {
         let data_dir = PathBuf::from("/tmp/denia-test");
+        let admin_token = admin_token.into();
+        let mut admin_token_hmac_key = [0u8; 32];
+        rand::rng().fill(&mut admin_token_hmac_key);
+        let admin_token_hash = compute_admin_token_hash(&admin_token, &admin_token_hmac_key);
         Self {
             bind_addr: "127.0.0.1:0".parse().expect("valid test bind addr"),
-            admin_token: admin_token.into(),
+            admin_token_hash,
+            admin_token_hmac_key,
             database_path: PathBuf::from(":memory:"),
             data_dir: data_dir.clone(),
             buildkit_binary: PathBuf::from("buildctl"),
@@ -135,5 +178,68 @@ impl AppConfig {
             control_tls: false,
             node_disk_path: data_dir,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hmac_sha256_produces_correct_length() {
+        let key = b"test-key";
+        let data = b"test-data";
+        let result = hmac_sha256(key, data);
+        assert_eq!(result.len(), 32);
+    }
+
+    #[test]
+    fn hmac_sha256_is_deterministic() {
+        let key = b"secret-key-12345678901234567890";
+        let data = b"hello world";
+        let r1 = hmac_sha256(key, data);
+        let r2 = hmac_sha256(key, data);
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn hmac_sha256_different_keys_differ() {
+        let data = b"same-data";
+        let r1 = hmac_sha256(b"key-a", data);
+        let r2 = hmac_sha256(b"key-b", data);
+        assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn hmac_sha256_different_data_differ() {
+        let key = b"same-key";
+        let r1 = hmac_sha256(key, b"data-a");
+        let r2 = hmac_sha256(key, b"data-b");
+        assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn compute_admin_token_hash_is_deterministic() {
+        let key = b"test-key-0000000000000000000000";
+        let h1 = compute_admin_token_hash("my-token", key);
+        let h2 = compute_admin_token_hash("my-token", key);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64);
+    }
+
+    #[test]
+    fn compute_admin_token_hash_differs_per_key() {
+        let h1 = compute_admin_token_hash("token", b"key-a-0000000000000000000000000");
+        let h2 = compute_admin_token_hash("token", b"key-b-0000000000000000000000000");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn for_test_does_not_store_plaintext_token() {
+        let config = AppConfig::for_test(
+            "test-token-that-is-at-least-64-characters-long-for-testing-purposes",
+        );
+        assert!(config.admin_token_hash.len() == 64);
+        assert!(!config.admin_token_hash.contains("test-token"));
     }
 }

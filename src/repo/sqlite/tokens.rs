@@ -53,18 +53,17 @@ pub(super) fn list_api_tokens_q(
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
             row.get::<_, String>(4)?,
         ))
     })?;
     let mut tokens = Vec::new();
     for row in rows {
-        let (id, uid, name, th, created_at) = row?;
+        let (id, uid, name, created_at) = row?;
         tokens.push(ApiToken {
             id: Uuid::parse_str(&id)?,
             user_id: Uuid::parse_str(&uid)?,
             name,
-            token: th,
+            token: String::new(),
             created_at: created_at.parse()?,
         });
     }

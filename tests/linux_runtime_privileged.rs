@@ -394,6 +394,9 @@ async fn linux_runtime_start_uses_native_namespace_and_cgroup_gate() {
             cpu_millis: 100,
             memory_bytes: 67108864,
             env: Vec::new(),
+            pids_max: None,
+            memory_swap_max: None,
+            io_weight: None,
         })
         .await
         .expect("runtime start");

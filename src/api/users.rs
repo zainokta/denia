@@ -42,6 +42,11 @@ async fn create_user_handler(
     if !principal.is_super_admin {
         return Err(ApiError::Forbidden("super admin required".to_string()));
     }
+    if input.password.len() < 12 {
+        return Err(ApiError::BadRequest(
+            "password must be at least 12 characters".to_string(),
+        ));
+    }
     let hash = crate::auth::hash_password(&input.password)?;
     state
         .users

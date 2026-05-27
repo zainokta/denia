@@ -49,23 +49,33 @@ impl DomainVerifier for HttpDomainVerifier {
             return Err(DomainVerifyError::DnsLookupFailed);
         }
 
-        let base = match &self.base_url_override {
-            Some(b) => b.clone(),
+        let url = match &self.base_url_override {
+            Some(base) => format!("{base}/.well-known/denia-challenge/{token}"),
             None => {
-                let resolved = tokio::net::lookup_host((hostname, 80u16))
-                    .await
-                    .map_err(|_| DomainVerifyError::DnsLookupFailed)?;
-                for addr in resolved {
+                let resolved: Vec<std::net::SocketAddr> =
+                    tokio::net::lookup_host((hostname, 80u16))
+                        .await
+                        .map_err(|_| DomainVerifyError::DnsLookupFailed)?
+                        .collect();
+                if resolved.is_empty() {
+                    return Err(DomainVerifyError::DnsLookupFailed);
+                }
+                for addr in &resolved {
                     if is_internal_ip(&addr.ip()) {
                         return Err(DomainVerifyError::DnsLookupFailed);
                     }
                 }
-                format!("http://{hostname}")
+                let target = resolved[0];
+                format!("http://{target}/.well-known/denia-challenge/{token}")
             }
         };
-        let url = format!("{base}/.well-known/denia-challenge/{token}");
 
-        let response = self.client.get(&url).send().await.map_err(|e| {
+        let mut request = self.client.get(&url);
+        if self.base_url_override.is_none() {
+            request = request.header("Host", hostname);
+        }
+
+        let response = request.send().await.map_err(|e| {
             if e.is_timeout() {
                 DomainVerifyError::ConnectionTimeout
             } else if e.is_connect() {

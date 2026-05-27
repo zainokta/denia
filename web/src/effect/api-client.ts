@@ -198,58 +198,6 @@ export class ApiClient extends Context.Service<
   }
 >()('ApiClient') {}
 
-const FIXTURE: unknown = [
-  { id: 1, name: 'alice' },
-  { id: 2, name: 'bob' },
-  { id: 3, name: 'charlie' },
-]
-
-const FIXTURE_SERVICES: unknown = [
-  {
-    id: 1,
-    project_id: 42,
-    name: 'web',
-    domains: ['example.com'],
-    internal_port: 3000,
-  },
-  {
-    id: 2,
-    project_id: 42,
-    name: 'api',
-    domains: ['api.example.com'],
-    internal_port: 8080,
-  },
-]
-
-const FIXTURE_DEPLOYMENTS: unknown = [
-  {
-    id: 1,
-    service_id: 1,
-    status: 'Healthy',
-    created_at: '2026-05-25T00:00:00Z',
-  },
-  {
-    id: 2,
-    service_id: 1,
-    status: 'Failed',
-    created_at: '2026-05-25T01:00:00Z',
-  },
-]
-
-const FIXTURE_LOGS: unknown = [
-  '2026-05-25T00:00:00Z [init] starting',
-  '2026-05-25T00:00:01Z [http] listening on :3000',
-]
-
-const FIXTURE_METRICS: unknown = [
-  {
-    service_id: 1,
-    cpu_percent: 0.23,
-    memory_bytes: 134217728,
-    recorded_at: '2026-05-25T00:00:00Z',
-  },
-]
-
 function decode<A>(schema: Schema.Schema<A>) {
   return (input: unknown) =>
     Schema.decodeUnknownEffect(schema)(input).pipe(
@@ -357,17 +305,13 @@ export const ApiClientLive = Layer.effect(ApiClient)(
 
     const url = (path: string) => `${config.baseUrl}${path}`
 
-    const listNodes = (
-      config.baseUrl === ''
-        ? decode(Nodes)(FIXTURE)
-        : Effect.gen(function* () {
-            const headers = authHeaders()
-            const response = yield* http
-              .get(url('/v1/nodes'), { headers })
-              .pipe(Effect.mapError(httpError))
-            return yield* parseResponse(response, Nodes)
-          })
-    ) as Effect.Effect<ReadonlyArray<Node>, ApiError | DecodeError>
+    const listNodes = Effect.gen(function* () {
+      const headers = authHeaders()
+      const response = yield* http
+        .get(url('/v1/nodes'), { headers })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, Nodes)
+    })
 
     const login = (username: string, password: string) =>
       Effect.gen(function* () {
@@ -489,64 +433,42 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseDeleteResponse(response)
       })
 
-    const listServices = (
-      config.baseUrl === ''
-        ? decode(Services)(FIXTURE_SERVICES)
-        : Effect.gen(function* () {
-            const response = yield* http
-              .get(url('/v1/services'), { headers: authHeaders() })
-              .pipe(Effect.mapError(httpError))
-            return yield* parseResponse(response, Services)
-          })
-    ) as Effect.Effect<ReadonlyArray<Service>, ApiError | DecodeError>
+    const listServices = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/services'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, Services)
+    })
 
     const getServiceDeployments = (id: number) =>
-      (config.baseUrl === ''
-        ? decode(Deployments)(FIXTURE_DEPLOYMENTS)
-        : Effect.gen(function* () {
-            const response = yield* http
-              .get(url(`/v1/services/${id}/deployments`), {
-                headers: authHeaders(),
-              })
-              .pipe(Effect.mapError(httpError))
-            return yield* parseResponse(response, Deployments)
-          })) as Effect.Effect<
-        ReadonlyArray<Deployment>,
-        ApiError | DecodeError
-      >
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/services/${id}/deployments`), {
+            headers: authHeaders(),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Deployments)
+      })
 
     const getServiceLogs = (id: number) =>
-      (config.baseUrl === ''
-        ? decode(Schema.Array(Schema.String))(FIXTURE_LOGS)
-        : Effect.gen(function* () {
-            const response = yield* http
-              .get(url(`/v1/services/${id}/logs`), {
-                headers: authHeaders(),
-              })
-              .pipe(Effect.mapError(httpError))
-            return yield* parseResponse(
-              response,
-              Schema.Array(Schema.String),
-            )
-          })) as Effect.Effect<
-        ReadonlyArray<string>,
-        ApiError | DecodeError
-      >
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/services/${id}/logs`), {
+            headers: authHeaders(),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Schema.Array(Schema.String))
+      })
 
     const getServiceMetrics = (id: number) =>
-      (config.baseUrl === ''
-        ? decode(Metrics)(FIXTURE_METRICS)
-        : Effect.gen(function* () {
-            const response = yield* http
-              .get(url(`/v1/services/${id}/metrics`), {
-                headers: authHeaders(),
-              })
-              .pipe(Effect.mapError(httpError))
-            return yield* parseResponse(response, Metrics)
-          })) as Effect.Effect<
-        ReadonlyArray<MetricSnapshot>,
-        ApiError | DecodeError
-      >
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/services/${id}/metrics`), {
+            headers: authHeaders(),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Metrics)
+      })
 
     const createDeployment = (input: {
       service_id: number

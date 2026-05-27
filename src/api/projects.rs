@@ -68,8 +68,8 @@ async fn create_project(
     Json(req): Json<CreateProjectRequest>,
 ) -> Result<Json<Project>, ApiError> {
     ensure_super_admin(&principal)?;
-    let mut project = Project::new(req.name, req.description)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let mut project =
+        Project::new(req.name, req.description).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     project.shared_env = req.shared_env;
     project.default_resource_limits = req.default_resource_limits;
     Ok(Json(state.projects.put_project(project)?))

@@ -15,21 +15,24 @@ function Identity() {
     ? 'bootstrap'
     : me?.principal.kind === 'user'
       ? me.principal.user.username
-      : '…'
+      : (me?.principal.kind ?? 'session')
   const handleLogout = async () => {
     await logout()
     navigate({ to: '/login' })
   }
   return (
     <div className="flex items-center gap-2 text-xs">
-      <span className="kicker" title={isSuperAdmin ? 'super admin' : 'user'}>
+      <span
+        className="kicker inline-block max-w-[14ch] truncate align-bottom"
+        title={`${isSuperAdmin ? 'super admin' : 'user'}: ${label}`}
+      >
         {label}
         {isSuperAdmin ? ' · admin' : ''}
       </span>
       <button
         type="button"
         onClick={handleLogout}
-        className="nav-link"
+        className="btn"
         aria-label="Log out"
       >
         Logout
@@ -40,85 +43,26 @@ function Identity() {
 
 export default function Header() {
   return (
-    <header className="sticky top-0 z-50 border-b border-[var(--border)] bg-[var(--bg)] px-4">
-      <nav className="page-wrap flex flex-wrap items-center gap-x-4 gap-y-2 py-3">
+    <header className="app-topbar">
+      <div className="topbar-inner">
         <Link
           to="/"
-          className="flex flex-shrink-0 items-center gap-2 text-sm font-semibold tracking-tight text-[var(--fg)] no-underline hover:no-underline"
+          className="nav-home flex flex-shrink-0 items-center gap-2 text-sm font-semibold tracking-tight text-[var(--fg)] no-underline hover:no-underline"
         >
           <span className="signal signal-steady" aria-hidden="true" />
           denia
           <span className="kicker ml-1">control</span>
         </Link>
 
-        <div className="order-3 flex w-full flex-wrap items-center gap-x-5 gap-y-1 sm:order-none sm:w-auto sm:flex-nowrap">
-          <Link
-            to="/"
-            className="nav-link"
-            activeProps={{ className: 'nav-link is-active' }}
-            activeOptions={{ exact: true }}
-          >
-            Overview
-          </Link>
-          <Link
-            to="/services"
-            className="nav-link"
-            activeProps={{ className: 'nav-link is-active' }}
-          >
-            Services
-          </Link>
-          <Link
-            to="/ingress"
-            className="nav-link"
-            activeProps={{ className: 'nav-link is-active' }}
-          >
-            Ingress
-          </Link>
-          <Link
-            to="/observability"
-            className="nav-link"
-            activeProps={{ className: 'nav-link is-active' }}
-          >
-            Observability
-          </Link>
-          <Link
-            to="/jobs"
-            className="nav-link"
-            activeProps={{ className: 'nav-link is-active' }}
-          >
-            Jobs
-          </Link>
-          <Link
-            to="/projects"
-            className="nav-link"
-            activeProps={{ className: 'nav-link is-active' }}
-          >
-            Projects
-          </Link>
-          <a
-            href="/demo/tanstack-query"
-            className="nav-link"
-          >
-            Live data
-          </a>
-          <a
-            href="https://tanstack.com/start/latest/docs/framework/react/overview"
-            className="nav-link"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Docs
-          </a>
-        </div>
-
-        <div className="ml-auto flex items-center gap-2">
+        <div className="topbar-utils">
           <Suspense fallback={null}>
             <ProjectSwitcher />
           </Suspense>
+          <span className="topbar-divider" aria-hidden="true" />
           <Identity />
           <ThemeToggle />
         </div>
-      </nav>
+      </div>
     </header>
   )
 }

@@ -307,6 +307,47 @@ pub(super) fn user_for_session_q(
     get_user_q(&conn, user_id)
 }
 
+pub(super) fn touch_session_q(
+    conn: &Connection,
+    token_hash: &str,
+    ttl_hours: i64,
+) -> Result<bool, RepoError> {
+    let expires_at = Utc::now() + chrono::TimeDelta::hours(ttl_hours);
+    let affected = conn.execute(
+        "UPDATE sessions SET expires_at = ?1 WHERE token_hash = ?2",
+        params![expires_at.to_rfc3339(), token_hash],
+    )?;
+    Ok(affected > 0)
+}
+
+pub(super) fn list_sessions_q(conn: &Connection, user_id: Uuid) -> Result<Vec<Session>, RepoError> {
+    let mut stmt = conn.prepare(
+        "SELECT token_hash, expires_at FROM sessions WHERE user_id = ?1 AND expires_at > ?2",
+    )?;
+    let now = Utc::now();
+    let rows = stmt.query_map(params![user_id.to_string(), now.to_rfc3339()], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut sessions = Vec::new();
+    for row in rows {
+        let (token_hash, expires_at_str) = row?;
+        sessions.push(Session {
+            token: token_hash,
+            user_id,
+            expires_at: expires_at_str.parse()?,
+        });
+    }
+    Ok(sessions)
+}
+
+pub(super) fn delete_all_sessions_q(conn: &Connection, user_id: Uuid) -> Result<usize, RepoError> {
+    let affected = conn.execute(
+        "DELETE FROM sessions WHERE user_id = ?1",
+        params![user_id.to_string()],
+    )?;
+    Ok(affected)
+}
+
 impl SqliteStore {
     pub fn create_user(
         &self,
@@ -354,6 +395,21 @@ impl SqliteStore {
     pub fn delete_session(&self, token_hash: &str) -> Result<(), StateError> {
         let connection = self.connection()?;
         delete_session_q(&connection, token_hash).map_err(StateError::from)
+    }
+
+    pub fn touch_session(&self, token_hash: &str, ttl_hours: i64) -> Result<bool, StateError> {
+        let connection = self.connection()?;
+        touch_session_q(&connection, token_hash, ttl_hours).map_err(StateError::from)
+    }
+
+    pub fn list_sessions(&self, user_id: Uuid) -> Result<Vec<Session>, StateError> {
+        let connection = self.connection()?;
+        list_sessions_q(&connection, user_id).map_err(StateError::from)
+    }
+
+    pub fn delete_all_sessions(&self, user_id: Uuid) -> Result<usize, StateError> {
+        let connection = self.connection()?;
+        delete_all_sessions_q(&connection, user_id).map_err(StateError::from)
     }
 
     pub fn set_membership(
@@ -444,6 +500,21 @@ impl SqliteUserRepo {
     pub fn delete_session(&self, token_hash: &str) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         delete_session_q(&conn, token_hash)
+    }
+
+    pub fn touch_session(&self, token_hash: &str, ttl_hours: i64) -> Result<bool, RepoError> {
+        let conn = self.pool.connection()?;
+        touch_session_q(&conn, token_hash, ttl_hours)
+    }
+
+    pub fn list_sessions(&self, user_id: Uuid) -> Result<Vec<Session>, RepoError> {
+        let conn = self.pool.connection()?;
+        list_sessions_q(&conn, user_id)
+    }
+
+    pub fn delete_all_sessions(&self, user_id: Uuid) -> Result<usize, RepoError> {
+        let conn = self.pool.connection()?;
+        delete_all_sessions_q(&conn, user_id)
     }
 
     pub fn set_membership(

@@ -8,6 +8,12 @@ import tailwindcss from '@tailwindcss/vite'
 
 const config = defineConfig({
   resolve: { tsconfigPaths: true },
+  server: {
+    proxy: {
+      '/v1': { target: 'http://127.0.0.1:7180', changeOrigin: true },
+      '/healthz': { target: 'http://127.0.0.1:7180', changeOrigin: true },
+    },
+  },
   plugins: [
     devtools(),
     tailwindcss(),
