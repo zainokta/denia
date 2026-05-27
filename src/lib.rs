@@ -2,6 +2,7 @@ pub mod api;
 pub mod app;
 pub mod artifacts;
 pub mod auth;
+pub mod autoscale;
 pub mod command;
 pub mod config;
 pub mod deploy;
