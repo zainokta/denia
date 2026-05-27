@@ -126,9 +126,10 @@ impl Controller {
 
     /// Drive each service one step toward its desired replica count.
     pub async fn tick(&mut self, services: &[ManagedService], now_s: u64) -> Vec<AutoscaleEvent> {
+        use std::time::Instant;
         let mut events = Vec::new();
 
-        for ms in services {
+        'service: for ms in services {
             let start = self.registry.replica_count(ms.service_id) as u32;
 
             // 1/2. Determine the desired replica count.
@@ -148,6 +149,52 @@ impl Controller {
                     self.registry.replicas(ms.service_id),
                     &ms.limits,
                 );
+
+                // Idle scale-to-zero: a `min_replicas==0` service whose bridge
+                // has been idle past `idle_timeout_s` AND whose CPU is below
+                // target drains ALL replicas. This is distinct from the metric
+                // cooldown scale-down: it keys off bridge activity, and the
+                // activator wakes it on the next request. Memory is scale-up
+                // only, so it must not block scale-to-zero.
+                if ms.policy.min_replicas == 0 {
+                    let idle_secs = match self.bridge.last_activity(&ms.service_name).await {
+                        Some(t) => Instant::now().saturating_duration_since(t).as_secs(),
+                        None => u64::MAX,
+                    };
+                    let metrics_low = u.avg_cpu_pct < ms.policy.target_cpu_pct as u32;
+                    if idle_secs > ms.policy.idle_timeout_s as u64 && metrics_low {
+                        let replicas: Vec<(Uuid, u32)> = self
+                            .registry
+                            .replicas(ms.service_id)
+                            .iter()
+                            .map(|r| (r.id, r.index))
+                            .collect();
+                        for (replica_id, index) in replicas {
+                            let instance = RuntimeInstanceId {
+                                service_name: ms.service_name.clone(),
+                                replica_index: index,
+                            };
+                            let _ = drain_replica(
+                                &ms.service_name,
+                                replica_id,
+                                &instance,
+                                &ms.limits,
+                                self.drain_grace,
+                                &mut self.registry,
+                                &mut self.ledger,
+                                self.runtime.as_ref(),
+                                self.bridge.as_ref(),
+                            )
+                            .await;
+                        }
+                        self.store.set_desired_replicas(ms.service_id, 0).ok();
+                        events.push(AutoscaleEvent::ScaledToZero {
+                            service: ms.service_name.clone(),
+                        });
+                        continue 'service;
+                    }
+                }
+
                 let up = desired_up(
                     start,
                     u.avg_cpu_pct,
@@ -465,6 +512,130 @@ mod tests {
             }]
         );
         assert_eq!(ctrl.store.get_desired_replicas(svc).unwrap(), Some(1));
+    }
+
+    fn scale_to_zero_policy() -> AutoscalePolicy {
+        AutoscalePolicy {
+            min_replicas: 0,
+            max_replicas: 3,
+            target_cpu_pct: 80,
+            target_mem_pct: None,
+            scale_down_cooldown_s: 300,
+            idle_timeout_s: 600,
+        }
+    }
+
+    /// Launch one healthy replica directly against the controller's fields so an
+    /// idle test has something to scale to zero (a `min_replicas==0` service is
+    /// never auto-launched by `tick`).
+    async fn seed_replica(ctrl: &mut Controller, ms: &ManagedService) -> Uuid {
+        let spec = LaunchSpec {
+            service_name: ms.service_name.clone(),
+            service_id: ms.service_id,
+            deployment_id: ms.deployment_id,
+            replica_index: 0,
+            artifact: ms.artifact.clone(),
+            internal_port: ms.internal_port,
+            limits: ms.limits.clone(),
+            env: ms.env.clone(),
+            health_check: ms.health_check.clone(),
+        };
+        launch_replica(
+            &spec,
+            &mut ctrl.registry,
+            &mut ctrl.ledger,
+            ctrl.runtime.as_ref(),
+            ctrl.bridge.as_ref(),
+            ctrl.health.as_ref(),
+        )
+        .await
+        .expect("seed launch ok")
+    }
+
+    #[tokio::test]
+    async fn idle_scales_to_zero() {
+        let svc = Uuid::now_v7();
+        let mut ms = managed(svc);
+        ms.policy = scale_to_zero_policy();
+        let mut ctrl = controller(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 5,
+                mem_pct: 0,
+            }),
+        );
+
+        seed_replica(&mut ctrl, &ms).await;
+        assert_eq!(ctrl.registry.replica_count(svc), 1);
+
+        // Backdate activity past idle_timeout_s (600s).
+        let idle = std::time::Instant::now() - Duration::from_secs(700);
+        ctrl.bridge.set_last_activity(&ms.service_name, idle).await;
+
+        let events = ctrl.tick(std::slice::from_ref(&ms), 1000).await;
+
+        assert_eq!(ctrl.registry.replica_count(svc), 0);
+        assert!(events.contains(&AutoscaleEvent::ScaledToZero {
+            service: "web".to_string()
+        }));
+        assert_eq!(ctrl.store.get_desired_replicas(svc).unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn not_idle_does_not_zero() {
+        let svc = Uuid::now_v7();
+        let mut ms = managed(svc);
+        ms.policy = scale_to_zero_policy();
+        let mut ctrl = controller(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 5,
+                mem_pct: 0,
+            }),
+        );
+
+        seed_replica(&mut ctrl, &ms).await;
+        assert_eq!(ctrl.registry.replica_count(svc), 1);
+
+        // Recent activity: not idle.
+        ctrl.bridge
+            .set_last_activity(&ms.service_name, std::time::Instant::now())
+            .await;
+
+        let events = ctrl.tick(std::slice::from_ref(&ms), 1000).await;
+
+        assert!(ctrl.registry.replica_count(svc) >= 1);
+        assert!(!events.contains(&AutoscaleEvent::ScaledToZero {
+            service: "web".to_string()
+        }));
+    }
+
+    #[tokio::test]
+    async fn idle_but_busy_does_not_zero() {
+        let svc = Uuid::now_v7();
+        let mut ms = managed(svc);
+        ms.policy = scale_to_zero_policy();
+        let mut ctrl = controller(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 95,
+                mem_pct: 0,
+            }),
+        );
+
+        seed_replica(&mut ctrl, &ms).await;
+        assert_eq!(ctrl.registry.replica_count(svc), 1);
+
+        // Idle by activity, but metrics are high → must not scale to zero.
+        let idle = std::time::Instant::now() - Duration::from_secs(700);
+        ctrl.bridge.set_last_activity(&ms.service_name, idle).await;
+
+        let events = ctrl.tick(std::slice::from_ref(&ms), 1000).await;
+
+        assert!(ctrl.registry.replica_count(svc) >= 1);
+        assert!(!events.contains(&AutoscaleEvent::ScaledToZero {
+            service: "web".to_string()
+        }));
     }
 
     #[tokio::test]
