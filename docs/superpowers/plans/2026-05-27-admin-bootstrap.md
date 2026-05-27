@@ -133,15 +133,19 @@ fn bootstrap_admin_is_rejected_once_initialized_even_after_user_deletion() {
     let users = SqliteUserRepo::new(store.pool());
 
     let user = users.bootstrap_admin("root", "hash").unwrap();
+    // `delete_user_q` guards against removing the LAST super-admin, so seed a
+    // second one before deleting the bootstrapped user. This proves the flag —
+    // not the user count — is what blocks a second bootstrap.
+    users.create_user("ops", "hash2", true).unwrap();
     users.delete_user(user.id).unwrap();
 
-    let err = users.bootstrap_admin("root2", "hash2").unwrap_err();
+    let err = users.bootstrap_admin("root2", "hash3").unwrap_err();
     assert!(matches!(err, denia::repo::RepoError::AdminAlreadyInitialized));
     assert!(users.is_admin_initialized().unwrap());
 }
 ```
 
-> Note: `delete_user` of the only super-admin may return `LastSuperAdmin`. If it does, change that line to delete via raw SQL or skip the delete and assert the flag alone still blocks a second bootstrap. Verify `delete_user_q`'s guard before assuming.
+> `delete_user_q` (`src/repo/sqlite/users.rs`) returns `RepoError::LastSuperAdmin` when deleting the only super-admin — that's why the test seeds `ops` first. Do NOT try to delete every user (the guard makes that impossible via the repo API); deleting the bootstrapped user while another admin remains is enough to prove the flag survives user deletion.
 
 - [ ] **Step 2: Run tests, verify they fail**
 
@@ -391,7 +395,7 @@ async fn bootstrap_handler(
 
 In `src/api/mod.rs`, add (keep alphabetical): `pub mod bootstrap;`
 
-In `src/app.rs`, in the `let authed = …` chain, add after `.merge(api::auth::router())` line:
+In `src/app.rs`, the `authed` chain starts `let authed = api::auth::router().merge(…)…`. Add a new `.merge` line anywhere in that chain (e.g. right after `api::users::router()`), before the closing `.route_layer(middleware::from_fn_with_state(state.clone(), require_auth))` — that `route_layer` is what enforces 401 on a missing/invalid token:
 
 ```rust
         .merge(api::bootstrap::router())
