@@ -335,9 +335,16 @@ export class Registry extends Schema.Class<Registry>('Registry')({
 
 export const Registries = Schema.Array(Registry)
 
+// Inline-payload shape: the backend SOPS-encrypts the raw credential server-side
+// (ADR-021). Fields are gated on `auth_kind`:
+// - `anonymous` -> none
+// - `basic` -> username + password
+// - `token` | `ecr_token` | `gar_token` -> token
 export class RegistryInput extends Schema.Class<RegistryInput>('RegistryInput')({
   name: Schema.String,
   endpoint: Schema.String,
   auth_kind: RegistryAuthKind,
-  secret_ref: Schema.NullOr(Schema.String),
+  username: Schema.optional(Schema.String),
+  password: Schema.optional(Schema.String),
+  token: Schema.optional(Schema.String),
 }) {}
