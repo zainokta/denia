@@ -132,13 +132,13 @@ fn check_deps_in_path() -> CheckResult {
 fn which(bin: &str) -> Option<std::path::PathBuf> {
     // First try the `which` binary; fall back to a manual $PATH scan so that
     // environments without `which` (busybox, minimal containers) still work.
-    if let Ok(out) = Command::new("which").arg(bin).output() {
-        if out.status.success() {
-            let line = String::from_utf8(out.stdout).unwrap_or_default();
-            let p = line.trim();
-            if !p.is_empty() {
-                return Some(std::path::PathBuf::from(p));
-            }
+    if let Ok(out) = Command::new("which").arg(bin).output()
+        && out.status.success()
+    {
+        let line = String::from_utf8(out.stdout).unwrap_or_default();
+        let p = line.trim();
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
         }
     }
     // Manual PATH scan fallback.
@@ -191,14 +191,14 @@ fn check_user_config_files(ctx: Option<&InstallContext>) -> CheckResult {
             ));
         }
         // Check group ownership against the `denia` group GID.
-        if let Some(denia_gid) = denia_gid() {
-            if meta.gid() != denia_gid {
-                problems.push(format!(
-                    "{label} gid {} (expected denia gid {denia_gid}) at {}",
-                    meta.gid(),
-                    path.display()
-                ));
-            }
+        if let Some(denia_gid) = denia_gid()
+            && meta.gid() != denia_gid
+        {
+            problems.push(format!(
+                "{label} gid {} (expected denia gid {denia_gid}) at {}",
+                meta.gid(),
+                path.display()
+            ));
         }
     }
 
