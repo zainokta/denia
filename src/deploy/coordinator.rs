@@ -47,6 +47,18 @@ pub struct DeploymentRepos {
     pub domains: SqliteDomainRepo,
 }
 
+/// Dependencies the async deploy task needs that the coordinator does not own.
+///
+/// These are injected per-run (rather than per-coordinator) so the API handler
+/// can clone the acquirer/runner/secret store into the spawned `tokio::spawn`
+/// task without widening the coordinator's constructor.
+pub struct RunDeps<'a> {
+    pub acquirer: &'a ArtifactAcquirer,
+    pub runner: &'a dyn CommandRunner,
+    pub secret_store: &'a crate::secrets::SopsSecretStore,
+    pub sops_binary: &'a std::path::Path,
+}
+
 pub struct DeploymentCoordinator<R, H> {
     repos: DeploymentRepos,
     runtime: R,
@@ -119,16 +131,20 @@ where
     }
 
     /// Drive a previously-`Pending` deployment through Building → Starting →
-    /// Healthy, emitting per-phase log lines via `log`. On failure, writes an
+    /// Healthy, emitting per-phase log lines via `log`, using the supplied
+    /// `deps` to resolve auth and acquire the artifact. On failure, writes an
     /// `ERROR` log line and transitions the row to `Failed`.
-    pub async fn run(
+    pub async fn run_with_deps(
         &self,
         deployment_id: Uuid,
         service: ServiceConfig,
         request: DeploymentRequest,
         log: &crate::deploy::log::DeploymentLogWriter,
+        deps: RunDeps<'_>,
     ) -> Result<(), DeployError> {
-        let res = self.run_inner(deployment_id, service, request, log).await;
+        let res = self
+            .run_inner_with_deps(deployment_id, service, request, log, deps)
+            .await;
         if let Err(ref e) = res {
             let _ = log.write("ERROR", &format!("{e:?}"));
             let _ = self
@@ -139,12 +155,13 @@ where
         res
     }
 
-    async fn run_inner(
+    async fn run_inner_with_deps(
         &self,
         deployment_id: Uuid,
         service: ServiceConfig,
         request: DeploymentRequest,
         log: &crate::deploy::log::DeploymentLogWriter,
+        deps: RunDeps<'_>,
     ) -> Result<(), DeployError> {
         log.write("START", &format!("deployment_id={deployment_id}"))
             .ok();
@@ -152,11 +169,50 @@ where
         self.repos
             .deployments
             .update_deployment_status(deployment_id, DeploymentStatus::Building)?;
-        log.write("BUILDING", "acquiring artifact").ok();
+        log.write("BUILDING", "resolving auth + acquiring artifact")
+            .ok();
 
-        let artifact = self
-            .acquire_artifact_for_run(&service, &request, log)
-            .await?;
+        let artifact = match &request {
+            DeploymentRequest::ExternalImage { .. } => {
+                let ServiceSource::ExternalImage(source) = &service.source else {
+                    return Err(DeployError::UnsupportedServiceSource);
+                };
+                let (full_ref, auth) = resolve_external_auth(
+                    &self.repos,
+                    source,
+                    service.project_id,
+                    deps.secret_store,
+                    deps.runner,
+                    deps.sops_binary,
+                )
+                .await?;
+                deps.acquirer
+                    .acquire_rootfs_bundle_from_image_config(
+                        deps.runner,
+                        ArtifactAcquireRequest::ExternalImage { image: full_ref },
+                        auth,
+                    )
+                    .await?
+            }
+            DeploymentRequest::Git { .. } => {
+                let ServiceSource::Git(source) = &service.source else {
+                    return Err(DeployError::UnsupportedGitSource);
+                };
+                deps.acquirer
+                    .acquire_rootfs_bundle_from_image_config(
+                        deps.runner,
+                        ArtifactAcquireRequest::Git {
+                            repo_url: source.repo_url.clone(),
+                            git_ref: source.git_ref.clone(),
+                            dockerfile_path: source.dockerfile_path.clone(),
+                            context_path: source.context_path.clone(),
+                        },
+                        RegistryAuth::Anonymous,
+                    )
+                    .await?
+            }
+        };
+        log.write("OCI_PULL", "done").ok();
         self.repos.deployments.put_artifact(artifact.clone())?;
         self.repos
             .deployments
@@ -175,21 +231,6 @@ where
             .update_deployment_status(deployment_id, DeploymentStatus::Healthy)?;
         log.write("HEALTHY", "deployment promoted").ok();
         Ok(())
-    }
-
-    /// STUB: Task 4 wires the acquirer + runner + secret store + sops_binary
-    /// dependencies through `run_with_deps` so this method can resolve the
-    /// service source (ExternalImage / Git) into an `ArtifactRecord`. Until
-    /// then, callers of `run` MUST NOT exercise this path — tests that drive
-    /// `run` end-to-end are marked `#[ignore]`.
-    async fn acquire_artifact_for_run(
-        &self,
-        service: &ServiceConfig,
-        request: &DeploymentRequest,
-        log: &crate::deploy::log::DeploymentLogWriter,
-    ) -> Result<ArtifactRecord, DeployError> {
-        let _ = (service, request, log);
-        unimplemented!("filled in by Task 4")
     }
 
     /// Runtime-start + healthcheck + promote + write_routing_config portion of
@@ -307,6 +348,14 @@ where
         Ok(deployment)
     }
 
+    /// Thin wrapper retained for tests in `tests/backend_contract.rs` that
+    /// drive the external-image deploy pipeline directly. The synchronous,
+    /// inline pipeline now goes through `create_pending` + `run_with_deps` so
+    /// auth resolution + artifact acquisition share the same code path as the
+    /// async API handler.
+    ///
+    /// Writes log lines to `<temp>/denia-test-logs/<deployment_id>.log`; the
+    /// real API handler uses `<config.log_dir>/deployments/<id>.log`.
     pub async fn deploy_external_image_source(
         &self,
         service: &ServiceConfig,
@@ -318,65 +367,34 @@ where
         let ServiceSource::ExternalImage(source) = &service.source else {
             return Err(DeployError::UnsupportedServiceSource);
         };
-
-        let (full_ref, auth) = if let Some(registry_id) = source.registry_id {
-            let registry = self
-                .repos
-                .registries
-                .registry(registry_id)?
-                .ok_or(DeployError::RegistryNotFound)?;
-            let payload = match &registry.credential_ref {
-                Some(secret_ref) => Some(
-                    secret_store
-                        .decrypt(runner, sops_binary, registry.project_id, secret_ref)
-                        .await?,
-                ),
-                None => None,
-            };
-            let auth = crate::oci::credentials::resolve_registry_auth(
-                registry.auth_kind,
-                payload.as_ref(),
-            )
-            .map_err(DeployError::RegistryAuthResolution)?;
-            let (full_ref, _) = source
-                .resolve_ref(&registry.endpoint)
-                .map_err(|_| DeployError::UnsupportedServiceSource)?;
-            (full_ref, auth)
-        } else {
-            let (full_ref, _) = source
-                .resolve_ref("")
-                .map_err(|_| DeployError::UnsupportedServiceSource)?;
-            let auth = match &source.credential {
-                Some(secret_ref) => {
-                    let payload = secret_store
-                        .decrypt(runner, sops_binary, service.project_id, secret_ref)
-                        .await?;
-                    crate::oci::credentials::resolve_registry_auth(
-                        crate::domain::RegistryAuthKind::Basic,
-                        Some(&payload),
-                    )
-                    .map_err(DeployError::RegistryAuthResolution)?
-                }
-                None => RegistryAuth::Anonymous,
-            };
-            (full_ref, auth)
+        let request = DeploymentRequest::ExternalImage {
+            service_id: service.id,
+            image: source.image.clone(),
         };
-
-        let artifact = acquirer
-            .acquire_rootfs_bundle_from_image_config(
-                runner,
-                ArtifactAcquireRequest::ExternalImage { image: full_ref },
-                auth,
-            )
+        let deployment = self.create_pending(service, request.clone()).await?;
+        let log = test_log_writer(deployment.id)?;
+        let deps = RunDeps {
+            acquirer,
+            runner,
+            secret_store,
+            sops_binary,
+        };
+        self.run_with_deps(deployment.id, service.clone(), request, &log, deps)
             .await?;
-
-        self.deploy(DeploymentPlan {
-            service: service.clone(),
-            artifact,
-        })
-        .await
+        let updated = self
+            .repos
+            .deployments
+            .list_deployments(service.id)?
+            .into_iter()
+            .find(|d| d.id == deployment.id)
+            .unwrap_or(deployment);
+        Ok(updated)
     }
 
+    /// Thin wrapper retained for parity with `deploy_external_image_source`.
+    /// No existing test calls it directly today, but the API handler used to
+    /// dispatch through it. Routed through the same async pipeline so behavior
+    /// stays aligned.
     pub async fn deploy_git_source(
         &self,
         service: &ServiceConfig,
@@ -386,24 +404,34 @@ where
         let ServiceSource::Git(source) = &service.source else {
             return Err(DeployError::UnsupportedGitSource);
         };
-        let artifact = acquirer
-            .acquire_rootfs_bundle_from_image_config(
-                runner,
-                ArtifactAcquireRequest::Git {
-                    repo_url: source.repo_url.clone(),
-                    git_ref: source.git_ref.clone(),
-                    dockerfile_path: source.dockerfile_path.clone(),
-                    context_path: source.context_path.clone(),
-                },
-                RegistryAuth::Anonymous,
-            )
+        let request = DeploymentRequest::Git {
+            service_id: service.id,
+            repo_url: source.repo_url.clone(),
+            git_ref: source.git_ref.clone(),
+        };
+        let deployment = self.create_pending(service, request.clone()).await?;
+        let log = test_log_writer(deployment.id)?;
+        // Git path does not consult registry credentials today; pass an empty
+        // SopsSecretStore + sops binary placeholder. `resolve_external_auth`
+        // is not invoked for the Git branch in `run_inner_with_deps`.
+        let secret_store = crate::secrets::SopsSecretStore::new(std::env::temp_dir());
+        let sops_binary = std::path::PathBuf::from("sops");
+        let deps = RunDeps {
+            acquirer,
+            runner,
+            secret_store: &secret_store,
+            sops_binary: sops_binary.as_path(),
+        };
+        self.run_with_deps(deployment.id, service.clone(), request, &log, deps)
             .await?;
-
-        self.deploy(DeploymentPlan {
-            service: service.clone(),
-            artifact,
-        })
-        .await
+        let updated = self
+            .repos
+            .deployments
+            .list_deployments(service.id)?
+            .into_iter()
+            .find(|d| d.id == deployment.id)
+            .unwrap_or(deployment);
+        Ok(updated)
     }
 
     pub async fn stop_service(&self, service: &ServiceConfig) -> Result<(), DeployError> {
@@ -505,6 +533,72 @@ where
     }
 }
 
+/// Resolve `(full_image_ref, auth)` for an external-image deploy. Replicates
+/// the historic branching that lived inline in
+/// `deploy_external_image_source`: either the service references a registry
+/// row (which carries `auth_kind` + optional encrypted credential ref) or
+/// a legacy `credential`/`image` pair (basic auth / anonymous).
+async fn resolve_external_auth(
+    repos: &DeploymentRepos,
+    source: &crate::domain::ExternalImageSource,
+    project_id: Uuid,
+    secret_store: &crate::secrets::SopsSecretStore,
+    runner: &dyn CommandRunner,
+    sops_binary: &std::path::Path,
+) -> Result<(String, RegistryAuth), DeployError> {
+    if let Some(registry_id) = source.registry_id {
+        let registry = repos
+            .registries
+            .registry(registry_id)?
+            .ok_or(DeployError::RegistryNotFound)?;
+        let payload = match &registry.credential_ref {
+            Some(secret_ref) => Some(
+                secret_store
+                    .decrypt(runner, sops_binary, registry.project_id, secret_ref)
+                    .await?,
+            ),
+            None => None,
+        };
+        let auth =
+            crate::oci::credentials::resolve_registry_auth(registry.auth_kind, payload.as_ref())
+                .map_err(DeployError::RegistryAuthResolution)?;
+        let (full_ref, _) = source
+            .resolve_ref(&registry.endpoint)
+            .map_err(|_| DeployError::UnsupportedServiceSource)?;
+        Ok((full_ref, auth))
+    } else {
+        let (full_ref, _) = source
+            .resolve_ref("")
+            .map_err(|_| DeployError::UnsupportedServiceSource)?;
+        let auth = match &source.credential {
+            Some(secret_ref) => {
+                let payload = secret_store
+                    .decrypt(runner, sops_binary, project_id, secret_ref)
+                    .await?;
+                crate::oci::credentials::resolve_registry_auth(
+                    crate::domain::RegistryAuthKind::Basic,
+                    Some(&payload),
+                )
+                .map_err(DeployError::RegistryAuthResolution)?
+            }
+            None => RegistryAuth::Anonymous,
+        };
+        Ok((full_ref, auth))
+    }
+}
+
+/// Build a `DeploymentLogWriter` under a shared per-process temp directory so
+/// the thin `deploy_*_source` wrappers (test entry points) write somewhere
+/// stable without needing an `AppConfig.log_dir` injection.
+fn test_log_writer(
+    deployment_id: Uuid,
+) -> Result<crate::deploy::log::DeploymentLogWriter, DeployError> {
+    let dir = std::env::temp_dir().join("denia-test-logs");
+    std::fs::create_dir_all(&dir).ok();
+    let writer = crate::deploy::log::DeploymentLogWriter::create(&dir, deployment_id)?;
+    Ok(writer)
+}
+
 fn deployment_request(service: &ServiceConfig, artifact: &ArtifactRecord) -> DeploymentRequest {
     match &artifact.source {
         ArtifactSource::ExternalRegistry { image } => {
@@ -597,11 +691,5 @@ mod async_tests {
             .find(|d2| d2.id == d.id)
             .expect("row exists");
         assert_eq!(row.status, DeploymentStatus::Pending);
-    }
-
-    #[tokio::test]
-    #[ignore = "filled in by Task 4 — acquire_artifact_for_run is unimplemented"]
-    async fn run_transitions_pending_building_starting_healthy() {
-        unimplemented!()
     }
 }
