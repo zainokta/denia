@@ -160,7 +160,7 @@ mod verifier_tests {
         let _m = server
             .mock_async(|when, then| {
                 when.method(GET)
-                    .path_contains("/.well-known/denia-challenge/");
+                    .path_includes("/.well-known/denia-challenge/");
                 then.status(404);
             })
             .await;

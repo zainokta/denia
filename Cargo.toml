@@ -22,7 +22,7 @@ oci-client = "0.17.0"
 pingora = { version = "0.8", default-features = false, features = ["boringssl"] }
 pingora-proxy = { version = "0.8", default-features = false, features = ["boringssl"] }
 rand = "0.10.1"
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 rustls-pki-types = "1"
 rust-embed = { version = "8", features = ["mime-guess"] }
 rustix = { version = "1.1.4", features = ["event", "fs", "mount", "net", "pipe", "process", "thread"] }
@@ -45,5 +45,5 @@ default = []
 test-support = []
 
 [dev-dependencies]
-http = "1"
-httpmock = "0.7"
+http = "1.4.1"
+httpmock = "0.8.3"
