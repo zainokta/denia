@@ -17,7 +17,13 @@ const createJob = (input: {
   id: string
   project_id: string
   name: string
-  source: { type: 'external_image'; image: string; credential: null; registry_id: null; image_ref: null }
+  source: {
+    type: 'external_image'
+    image: string
+    credential: null
+    registry_id: string | null
+    image_ref: string | null
+  }
   command: string[] | null
   env: Array<[string, string]>
   schedule: string | null
@@ -29,6 +35,12 @@ const createJob = (input: {
   Effect.gen(function* () {
     const api = yield* ApiClient
     return yield* api.createJob(input)
+  })
+
+const listRegistries = (projectId: string) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.listRegistries(projectId)
   })
 
 function cronHint(cron: string): string | null {
@@ -64,7 +76,10 @@ export function JobsIndex() {
   const [projectId] = useActiveProject()
 
   const [name, setName] = useState('')
+  const [imageMode, setImageMode] = useState<'direct' | 'registry'>('direct')
   const [image, setImage] = useState('')
+  const [registryId, setRegistryId] = useState('')
+  const [imageRef, setImageRef] = useState('')
   const [command, setCommand] = useState('')
   const [envStr, setEnvStr] = useState('')
   const [schedule, setSchedule] = useState('')
@@ -79,6 +94,13 @@ export function JobsIndex() {
 
   const userRole = projectId ? auth.roleForActiveProject(projectId) : undefined
   const canOperate = userRole ? can('operator', userRole) : false
+  const canManage = auth.isSuperAdmin || userRole === 'admin'
+
+  const { data: registries = [] } = useQuery({
+    queryKey: ['projects', projectId, 'registries'],
+    queryFn: () => runQuery(listRegistries(projectId)),
+    enabled: projectId.length > 0 && canManage,
+  })
 
   const create = useMutation({
     mutationFn: () => {
@@ -90,12 +112,28 @@ export function JobsIndex() {
           const idx = l.indexOf('=')
           return [l.slice(0, idx), l.slice(idx + 1)] as [string, string]
         })
+      const source =
+        imageMode === 'registry'
+          ? {
+              type: 'external_image' as const,
+              image: '',
+              credential: null,
+              registry_id: registryId.trim(),
+              image_ref: imageRef.trim(),
+            }
+          : {
+              type: 'external_image' as const,
+              image: image.trim(),
+              credential: null,
+              registry_id: null,
+              image_ref: null,
+            }
       return runQuery(
         createJob({
           id: crypto.randomUUID(),
           project_id: projectId,
           name,
-          source: { type: 'external_image', image, credential: null, registry_id: null, image_ref: null },
+          source,
           command: command.trim() ? command.split(' ') : null,
           env,
           schedule: schedule.trim() || null,
@@ -110,6 +148,9 @@ export function JobsIndex() {
       queryClient.invalidateQueries({ queryKey: ['jobs', projectId] })
       setName('')
       setImage('')
+      setRegistryId('')
+      setImageRef('')
+      setImageMode('direct')
       setCommand('')
       setEnvStr('')
       setSchedule('')
@@ -123,9 +164,14 @@ export function JobsIndex() {
     },
   })
 
+  const sourceValid =
+    imageMode === 'registry'
+      ? registryId.trim().length > 0 && imageRef.trim().length > 0
+      : image.trim().length > 0
+
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!name.trim() || !image.trim()) return
+    if (!name.trim() || !sourceValid) return
     setCreateError('')
     create.mutate()
   }
@@ -162,24 +208,76 @@ export function JobsIndex() {
                     required
                   />
                 </div>
-                <div className="flex-1 min-w-0">
-                  <input
-                    placeholder="Image (e.g. alpine:latest)"
-                    type="text"
-                    value={image}
-                    onChange={(e) => setImage(e.target.value)}
-                    className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
-                    required
-                  />
-                </div>
+                {imageMode === 'registry' ? (
+                  <>
+                    <div className="min-w-0">
+                      <select
+                        aria-label="registry"
+                        value={registryId}
+                        onChange={(e) => setRegistryId(e.target.value)}
+                        className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
+                      >
+                        <option value="">select registry</option>
+                        {registries.map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <input
+                        placeholder="Image ref (e.g. org/app:latest)"
+                        aria-label="image ref"
+                        type="text"
+                        value={imageRef}
+                        onChange={(e) => setImageRef(e.target.value)}
+                        className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex-1 min-w-0">
+                    <input
+                      placeholder="Image (e.g. alpine:latest)"
+                      aria-label="image"
+                      type="text"
+                      value={image}
+                      onChange={(e) => setImage(e.target.value)}
+                      className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
+                    />
+                  </div>
+                )}
                 <button
                   type="submit"
                   className="btn btn-primary"
-                  disabled={create.isPending}
+                  disabled={create.isPending || !sourceValid || !name.trim()}
                 >
                   {create.isPending ? 'creating...' : 'create'}
                 </button>
               </div>
+
+              {registries.length > 0 ? (
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="kicker m-0">image source</span>
+                  <button
+                    type="button"
+                    aria-pressed={imageMode === 'direct'}
+                    className={`btn text-xs ${imageMode === 'direct' ? 'btn-primary' : ''}`}
+                    onClick={() => setImageMode('direct')}
+                  >
+                    direct
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={imageMode === 'registry'}
+                    className={`btn text-xs ${imageMode === 'registry' ? 'btn-primary' : ''}`}
+                    onClick={() => setImageMode('registry')}
+                  >
+                    registry + ref
+                  </button>
+                </div>
+              ) : null}
               <div className="flex flex-wrap gap-3">
                 <div className="flex-1 min-w-0">
                   <input
