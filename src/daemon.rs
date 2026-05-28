@@ -46,6 +46,14 @@ pub async fn run() -> anyhow::Result<()> {
         tracing::warn!(deployment_id = %id, path = %path.display(), "orphan deployment marked Failed");
     }
 
+    // Self-relocate daemon into <cgroup_root>/.daemon/ so subsequent workload
+    // cgroup migrations are sibling-to-sibling under <cgroup_root> (kernel
+    // skips the cross-subtree migration EINVAL we hit when started from
+    // user/system slices). Best-effort; failure is logged but non-fatal.
+    if let Err(error) = relocate_daemon_cgroup(&config.cgroup_root) {
+        tracing::warn!(?error, "daemon cgroup self-relocation failed (workload deploys may fail with EINVAL on cgroup.procs)");
+    }
+
     let state = AppState::new(config.clone(), &store);
     let tls_in_use = state
         .services
@@ -216,6 +224,45 @@ pub async fn run() -> anyhow::Result<()> {
         let _ = tx.send(());
         let _ = handle.await;
     }
+    Ok(())
+}
+
+/// Move the daemon (current process + all sibling threads) into a dedicated
+/// `<cgroup_root>/.daemon/` cgroup. Establishing the daemon under the same
+/// cgroup root as workloads makes later `cgroup.procs` migrations
+/// sibling-to-sibling — sidestepping the cross-subtree migration EINVAL that
+/// triggers when the daemon was started from a delegated systemd scope
+/// (e.g. `/system.slice/denia-dev.scope` or `/user.slice/...`).
+fn relocate_daemon_cgroup(cgroup_root: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(cgroup_root)?;
+    // Enable controllers on cgroup_root so children (.daemon and per-workload
+    // leaves) inherit them. Read available controllers first to avoid writing
+    // unsupported ones.
+    let controllers_path = cgroup_root.join("cgroup.controllers");
+    let subtree_path = cgroup_root.join("cgroup.subtree_control");
+    if controllers_path.exists() && subtree_path.exists() {
+        let available = std::fs::read_to_string(&controllers_path)?;
+        let wanted: Vec<String> = ["cpu", "memory", "pids", "io"]
+            .into_iter()
+            .filter(|c| available.split_whitespace().any(|a| a == *c))
+            .map(|c| format!("+{c}"))
+            .collect();
+        if !wanted.is_empty() {
+            // Ignore failure: subtree_control may already be set with the same
+            // values, in which case write returns EBUSY/0 depending on kernel.
+            let _ = std::fs::write(&subtree_path, format!("{}\n", wanted.join(" ")));
+        }
+    }
+    let daemon_cg = cgroup_root.join(".daemon");
+    std::fs::create_dir_all(&daemon_cg)?;
+    let procs = daemon_cg.join("cgroup.procs");
+    let pid = std::process::id();
+    // Move every thread of the current process into the daemon cgroup. In
+    // cgroup v2, writing the TGID to cgroup.procs migrates all threads at
+    // once.
+    let mut f = std::fs::OpenOptions::new().write(true).open(&procs)?;
+    writeln!(f, "{pid}")?;
     Ok(())
 }
 

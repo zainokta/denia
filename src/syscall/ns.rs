@@ -626,11 +626,22 @@ fn attach_pid_to_cgroup(pid: u32, cgroup_procs_path: &Path) -> Result<(), Syscal
         .open(cgroup_procs_path)
         .map_err(|error| SyscallError::NamespaceSetup {
             path: cgroup_procs_path.to_path_buf(),
-            reason: error.to_string(),
+            reason: format!("open: {error}"),
         })?;
+    let src_cg = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .unwrap_or_else(|e| format!("<read err: {e}>"));
+    let parent_cg = std::fs::read_to_string("/proc/self/cgroup")
+        .unwrap_or_else(|e| format!("<read err: {e}>"));
+    tracing::info!(
+        pid,
+        target = %cgroup_procs_path.display(),
+        src_cgroup = %src_cg.trim(),
+        parent_cgroup = %parent_cg.trim(),
+        "cgroup attach attempt"
+    );
     writeln!(file, "{pid}").map_err(|error| SyscallError::NamespaceSetup {
         path: cgroup_procs_path.to_path_buf(),
-        reason: error.to_string(),
+        reason: format!("write pid={pid}: {error}"),
     })
 }
 
