@@ -5,6 +5,7 @@ import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
 import { useAuth } from '#/hooks/useAuth'
+import { FieldHint } from '#/components/FieldHint'
 import type { RegistryInput, Role } from '#/effect/schema'
 
 const getProject = (id: string) =>
@@ -72,6 +73,9 @@ const AUTH_KINDS: ReadonlyArray<[RegistryInput['auth_kind'], string]> = [
   ['ecr_token', 'ECR Token'],
   ['gar_token', 'GAR Token'],
 ]
+
+const authKindLabel = (k: RegistryInput['auth_kind']) =>
+  AUTH_KINDS.find(([value]) => value === k)?.[1] ?? k
 
 export const Route = createFileRoute('/projects/$projectId')({
   component: ProjectDetail,
@@ -433,7 +437,7 @@ export function ProjectDetail() {
               </div>
             ) : null}
             <form
-              className="flex flex-wrap items-end gap-2 border-t border-[var(--border)] px-4 py-3"
+              className="border-t border-[var(--border)] px-4 py-3"
               onSubmit={(e) => {
                 e.preventDefault()
                 const userId = newUserId.trim()
@@ -441,30 +445,36 @@ export function ProjectDetail() {
                 addMemberMutation.mutate({ userId, role: newRole })
               }}
             >
-              <label htmlFor="add-member-user" className="sr-only">
-                User id (uuid)
-              </label>
-              <input
-                id="add-member-user"
-                type="text"
-                placeholder="user id (uuid)"
-                value={newUserId}
-                onChange={(e) => setNewUserId(e.target.value)}
-                className="field-input"
-              />
-              <label htmlFor="add-member-role" className="sr-only">
-                Member role
-              </label>
-              <select
-                id="add-member-role"
-                value={newRole}
-                onChange={(e) => setNewRole(e.target.value as Role)}
-                className="field-input"
-              >
-                <option value="viewer">viewer</option>
-                <option value="operator">operator</option>
-                <option value="admin">admin</option>
-              </select>
+              <div className="form-grid mb-3">
+                <div className="flex flex-col gap-1 col-span-12 sm:col-span-8">
+                  <label className="kicker" htmlFor="add-member-user">
+                    user id
+                  </label>
+                  <input
+                    id="add-member-user"
+                    type="text"
+                    placeholder="uuid"
+                    value={newUserId}
+                    onChange={(e) => setNewUserId(e.target.value)}
+                    className="field-input w-full"
+                  />
+                </div>
+                <div className="flex flex-col gap-1 col-span-12 sm:col-span-4">
+                  <label className="kicker" htmlFor="add-member-role">
+                    role
+                  </label>
+                  <select
+                    id="add-member-role"
+                    value={newRole}
+                    onChange={(e) => setNewRole(e.target.value as Role)}
+                    className="field-input w-full"
+                  >
+                    <option value="viewer">viewer</option>
+                    <option value="operator">operator</option>
+                    <option value="admin">admin</option>
+                  </select>
+                </div>
+              </div>
               <button
                 type="submit"
                 className="btn btn-primary text-xs"
@@ -498,7 +508,6 @@ export function ProjectDetail() {
                 >
                   {regEditId === r.id ? (
                     <form
-                      className="flex flex-wrap items-end gap-2"
                       onSubmit={(e) => {
                         e.preventDefault()
                         const name = editName.trim()
@@ -518,72 +527,135 @@ export function ProjectDetail() {
                         })
                       }}
                     >
-                      <input
-                        type="text"
-                        aria-label="edit registry name"
-                        placeholder="name"
-                        value={editName}
-                        onChange={(e) => setEditName(e.target.value)}
-                        className="field-input"
-                      />
-                      <input
-                        type="text"
-                        aria-label="edit registry endpoint"
-                        placeholder="endpoint"
-                        value={editEndpoint}
-                        onChange={(e) => setEditEndpoint(e.target.value)}
-                        className="field-input"
-                      />
-                      <select
-                        aria-label="edit registry auth kind"
-                        value={editAuthKind}
-                        onChange={(e) =>
-                          setEditAuthKind(
-                            e.target.value as RegistryInput['auth_kind'],
-                          )
-                        }
-                        className="field-input"
-                      >
-                        {AUTH_KINDS.map(([value, label]) => (
-                          <option key={value} value={value}>
-                            {label}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        type="text"
-                        aria-label="edit registry credential ref"
-                        placeholder="credential ref (optional)"
-                        value={editCredRef}
-                        onChange={(e) => setEditCredRef(e.target.value)}
-                        className="field-input"
-                      />
-                      <button
-                        type="submit"
-                        className="btn btn-primary text-xs"
-                        disabled={
-                          updateRegMutation.isPending ||
-                          editName.trim().length === 0 ||
-                          editEndpoint.trim().length === 0
-                        }
-                      >
-                        {updateRegMutation.isPending ? 'saving...' : 'save'}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn text-xs"
-                        onClick={() => {
-                          setRegEditId(null)
-                          setRegEditError('')
-                        }}
-                      >
-                        cancel
-                      </button>
-                      {regEditError ? (
-                        <span className="w-full text-xs text-[var(--violet)]">
-                          {regEditError}
-                        </span>
-                      ) : null}
+                      <div className="form-grid mb-3">
+                        <div className="flex flex-col gap-1 col-span-12 sm:col-span-4">
+                          <label className="kicker" htmlFor={`reg-edit-name-${r.id}`}>
+                            name
+                          </label>
+                          <input
+                            id={`reg-edit-name-${r.id}`}
+                            type="text"
+                            aria-label="edit registry name"
+                            placeholder="ghcr-prod"
+                            value={editName}
+                            onChange={(e) => setEditName(e.target.value)}
+                            className="field-input w-full"
+                          />
+                        </div>
+                        <div className="flex flex-col gap-1 col-span-12 sm:col-span-8">
+                          <div className="flex items-center gap-1.5">
+                            <label className="kicker" htmlFor={`reg-edit-endpoint-${r.id}`}>
+                              endpoint
+                            </label>
+                            <FieldHint
+                              id={`hint-reg-edit-endpoint-${r.id}`}
+                              label="about registry endpoint"
+                            >
+                              Registry hostname, e.g. <code>ghcr.io</code> or{' '}
+                              <code>registry.gitea.example</code>. Do not include
+                              the image path.
+                            </FieldHint>
+                          </div>
+                          <input
+                            id={`reg-edit-endpoint-${r.id}`}
+                            type="text"
+                            aria-label="edit registry endpoint"
+                            placeholder="ghcr.io"
+                            value={editEndpoint}
+                            onChange={(e) => setEditEndpoint(e.target.value)}
+                            className="field-input w-full"
+                          />
+                        </div>
+                        <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                          <div className="flex items-center gap-1.5">
+                            <label className="kicker" htmlFor={`reg-edit-auth-${r.id}`}>
+                              auth kind
+                            </label>
+                            <FieldHint
+                              id={`hint-reg-edit-auth-${r.id}`}
+                              label="about auth kind"
+                            >
+                              <code>anonymous</code> public pulls;{' '}
+                              <code>basic</code> HTTP Basic (user/pass);{' '}
+                              <code>token</code> static bearer; <code>ecr_token</code>{' '}
+                              AWS ECR get-login flow; <code>gar_token</code> Google
+                              Artifact Registry.
+                            </FieldHint>
+                          </div>
+                          <select
+                            id={`reg-edit-auth-${r.id}`}
+                            aria-label="edit registry auth kind"
+                            value={editAuthKind}
+                            onChange={(e) =>
+                              setEditAuthKind(
+                                e.target.value as RegistryInput['auth_kind'],
+                              )
+                            }
+                            className="field-input w-full"
+                          >
+                            {AUTH_KINDS.map(([value, label]) => (
+                              <option key={value} value={value}>
+                                {label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                          <div className="flex items-center gap-1.5">
+                            <label className="kicker" htmlFor={`reg-edit-cred-${r.id}`}>
+                              credential ref
+                            </label>
+                            <span className="text-xs text-[var(--fg-muted)]">
+                              optional
+                            </span>
+                            <FieldHint
+                              id={`hint-reg-edit-cred-${r.id}`}
+                              label="about credential ref"
+                            >
+                              Name of a credential pre-registered via{' '}
+                              <code>POST /v1/credentials/registry</code>. Required
+                              for every auth kind except <code>anonymous</code>.
+                            </FieldHint>
+                          </div>
+                          <input
+                            id={`reg-edit-cred-${r.id}`}
+                            type="text"
+                            aria-label="edit registry credential ref"
+                            placeholder="ghcr-token"
+                            value={editCredRef}
+                            onChange={(e) => setEditCredRef(e.target.value)}
+                            className="field-input w-full"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="submit"
+                          className="btn btn-primary text-xs"
+                          disabled={
+                            updateRegMutation.isPending ||
+                            editName.trim().length === 0 ||
+                            editEndpoint.trim().length === 0
+                          }
+                        >
+                          {updateRegMutation.isPending ? 'saving...' : 'save'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn text-xs"
+                          onClick={() => {
+                            setRegEditId(null)
+                            setRegEditError('')
+                          }}
+                        >
+                          cancel
+                        </button>
+                        {regEditError ? (
+                          <span className="text-xs text-[var(--violet)]">
+                            {regEditError}
+                          </span>
+                        ) : null}
+                      </div>
                     </form>
                   ) : (
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -593,7 +665,7 @@ export function ProjectDetail() {
                       <span className="tnum text-xs text-[var(--fg-muted)]">
                         {r.endpoint}
                       </span>
-                      <span className="kicker">{r.auth_kind}</span>
+                      <span className="kicker">{authKindLabel(r.auth_kind)}</span>
                       {r.credential_ref ? (
                         <span className="text-xs text-[var(--fg-muted)]">
                           cred: {r.credential_ref}
@@ -666,7 +738,7 @@ export function ProjectDetail() {
           ) : null}
 
           <form
-            className="flex flex-wrap items-end gap-2 border-t border-[var(--border)] px-4 py-3"
+            className="border-t border-[var(--border)] px-4 py-3"
             onSubmit={(e) => {
               e.preventDefault()
               const name = regName.trim()
@@ -683,56 +755,100 @@ export function ProjectDetail() {
               })
             }}
           >
-            <label htmlFor="reg-name" className="sr-only">
-              Registry name
-            </label>
-            <input
-              id="reg-name"
-              type="text"
-              placeholder="name"
-              value={regName}
-              onChange={(e) => setRegName(e.target.value)}
-              className="field-input"
-            />
-            <label htmlFor="reg-endpoint" className="sr-only">
-              Registry endpoint
-            </label>
-            <input
-              id="reg-endpoint"
-              type="text"
-              placeholder="endpoint"
-              value={regEndpoint}
-              onChange={(e) => setRegEndpoint(e.target.value)}
-              className="field-input"
-            />
-            <label htmlFor="reg-auth-kind" className="sr-only">
-              Auth kind
-            </label>
-            <select
-              id="reg-auth-kind"
-              value={regAuthKind}
-              onChange={(e) =>
-                setRegAuthKind(e.target.value as RegistryInput['auth_kind'])
-              }
-              className="field-input"
-            >
-              {AUTH_KINDS.map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-            <label htmlFor="reg-cred-ref" className="sr-only">
-              Credential ref (optional)
-            </label>
-            <input
-              id="reg-cred-ref"
-              type="text"
-              placeholder="credential ref (optional)"
-              value={regCredRef}
-              onChange={(e) => setRegCredRef(e.target.value)}
-              className="field-input"
-            />
+            <div className="form-grid mb-3">
+              <div className="flex flex-col gap-1 col-span-12 sm:col-span-4">
+                <label className="kicker" htmlFor="reg-name">
+                  name
+                </label>
+                <input
+                  id="reg-name"
+                  type="text"
+                  placeholder="ghcr-prod"
+                  value={regName}
+                  onChange={(e) => setRegName(e.target.value)}
+                  className="field-input w-full"
+                />
+              </div>
+              <div className="flex flex-col gap-1 col-span-12 sm:col-span-8">
+                <div className="flex items-center gap-1.5">
+                  <label className="kicker" htmlFor="reg-endpoint">
+                    endpoint
+                  </label>
+                  <FieldHint
+                    id="hint-reg-endpoint"
+                    label="about registry endpoint"
+                  >
+                    Registry hostname, e.g. <code>ghcr.io</code> or{' '}
+                    <code>registry.gitea.example</code>. Do not include the
+                    image path.
+                  </FieldHint>
+                </div>
+                <input
+                  id="reg-endpoint"
+                  type="text"
+                  placeholder="ghcr.io"
+                  value={regEndpoint}
+                  onChange={(e) => setRegEndpoint(e.target.value)}
+                  className="field-input w-full"
+                />
+              </div>
+              <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                <div className="flex items-center gap-1.5">
+                  <label className="kicker" htmlFor="reg-auth-kind">
+                    auth kind
+                  </label>
+                  <FieldHint
+                    id="hint-reg-auth-kind"
+                    label="about auth kind"
+                  >
+                    <code>anonymous</code> public pulls; <code>basic</code> HTTP
+                    Basic (user/pass); <code>token</code> static bearer;{' '}
+                    <code>ecr_token</code> AWS ECR get-login flow;{' '}
+                    <code>gar_token</code> Google Artifact Registry.
+                  </FieldHint>
+                </div>
+                <select
+                  id="reg-auth-kind"
+                  value={regAuthKind}
+                  onChange={(e) =>
+                    setRegAuthKind(e.target.value as RegistryInput['auth_kind'])
+                  }
+                  className="field-input w-full"
+                >
+                  {AUTH_KINDS.map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                <div className="flex items-center gap-1.5">
+                  <label className="kicker" htmlFor="reg-cred-ref">
+                    credential ref
+                  </label>
+                  <span className="text-xs text-[var(--fg-muted)]">
+                    optional
+                  </span>
+                  <FieldHint
+                    id="hint-reg-cred-ref"
+                    label="about credential ref"
+                  >
+                    Name of a credential pre-registered via{' '}
+                    <code>POST /v1/credentials/registry</code>. Required for
+                    every auth kind except <code>anonymous</code>.
+                  </FieldHint>
+                </div>
+                <input
+                  id="reg-cred-ref"
+                  type="text"
+                  placeholder="ghcr-token"
+                  value={regCredRef}
+                  onChange={(e) => setRegCredRef(e.target.value)}
+                  className="field-input w-full"
+                />
+              </div>
+            </div>
             <button
               type="submit"
               className="btn btn-primary text-xs"
