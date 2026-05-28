@@ -85,6 +85,7 @@ async fn create_deployment(
     };
     let secret_store = crate::secrets::SopsSecretStore::new(state.config.data_dir.clone());
     let sops_binary: std::path::PathBuf = state.config.sops_binary.clone();
+    let age_key_file: std::path::PathBuf = state.config.age_key_file.clone();
     let runner = state.command_runner.clone();
     let coordinator_for_task = DeploymentCoordinator::new_with_shared_routing(
         state.deployment_repos(),
@@ -100,6 +101,7 @@ async fn create_deployment(
             runner: runner.as_ref(),
             secret_store: &secret_store,
             sops_binary: sops_binary.as_path(),
+            age_key_file: age_key_file.as_path(),
         };
         let _ = coordinator_for_task
             .run_with_deps(deployment_id, svc, req, &log, deps)

@@ -31,6 +31,19 @@ pub enum CommandError {
 #[async_trait]
 pub trait CommandRunner: Send + Sync {
     async fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput, CommandError>;
+
+    /// Like [`CommandRunner::run`], but with extra environment variables set on
+    /// the child process. The default ignores `envs` and delegates to `run`, so
+    /// fakes and env-agnostic runners need no change; real runners override it.
+    async fn run_env(
+        &self,
+        program: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Result<CommandOutput, CommandError> {
+        let _ = envs;
+        self.run(program, args).await
+    }
 }
 
 #[async_trait]
@@ -41,6 +54,15 @@ where
     async fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput, CommandError> {
         (**self).run(program, args).await
     }
+
+    async fn run_env(
+        &self,
+        program: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Result<CommandOutput, CommandError> {
+        (**self).run_env(program, args, envs).await
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -49,7 +71,21 @@ pub struct TokioCommandRunner;
 #[async_trait]
 impl CommandRunner for TokioCommandRunner {
     async fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput, CommandError> {
-        let output = Command::new(program).args(args).output().await?;
+        self.run_env(program, args, &[]).await
+    }
+
+    async fn run_env(
+        &self,
+        program: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Result<CommandOutput, CommandError> {
+        let mut command = Command::new(program);
+        command.args(args);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        let output = command.output().await?;
 
         let result = CommandOutput {
             status: status_code(output.status),

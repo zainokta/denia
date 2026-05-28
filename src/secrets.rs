@@ -137,6 +137,7 @@ impl SopsSecretStore {
         &self,
         runner: &dyn CommandRunner,
         sops_binary: &std::path::Path,
+        age_key_file: &std::path::Path,
         project_id: uuid::Uuid,
         secret_ref: &SecretRef,
     ) -> Result<SecretPayload, SecretError> {
@@ -144,10 +145,12 @@ impl SopsSecretStore {
         self.validate_secret_path(&secret_path)?;
         let secret_path = secret_path.to_string_lossy();
         let sops_binary = sops_binary.to_string_lossy();
+        let age_key_file = age_key_file.to_string_lossy();
         let output = runner
-            .run(
+            .run_env(
                 &sops_binary,
                 &["--decrypt", "--output-type", "json", secret_path.as_ref()],
+                &[("SOPS_AGE_KEY_FILE", age_key_file.as_ref())],
             )
             .await?;
 

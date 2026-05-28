@@ -20,6 +20,11 @@ use uninstall::UninstallArgs;
     long_about = None,
 )]
 pub struct Cli {
+    /// Path to the TOML config file. Overrides the default search (operator
+    /// home via `$SUDO_USER`, then `XDG_CONFIG_HOME`, then `$HOME/.config`).
+    /// Same effect as setting `DENIA_CONFIG_FILE`.
+    #[arg(short = 'c', long = "config", value_name = "PATH", global = true)]
+    pub config: Option<std::path::PathBuf>,
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -42,6 +47,13 @@ pub enum Commands {
 /// errors until subsequent tasks implement them; the daemon is run when no
 /// subcommand is given.
 pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
+    if let Some(path) = cli.config.as_ref() {
+        // SAFETY: single-threaded here; dispatch runs before the daemon's
+        // tokio runtime (or any other threads) is created.
+        unsafe {
+            std::env::set_var("DENIA_CONFIG_FILE", path);
+        }
+    }
     match cli.command {
         Some(Commands::Setup(args)) => crate::cli::setup::run(args),
         Some(Commands::Uninstall(args)) => crate::cli::uninstall::run(args),

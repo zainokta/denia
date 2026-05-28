@@ -351,6 +351,7 @@ async fn sops_secret_store_decrypts_payload_with_runner() {
         .decrypt(
             &runner,
             std::path::Path::new("sops"),
+            std::path::Path::new("age.key"),
             project_id,
             &SecretRef::new("registry-main"),
         )

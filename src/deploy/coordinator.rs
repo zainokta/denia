@@ -57,6 +57,9 @@ pub struct RunDeps<'a> {
     pub runner: &'a dyn CommandRunner,
     pub secret_store: &'a crate::secrets::SopsSecretStore,
     pub sops_binary: &'a std::path::Path,
+    /// Age private-key file passed to `sops` as `SOPS_AGE_KEY_FILE` when
+    /// decrypting registry credentials. See `secrets::SopsSecretStore::decrypt`.
+    pub age_key_file: &'a std::path::Path,
 }
 
 pub struct DeploymentCoordinator<R, H> {
@@ -184,6 +187,7 @@ where
                     deps.secret_store,
                     deps.runner,
                     deps.sops_binary,
+                    deps.age_key_file,
                 )
                 .await?;
                 deps.acquirer
@@ -378,6 +382,8 @@ where
             runner,
             secret_store,
             sops_binary,
+            // Test helper: callers use FakeCommandRunner, which ignores env.
+            age_key_file: std::path::Path::new("/nonexistent-age-key"),
         };
         self.run_with_deps(deployment.id, service.clone(), request, &log, deps)
             .await?;
@@ -421,6 +427,8 @@ where
             runner,
             secret_store: &secret_store,
             sops_binary: sops_binary.as_path(),
+            // Git path never calls resolve_external_auth, so this is unused.
+            age_key_file: std::path::Path::new("/nonexistent-age-key"),
         };
         self.run_with_deps(deployment.id, service.clone(), request, &log, deps)
             .await?;
@@ -545,6 +553,7 @@ async fn resolve_external_auth(
     secret_store: &crate::secrets::SopsSecretStore,
     runner: &dyn CommandRunner,
     sops_binary: &std::path::Path,
+    age_key_file: &std::path::Path,
 ) -> Result<(String, RegistryAuth), DeployError> {
     if let Some(registry_id) = source.registry_id {
         let registry = repos
@@ -554,7 +563,13 @@ async fn resolve_external_auth(
         let payload = match &registry.credential_ref {
             Some(secret_ref) => Some(
                 secret_store
-                    .decrypt(runner, sops_binary, registry.project_id, secret_ref)
+                    .decrypt(
+                        runner,
+                        sops_binary,
+                        age_key_file,
+                        registry.project_id,
+                        secret_ref,
+                    )
                     .await?,
             ),
             None => None,
@@ -573,7 +588,7 @@ async fn resolve_external_auth(
         let auth = match &source.credential {
             Some(secret_ref) => {
                 let payload = secret_store
-                    .decrypt(runner, sops_binary, project_id, secret_ref)
+                    .decrypt(runner, sops_binary, age_key_file, project_id, secret_ref)
                     .await?;
                 crate::oci::credentials::resolve_registry_auth(
                     crate::domain::RegistryAuthKind::Basic,

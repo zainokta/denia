@@ -89,6 +89,10 @@ pub struct AppConfig {
     /// credentials, etc.). Required at the point of first encryption; absence
     /// is reported as a 400/500 at API time, not at boot. See ADR-021.
     pub age_recipient: Option<String>,
+    /// Age private-key file the daemon passes to `sops` as `SOPS_AGE_KEY_FILE`
+    /// when decrypting secrets at deploy time. Resolved from `DENIA_AGE_KEY_FILE`
+    /// / config `age_key_file` / the operator-home default. See ADR-021/ADR-023.
+    pub age_key_file: PathBuf,
 }
 
 /// How aggressively a cache hit is re-verified before reuse (ADR-022).
@@ -118,14 +122,47 @@ impl OciCacheVerifyMode {
 /// Default ACME directory: Let's Encrypt production.
 pub const DEFAULT_ACME_DIRECTORY_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
 
+/// Operator `.config` directory resolved from `$SUDO_USER` (+ `getent passwd`),
+/// so a manual `sudo ./denia` reads the same location `denia setup` wrote to.
+/// Mirrors `cli::common::privilege::detect_install_user`. Returns `None` when
+/// not invoked via sudo from a real account — e.g. the production daemon running
+/// as the `denia` system user, or a normal foreground run.
+fn operator_config_base() -> Option<PathBuf> {
+    let user = env::var("SUDO_USER")
+        .ok()
+        .filter(|u| !u.is_empty() && u != "root")?;
+    let out = std::process::Command::new("getent")
+        .args(["passwd", &user])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8(out.stdout).ok()?;
+    let home = line.trim_end_matches('\n').split(':').nth(5)?.trim();
+    if home.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(home).join(".config"))
+}
+
+/// The `<base>/denia` config directory the daemon reads operator state from.
+/// Precedence: operator home (`$SUDO_USER`) → `XDG_CONFIG_HOME` →
+/// `$HOME/.config` → `/root/.config`. Explicit `DENIA_CONFIG_FILE` /
+/// `DENIA_AGE_KEY_FILE` still take precedence at their call sites.
+fn config_dir() -> PathBuf {
+    operator_config_base()
+        .or_else(|| env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
+        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("/root/.config"))
+        .join("denia")
+}
+
 /// Default location for the Denia-owned age private key. The control plane
 /// derives the encryption recipient from this file unless `DENIA_AGE_RECIPIENT`
 /// is set explicitly. See ADR-021.
 fn default_age_key_path() -> PathBuf {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/root"))
-        .join(".config/denia/age.key")
+    config_dir().join("age.key")
 }
 
 /// Extract the `age1...` public key from an age private-key file by scanning
@@ -147,9 +184,9 @@ fn read_age_public_key(path: &std::path::Path) -> Option<String> {
 
 /// TOML-backed configuration. Every field is optional: env vars override file
 /// values, file values fill in for unset env vars, and missing fields fall
-/// back to the hardcoded defaults below. The default location is
-/// `$XDG_CONFIG_HOME/denia/config.toml` (or `$HOME/.config/denia/config.toml`
-/// when `XDG_CONFIG_HOME` is unset). Override the path with
+/// back to the hardcoded defaults below. The default location is resolved by
+/// [`config_file_path`] (operator home via `$SUDO_USER`, then `XDG_CONFIG_HOME`,
+/// then `$HOME/.config`). Override the path with the `--config` flag or
 /// `DENIA_CONFIG_FILE` for tests or alternative deployments.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -184,16 +221,13 @@ pub struct FileConfig {
     pub age_key_file: Option<PathBuf>,
 }
 
-/// Resolve the on-disk config file path.
+/// Resolve the on-disk config file path. `DENIA_CONFIG_FILE` (and thus the
+/// `--config` flag) wins; otherwise it falls under [`config_dir`].
 pub fn config_file_path() -> PathBuf {
     if let Some(p) = env::var_os("DENIA_CONFIG_FILE") {
         return PathBuf::from(p);
     }
-    let base = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(|| PathBuf::from("/root/.config"));
-    base.join("denia").join("config.toml")
+    config_dir().join("config.toml")
 }
 
 /// Build a fully-populated default `FileConfig` template. Used when the
@@ -449,6 +483,12 @@ impl AppConfig {
             .and_then(|v| v.parse().ok())
             .or(file_cfg.oci_gc_retention_secs)
             .unwrap_or(7 * 24 * 60 * 60);
+        let age_key_file = env::var("DENIA_AGE_KEY_FILE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| file_cfg.age_key_file.clone())
+            .unwrap_or_else(default_age_key_path);
         let age_recipient = env::var("DENIA_AGE_RECIPIENT")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -458,14 +498,7 @@ impl AppConfig {
                     .clone()
                     .filter(|v| !v.trim().is_empty())
             })
-            .or_else(|| {
-                let key_path = env::var("DENIA_AGE_KEY_FILE")
-                    .ok()
-                    .map(PathBuf::from)
-                    .or_else(|| file_cfg.age_key_file.clone())
-                    .unwrap_or_else(default_age_key_path);
-                read_age_public_key(&key_path)
-            });
+            .or_else(|| read_age_public_key(&age_key_file));
 
         let mut admin_token_hmac_key = [0u8; 32];
         rand::rng().fill(&mut admin_token_hmac_key);
@@ -503,6 +536,7 @@ impl AppConfig {
             oci_gc_interval_secs,
             oci_gc_retention_secs,
             age_recipient,
+            age_key_file,
         })
     }
 
@@ -547,6 +581,7 @@ impl AppConfig {
             oci_gc_interval_secs: 7 * 24 * 60 * 60,
             oci_gc_retention_secs: 7 * 24 * 60 * 60,
             age_recipient: Some("age1test".into()),
+            age_key_file: data_dir.join("age.key"),
         }
     }
 
