@@ -190,7 +190,7 @@ describe('ServicesIndex', () => {
     fireEvent.change(screen.getByLabelText('name'), {
       target: { value: 'newsvc' },
     })
-    fireEvent.change(screen.getByLabelText('domains'), {
+    fireEvent.change(screen.getByLabelText(/^domains/i), {
       target: { value: 'new.example.com' },
     })
     fireEvent.change(screen.getByLabelText('internal port'), {
