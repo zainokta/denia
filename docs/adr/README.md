@@ -40,6 +40,7 @@ Each ADR should include:
 | [020](020-pingora-ingress.md) | In-Process Pingora Ingress | Accepted | 2026-05-28 |
 | [021](021-control-plane-secret-encryption.md) | Control-Plane SOPS Secret Encryption | Accepted | 2026-05-28 |
 | [022](022-oci-layer-cache.md) | Persistent OCI Layer Cache With Weekly GC | Accepted | 2026-05-28 |
+| [023](023-toml-config-file.md) | TOML Config File With Env Override | Accepted | 2026-05-28 |
 
 ## Contributing
 
