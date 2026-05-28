@@ -2,8 +2,10 @@
 //! 2026-05-28-denia-binary-subcommands-design.md.
 
 pub mod common;
+pub mod setup;
 
 use clap::{Parser, Subcommand};
+use setup::SetupArgs;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -20,7 +22,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Provision the host: user, dirs, keys, config, systemd unit, start.
-    Setup,
+    Setup(SetupArgs),
     /// Tear down the service. With --purge: also wipe data + user + config.
     Uninstall {
         /// Also wipe /var/lib/denia, ~/.config/denia, and the denia system user.
@@ -43,7 +45,7 @@ pub enum Commands {
 /// subcommand is given.
 pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Some(Commands::Setup) => Err(anyhow::anyhow!("setup not yet implemented")),
+        Some(Commands::Setup(args)) => crate::cli::setup::run(args),
         Some(Commands::Uninstall { .. }) => Err(anyhow::anyhow!("uninstall not yet implemented")),
         Some(Commands::Status) => Err(anyhow::anyhow!("status not yet implemented")),
         Some(Commands::Doctor) => Err(anyhow::anyhow!("doctor not yet implemented")),

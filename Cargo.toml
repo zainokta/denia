@@ -48,5 +48,6 @@ default = []
 test-support = []
 
 [dev-dependencies]
+assert_cmd = "2"
 http = "1.4.1"
 httpmock = "0.8.3"
