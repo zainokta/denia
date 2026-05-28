@@ -36,6 +36,9 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process"
 tokio-stream = "0.1"
 toml = "1.1"
 tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v7"] }
 zstd = "0.13.3"
 reqwest = { version = "0.13.3", default-features = false, features = ["http2", "rustls"] }

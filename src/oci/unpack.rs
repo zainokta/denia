@@ -193,19 +193,16 @@ fn safe_join(root: &Path, entry: &Path) -> Result<PathBuf, OciError> {
 }
 
 fn validate_symlink_target(target: &Path, rootfs_dir: &Path) -> Result<(), OciError> {
+    // Symlink targets are stored verbatim. Absolute targets and `..`
+    // components are normal in OCI base images (e.g. `/usr/bin/awk ->
+    // /usr/bin/mawk`, `/sbin/init -> ../bin/systemd`) and are inert until
+    // followed. Workload isolation comes from pivot_root + mount namespace
+    // at runtime, where absolute targets resolve inside the new root and
+    // escapes are not possible. Only reject targets that resolve outside
+    // the rootfs *and* point at an already-extracted path on the host,
+    // which is the only case canonicalize can prove.
     if target.is_absolute() {
-        return Err(OciError::UnsafePath(format!(
-            "symlink target is absolute: {}",
-            target.display()
-        )));
-    }
-    for component in target.components() {
-        if let std::path::Component::ParentDir = component {
-            return Err(OciError::UnsafePath(format!(
-                "symlink target contains parent dir: {}",
-                target.display()
-            )));
-        }
+        return Ok(());
     }
     let joined = rootfs_dir.join(target);
     let root_canonical = rootfs_dir

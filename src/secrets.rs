@@ -145,7 +145,15 @@ impl SopsSecretStore {
         let secret_path = secret_path.to_string_lossy();
         let sops_binary = sops_binary.to_string_lossy();
         let output = runner
-            .run(&sops_binary, &["--decrypt", secret_path.as_ref()])
+            .run(
+                &sops_binary,
+                &[
+                    "--decrypt",
+                    "--output-type",
+                    "json",
+                    secret_path.as_ref(),
+                ],
+            )
             .await?;
 
         Ok(serde_json::from_str(&output.stdout)?)
