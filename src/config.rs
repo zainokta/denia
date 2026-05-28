@@ -111,6 +111,33 @@ impl OciCacheVerifyMode {
 /// Default ACME directory: Let's Encrypt production.
 pub const DEFAULT_ACME_DIRECTORY_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
 
+/// Default location for the Denia-owned age private key. The control plane
+/// derives the encryption recipient from this file unless `DENIA_AGE_RECIPIENT`
+/// is set explicitly. See ADR-021.
+fn default_age_key_path() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/root"))
+        .join(".config/denia/age.key")
+}
+
+/// Extract the `age1...` public key from an age private-key file by scanning
+/// for the `# public key:` header comment that `age-keygen` writes. Returns
+/// `None` if the file is missing or the comment is absent.
+fn read_age_public_key(path: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    for line in contents.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("# public key:") {
+            let key = rest.trim();
+            if !key.is_empty() {
+                return Some(key.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("DENIA_ADMIN_TOKEN must be set")]
@@ -215,7 +242,13 @@ impl AppConfig {
             .unwrap_or(7 * 24 * 60 * 60);
         let age_recipient = env::var("DENIA_AGE_RECIPIENT")
             .ok()
-            .filter(|v| !v.trim().is_empty());
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| {
+                let key_path = env::var("DENIA_AGE_KEY_FILE")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| default_age_key_path());
+                read_age_public_key(&key_path)
+            });
 
         let mut admin_token_hmac_key = [0u8; 32];
         rand::rng().fill(&mut admin_token_hmac_key);
@@ -427,6 +460,9 @@ mod tests {
     #[test]
     fn age_recipient_env_round_trip() {
         let _admin = EnvGuard::set("DENIA_ADMIN_TOKEN", "x".repeat(64));
+        // Pin DENIA_AGE_KEY_FILE to a missing path so the auto-detect fallback
+        // does not pick up the developer's real ~/.config/denia/age.key.
+        let _key_file = EnvGuard::set("DENIA_AGE_KEY_FILE", "/nonexistent/denia-test/age.key");
 
         // Absent.
         unsafe {
@@ -444,6 +480,24 @@ mod tests {
         let _empty = EnvGuard::set("DENIA_AGE_RECIPIENT", "   ");
         let cfg = AppConfig::from_env().expect("config from env");
         assert!(cfg.age_recipient.is_none());
+
+        // Auto-detect: empty DENIA_AGE_RECIPIENT falls back to DENIA_AGE_KEY_FILE.
+        let auto_dir = tempfile::tempdir().expect("tempdir");
+        let auto_key = auto_dir.path().join("age.key");
+        std::fs::write(
+            &auto_key,
+            "# public key: age1autodetectkey\nAGE-SECRET-KEY-1AAA\n",
+        )
+        .unwrap();
+        let _auto_key_file =
+            EnvGuard::set("DENIA_AGE_KEY_FILE", auto_key.to_string_lossy().as_ref());
+        let cfg = AppConfig::from_env().expect("config from env");
+        assert_eq!(cfg.age_recipient.as_deref(), Some("age1autodetectkey"));
+
+        // Explicit DENIA_AGE_RECIPIENT wins over the key file.
+        let _explicit = EnvGuard::set("DENIA_AGE_RECIPIENT", "age1explicitwins");
+        let cfg = AppConfig::from_env().expect("config from env");
+        assert_eq!(cfg.age_recipient.as_deref(), Some("age1explicitwins"));
     }
 
     struct EnvGuard {
@@ -472,5 +526,36 @@ mod tests {
                 },
             }
         }
+    }
+
+    #[test]
+    fn read_age_public_key_parses_keygen_comment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("age.key");
+        std::fs::write(
+            &path,
+            "# created: 2026-05-28T00:00:00Z\n\
+             # public key: age1exampleabcdef\n\
+             AGE-SECRET-KEY-1QQQQQQ\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_age_public_key(&path).as_deref(),
+            Some("age1exampleabcdef"),
+        );
+    }
+
+    #[test]
+    fn read_age_public_key_missing_file_returns_none() {
+        let path = std::path::Path::new("/nonexistent/denia-test/age.key");
+        assert!(read_age_public_key(path).is_none());
+    }
+
+    #[test]
+    fn read_age_public_key_without_comment_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("age.key");
+        std::fs::write(&path, "AGE-SECRET-KEY-1QQQQQQ\n").unwrap();
+        assert!(read_age_public_key(&path).is_none());
     }
 }

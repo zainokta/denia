@@ -216,15 +216,19 @@ All configuration is environment-driven (`src/config.rs`).
 | `DENIA_AUTOSCALE_INTERVAL_S` | `15` | Autoscale control-loop tick interval (seconds) |
 | `DENIA_AUTOSCALE_HEADROOM_CPU_MILLIS` | `1000` | CPU (millicores) held back from the autoscale resource ledger |
 | `DENIA_AUTOSCALE_HEADROOM_MEM_BYTES` | `536870912` | Memory (bytes) held back from the autoscale resource ledger |
-| `DENIA_AGE_RECIPIENT` | — | Age public key used by the control plane to SOPS-encrypt registry credentials. Required to create or update non-anonymous registries via `/v1/projects/{pid}/registries`. See ADR-021. |
+| `DENIA_AGE_RECIPIENT` | — | Age public key used by the control plane to SOPS-encrypt registry credentials. Optional when `DENIA_AGE_KEY_FILE` resolves to a parseable age key file. Required to create or update non-anonymous registries via `/v1/projects/{pid}/registries`. See ADR-021. |
+| `DENIA_AGE_KEY_FILE` | `~/.config/denia/age.key` | Age private key file. When `DENIA_AGE_RECIPIENT` is unset, the control plane reads the `# public key:` comment from this file to auto-derive the recipient. Same format `age-keygen` writes. |
 
 Derived paths: `runtime/`, `artifacts/`, `logs/`, and SOPS files under
 `secrets/<project_id>/*.sops.yaml` below `DENIA_DATA_DIR`. Registry credentials
 are configured by POSTing the raw payload (`username`/`password` or `token`) to
 `/v1/projects/{project_id}/registries`; the control plane SOPS-encrypts it under
 the project's secrets directory and stores a generated `credential_ref` on the
-registry row. See ADR-021. Set `DENIA_AGE_RECIPIENT` (age public key, used for
-encryption) alongside `SOPS_AGE_KEY_FILE` (used for decryption). Denia no longer
+registry row. See ADR-021. Either set `DENIA_AGE_RECIPIENT` explicitly or
+run `age-keygen -o ~/.config/denia/age.key` once (the public key is
+auto-derived from the file's `# public key:` comment, the path is overridable
+via `DENIA_AGE_KEY_FILE`). `SOPS_AGE_KEY_FILE` is still required for
+decryption at deploy time and may point at the same file. Denia no longer
 has `ecr`/`gar` Cargo features or `DENIA_ECR_*` / `DENIA_GAR_*` process-wide
 registry auth variables.
 

@@ -17,8 +17,11 @@ in the `secret_ref` field, which then fails validation.
 
 The control plane owns SOPS encryption for registry credentials:
 
-1. Add `DENIA_AGE_RECIPIENT` env (age public key). `denia` refuses to start
-   when registry creation is attempted without it.
+1. Add `DENIA_AGE_RECIPIENT` env (age public key). If unset, the control
+   plane auto-derives the recipient from the `# public key:` comment in
+   `DENIA_AGE_KEY_FILE` (default `~/.config/denia/age.key`, the same file
+   format `age-keygen` writes). Registry creation returns `400` if neither
+   the env nor a parseable key file is available.
 2. `POST /v1/projects/{pid}/registries` and `PATCH …/{rid}` accept the raw
    payload (`username`/`password` or `token`) instead of `secret_ref`.
 3. The handler generates a `SecretRef` deterministically from a UUIDv7,
@@ -37,13 +40,18 @@ The control plane owns SOPS encryption for registry credentials:
   (already true for data_dir). Plaintext briefly transits the `sops` binary;
   payload is written to a `0600` temp file in the same secrets dir before
   `sops --encrypt` is invoked, then deleted.
-- Harder: bootstrap docs must instruct operators to set both
-  `DENIA_AGE_RECIPIENT` (encryption) and `SOPS_AGE_KEY_FILE` (decryption).
+- Harder: bootstrap docs must instruct operators to either set
+  `DENIA_AGE_RECIPIENT` explicitly, or run `age-keygen -o
+  ~/.config/denia/age.key` so the public key is auto-detected. `SOPS_AGE_KEY_FILE`
+  is still required for decryption at deploy time and may point at the
+  same file.
 
 ## Alternatives Considered
 
-- Derive recipient from `SOPS_AGE_KEY_FILE` at boot — rejected: adds an `age`
-  crate dependency just for public-key derivation.
+- Derive recipient from `SOPS_AGE_KEY_FILE` at boot via the `age` crate —
+  rejected: adds a crate dependency just for public-key derivation. Instead
+  we parse the `# public key:` comment that `age-keygen` writes into its
+  output file, which avoids any new dep.
 - `.sops.yaml` creation rules — rejected: operator still has to manage a
   separate config file; not simpler than one env var.
 - Frontend pre-creates credential then references it — rejected: doubles
