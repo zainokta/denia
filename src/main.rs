@@ -53,6 +53,15 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("recovered {orphans} orphaned job run(s)");
     }
 
+    let orphan_deployments = store.fail_orphan_deployments()?;
+    for id in &orphan_deployments {
+        let path = denia::deploy::log::deployment_log_path(&config.log_dir, *id);
+        if let Ok(writer) = denia::deploy::log::DeploymentLogWriter::create(&config.log_dir, *id) {
+            let _ = writer.write("RESTART", "control plane restarted; deployment aborted");
+        }
+        tracing::warn!(deployment_id = %id, path = %path.display(), "orphan deployment marked Failed");
+    }
+
     let state = AppState::new(config.clone(), &store);
     let tls_in_use = state
         .services
