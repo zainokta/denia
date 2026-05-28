@@ -564,7 +564,11 @@ export function ServiceDetail() {
                   </p>
                 ) : newestDeployment ? (
                   <p className="mb-3 text-xs text-[var(--fg-muted)]">
-                    artifact: pending
+                    artifact:{' '}
+                    {newestDeployment.status === 'Failed' ||
+                    newestDeployment.status === 'Stopped'
+                      ? 'none'
+                      : 'pending'}
                   </p>
                 ) : null}
 
