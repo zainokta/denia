@@ -49,11 +49,29 @@ const createRegistry = (projectId: string, input: RegistryInput) =>
     return yield* api.createRegistry(projectId, input)
   })
 
+const updateRegistry = (
+  projectId: string,
+  registryId: string,
+  input: RegistryInput,
+) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.updateRegistry(projectId, registryId, input)
+  })
+
 const deleteRegistry = (projectId: string, registryId: string) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
     return yield* api.deleteRegistry(projectId, registryId)
   })
+
+const AUTH_KINDS: ReadonlyArray<[RegistryInput['auth_kind'], string]> = [
+  ['anonymous', 'Anonymous'],
+  ['basic', 'Basic'],
+  ['token', 'Token'],
+  ['ecr_token', 'ECR Token'],
+  ['gar_token', 'GAR Token'],
+]
 
 export const Route = createFileRoute('/projects/$projectId')({
   component: ProjectDetail,
@@ -119,11 +137,20 @@ export function ProjectDetail() {
 
   const [regName, setRegName] = useState('')
   const [regEndpoint, setRegEndpoint] = useState('')
-  const [regAuthKind, setRegAuthKind] = useState<string>('Anonymous')
+  const [regAuthKind, setRegAuthKind] =
+    useState<RegistryInput['auth_kind']>('anonymous')
   const [regCredRef, setRegCredRef] = useState('')
   const [regCreateError, setRegCreateError] = useState('')
   const [regDeleteConfirm, setRegDeleteConfirm] = useState<string | null>(null)
   const [regDeleteError, setRegDeleteError] = useState('')
+
+  const [regEditId, setRegEditId] = useState<string | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editEndpoint, setEditEndpoint] = useState('')
+  const [editAuthKind, setEditAuthKind] =
+    useState<RegistryInput['auth_kind']>('anonymous')
+  const [editCredRef, setEditCredRef] = useState('')
+  const [regEditError, setRegEditError] = useState('')
 
   const { data: registries = [] } = useQuery({
     queryKey: ['projects', projectId, 'registries'],
@@ -137,7 +164,7 @@ export function ProjectDetail() {
     onSuccess: () => {
       setRegName('')
       setRegEndpoint('')
-      setRegAuthKind('Anonymous')
+      setRegAuthKind('anonymous')
       setRegCredRef('')
       setRegCreateError('')
       queryClient.invalidateQueries({
@@ -150,6 +177,38 @@ export function ProjectDetail() {
       setRegCreateError(msg)
     },
   })
+
+  const updateRegMutation = useMutation({
+    mutationFn: (input: { registryId: string; body: RegistryInput }) =>
+      runQuery(updateRegistry(projectId, input.registryId, input.body)),
+    onSuccess: () => {
+      setRegEditId(null)
+      setRegEditError('')
+      queryClient.invalidateQueries({
+        queryKey: ['projects', projectId, 'registries'],
+      })
+    },
+    onError: (error: unknown) => {
+      const msg =
+        error instanceof Error ? error.message : 'Failed to update registry'
+      setRegEditError(msg)
+    },
+  })
+
+  const startEditRegistry = (r: {
+    id: string
+    name: string
+    endpoint: string
+    auth_kind: RegistryInput['auth_kind']
+    credential_ref: string | null
+  }) => {
+    setRegEditId(r.id)
+    setRegEditError('')
+    setEditName(r.name)
+    setEditEndpoint(r.endpoint)
+    setEditAuthKind(r.auth_kind)
+    setEditCredRef(r.credential_ref ?? '')
+  }
 
   const deleteRegMutation = useMutation({
     mutationFn: (registryId: string) =>
@@ -367,52 +426,154 @@ export function ProjectDetail() {
               {registries.map((r, i) => (
                 <li
                   key={r.id}
-                  className={`flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 text-sm ${
+                  className={`px-4 py-2.5 text-sm ${
                     i > 0 ? 'border-t border-[var(--border)]' : ''
                   }`}
                 >
-                  <span className="font-semibold text-[var(--fg)]">
-                    {r.name}
-                  </span>
-                  <span className="tnum text-xs text-[var(--fg-muted)]">
-                    {r.endpoint}
-                  </span>
-                  <span className="kicker">{r.auth_kind}</span>
-                  {r.credential_ref ? (
-                    <span className="text-xs text-[var(--fg-muted)]">
-                      cred: {r.credential_ref}
-                    </span>
-                  ) : null}
-
-                  {regDeleteConfirm === r.id ? (
-                    <span className="inline-flex items-center gap-1 text-xs ml-auto">
-                      <span className="text-[var(--violet)]">remove?</span>
+                  {regEditId === r.id ? (
+                    <form
+                      className="flex flex-wrap items-end gap-2"
+                      onSubmit={(e) => {
+                        e.preventDefault()
+                        const name = editName.trim()
+                        const endpoint = editEndpoint.trim()
+                        if (!name || !endpoint) return
+                        updateRegMutation.mutate({
+                          registryId: r.id,
+                          body: {
+                            name,
+                            endpoint,
+                            auth_kind: editAuthKind,
+                            secret_ref:
+                              editCredRef.trim().length > 0
+                                ? editCredRef.trim()
+                                : null,
+                          },
+                        })
+                      }}
+                    >
+                      <input
+                        type="text"
+                        aria-label="edit registry name"
+                        placeholder="name"
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
+                        className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono text-[var(--fg)]"
+                      />
+                      <input
+                        type="text"
+                        aria-label="edit registry endpoint"
+                        placeholder="endpoint"
+                        value={editEndpoint}
+                        onChange={(e) => setEditEndpoint(e.target.value)}
+                        className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono text-[var(--fg)]"
+                      />
+                      <select
+                        aria-label="edit registry auth kind"
+                        value={editAuthKind}
+                        onChange={(e) =>
+                          setEditAuthKind(
+                            e.target.value as RegistryInput['auth_kind'],
+                          )
+                        }
+                        className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm text-[var(--fg)]"
+                      >
+                        {AUTH_KINDS.map(([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="text"
+                        aria-label="edit registry credential ref"
+                        placeholder="credential ref (optional)"
+                        value={editCredRef}
+                        onChange={(e) => setEditCredRef(e.target.value)}
+                        className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono text-[var(--fg)]"
+                      />
+                      <button
+                        type="submit"
+                        className="btn btn-primary text-xs"
+                        disabled={
+                          updateRegMutation.isPending ||
+                          editName.trim().length === 0 ||
+                          editEndpoint.trim().length === 0
+                        }
+                      >
+                        {updateRegMutation.isPending ? 'saving...' : 'save'}
+                      </button>
                       <button
                         type="button"
                         className="btn text-xs"
                         onClick={() => {
-                          deleteRegMutation.mutate(r.id)
+                          setRegEditId(null)
+                          setRegEditError('')
                         }}
-                        disabled={deleteRegMutation.isPending}
                       >
-                        yes
+                        cancel
                       </button>
-                      <button
-                        type="button"
-                        className="btn text-xs"
-                        onClick={() => setRegDeleteConfirm(null)}
-                      >
-                        no
-                      </button>
-                    </span>
+                      {regEditError ? (
+                        <span className="w-full text-xs text-[var(--violet)]">
+                          {regEditError}
+                        </span>
+                      ) : null}
+                    </form>
                   ) : (
-                    <button
-                      type="button"
-                      className="btn text-xs ml-auto"
-                      onClick={() => setRegDeleteConfirm(r.id)}
-                    >
-                      delete
-                    </button>
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                      <span className="font-semibold text-[var(--fg)]">
+                        {r.name}
+                      </span>
+                      <span className="tnum text-xs text-[var(--fg-muted)]">
+                        {r.endpoint}
+                      </span>
+                      <span className="kicker">{r.auth_kind}</span>
+                      {r.credential_ref ? (
+                        <span className="text-xs text-[var(--fg-muted)]">
+                          cred: {r.credential_ref}
+                        </span>
+                      ) : null}
+
+                      {regDeleteConfirm === r.id ? (
+                        <span className="inline-flex items-center gap-1 text-xs ml-auto">
+                          <span className="text-[var(--violet)]">remove?</span>
+                          <button
+                            type="button"
+                            className="btn text-xs"
+                            onClick={() => {
+                              deleteRegMutation.mutate(r.id)
+                            }}
+                            disabled={deleteRegMutation.isPending}
+                          >
+                            yes
+                          </button>
+                          <button
+                            type="button"
+                            className="btn text-xs"
+                            onClick={() => setRegDeleteConfirm(null)}
+                          >
+                            no
+                          </button>
+                        </span>
+                      ) : (
+                        <span className="ml-auto inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            className="btn text-xs"
+                            onClick={() => startEditRegistry(r)}
+                          >
+                            edit
+                          </button>
+                          <button
+                            type="button"
+                            className="btn text-xs"
+                            onClick={() => setRegDeleteConfirm(r.id)}
+                          >
+                            delete
+                          </button>
+                        </span>
+                      )}
+                    </div>
                   )}
                 </li>
               ))}
@@ -435,8 +596,8 @@ export function ProjectDetail() {
               createRegMutation.mutate({
                 name,
                 endpoint,
-                auth_kind: regAuthKind as RegistryInput['auth_kind'],
-                credential_ref:
+                auth_kind: regAuthKind,
+                secret_ref:
                   regCredRef.trim().length > 0
                     ? regCredRef.trim()
                     : null,
@@ -471,14 +632,16 @@ export function ProjectDetail() {
             <select
               id="reg-auth-kind"
               value={regAuthKind}
-              onChange={(e) => setRegAuthKind(e.target.value)}
+              onChange={(e) =>
+                setRegAuthKind(e.target.value as RegistryInput['auth_kind'])
+              }
               className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm text-[var(--fg)]"
             >
-              <option value="Anonymous">Anonymous</option>
-              <option value="Basic">Basic</option>
-              <option value="Token">Token</option>
-              <option value="EcrToken">ECR Token</option>
-              <option value="GarToken">GAR Token</option>
+              {AUTH_KINDS.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
             </select>
             <label htmlFor="reg-cred-ref" className="sr-only">
               Credential ref (optional)

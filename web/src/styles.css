@@ -119,6 +119,21 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Placeholders track the theme instead of the browser default. */
+input::placeholder,
+textarea::placeholder {
+  color: var(--fg-muted);
+  opacity: 1;
+}
+
+/* Touch: form controls reach 44px on coarse pointers; desktop stays dense. */
+@media (pointer: coarse) {
+  .field-input,
+  select.field-input {
+    min-height: 44px;
+  }
+}
+
 a {
   color: var(--pink);
   text-decoration: none;
@@ -175,6 +190,78 @@ pre code {
   color: var(--fg-muted);
 }
 
+/* Required-field marker. ::after is excluded from accessible name, so the
+   field's label text stays clean for assistive tech and tests. */
+.kicker.req::after {
+  content: " *";
+  color: var(--fg-muted);
+}
+
+/* Field flagged invalid after a submit attempt: violet (Breakdown) signal. */
+.kicker.err,
+.kicker.err::after {
+  color: var(--violet);
+}
+
+.field-input.is-invalid {
+  border-color: var(--violet);
+}
+
+/* Native checkbox/radio track the brand: pink (Stagecraft) accent, flat. */
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--pink);
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+/* Segmented toggle for one-of-N choices (e.g. image source mode). Flat,
+   1px neutral dividers, reserved pink tint marks the active segment. */
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.segmented button {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 0.35rem 0.75rem;
+  background: var(--surface);
+  color: var(--fg-muted);
+  border: 0;
+  cursor: pointer;
+}
+
+.segmented button + button {
+  border-left: 1px solid var(--border);
+}
+
+.segmented button[aria-pressed="true"] {
+  background: color-mix(in oklab, var(--pink) 14%, var(--surface));
+  color: var(--fg);
+}
+
+/* Disclosure header for the advanced field group: a quiet, full-width row. */
+.disclosure {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  color: var(--fg-muted);
+}
+
+.disclosure:hover {
+  color: var(--fg);
+}
+
 /* Signal dot. Color carries state; never decorative. */
 .signal {
   display: inline-block;
@@ -219,6 +306,16 @@ pre code {
   text-decoration: none;
 }
 
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn:disabled:hover {
+  background: var(--surface);
+}
+
 .btn-icon {
   padding: 0.5rem;
 }
@@ -231,6 +328,10 @@ pre code {
 
 .btn-primary:hover {
   background: color-mix(in oklab, var(--pink) 22%, var(--surface));
+}
+
+.btn-primary:disabled:hover {
+  background: color-mix(in oklab, var(--pink) 14%, var(--surface));
 }
 
 /* Nav link with state underline. */
