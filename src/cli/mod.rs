@@ -3,6 +3,7 @@
 
 pub mod common;
 pub mod setup;
+pub mod status;
 pub mod uninstall;
 
 use clap::{Parser, Subcommand};
@@ -42,7 +43,7 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::Setup(args)) => crate::cli::setup::run(args),
         Some(Commands::Uninstall(args)) => crate::cli::uninstall::run(args),
-        Some(Commands::Status) => Err(anyhow::anyhow!("status not yet implemented")),
+        Some(Commands::Status) => crate::cli::status::run(),
         Some(Commands::Doctor) => Err(anyhow::anyhow!("doctor not yet implemented")),
         Some(Commands::RotateToken) => Err(anyhow::anyhow!("rotate-token not yet implemented")),
         None => {
