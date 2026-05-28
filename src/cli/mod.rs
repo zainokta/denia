@@ -3,9 +3,11 @@
 
 pub mod common;
 pub mod setup;
+pub mod uninstall;
 
 use clap::{Parser, Subcommand};
 use setup::SetupArgs;
+use uninstall::UninstallArgs;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -24,14 +26,7 @@ pub enum Commands {
     /// Provision the host: user, dirs, keys, config, systemd unit, start.
     Setup(SetupArgs),
     /// Tear down the service. With --purge: also wipe data + user + config.
-    Uninstall {
-        /// Also wipe /var/lib/denia, ~/.config/denia, and the denia system user.
-        #[arg(long)]
-        purge: bool,
-        /// Print the plan without executing it.
-        #[arg(long)]
-        dry_run: bool,
-    },
+    Uninstall(UninstallArgs),
     /// Print live service state.
     Status,
     /// Diagnose host + denia install.
@@ -46,7 +41,7 @@ pub enum Commands {
 pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::Setup(args)) => crate::cli::setup::run(args),
-        Some(Commands::Uninstall { .. }) => Err(anyhow::anyhow!("uninstall not yet implemented")),
+        Some(Commands::Uninstall(args)) => crate::cli::uninstall::run(args),
         Some(Commands::Status) => Err(anyhow::anyhow!("status not yet implemented")),
         Some(Commands::Doctor) => Err(anyhow::anyhow!("doctor not yet implemented")),
         Some(Commands::RotateToken) => Err(anyhow::anyhow!("rotate-token not yet implemented")),
