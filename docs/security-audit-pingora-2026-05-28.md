@@ -21,7 +21,7 @@ Diff: `24b59a4^..a687c34`. Both reviewers: **AMBER**.
 | A3 | MAJOR | Unbounded maps: `by_host`, `by_sni`, `pools`, `activation_gates`; `activation_gate` grows a permanent per-service entry, never pruned. Operator-fed now (bounded), but public `:80` `resolve_or_activate` lets an unauthenticated client trigger `ActivationHook` for any cold routed service with no cross-service rate limit. | ⏸️ revisit when proxy wired (Chunk B/C) |
 | A4 | MINOR | `ACTIVATION_WAIT` unused; `resolve_or_activate` has no overall timeout — only 5×20ms post-activation retries. If `activator.activate()` hangs, the proxy hot path blocks indefinitely. | ✅ wrap call in `timeout(ACTIVATION_WAIT, …)` (Chunk A follow-up) |
 | A5 | MINOR | `CertStore::insert` accepts arbitrary SNI string, no validation (same root as A1). | ✅ fold into A1 validation |
-| A6 | MINOR | `build_server`/`Server::new(None).expect()` panics; prefer `Result` per CLAUDE.md "no panics for expected failures". | ⏸️ before cutover (Chunk C) |
+| A6 | MINOR | `build_server`/`Server::new(None).expect()` panics; prefer `Result` per CLAUDE.md "no panics for expected failures". | ✅ fixed (Chunk C, `server.rs:120` returns `Result<Server, ServerBuildError>`; `main` handles bind failure non-fatally) |
 | A7 | MINOR | No zeroization of `PKey<Private>` on drop; account + leaf keys resident in `ArcSwap<CertStore>`. | ⏸️ assess in ACME chunk (Chunk B) |
 | A8 | MINOR | `swap_routes`/`swap_certs` are whole-table last-writer-wins; safe only under a single control-plane writer. Document the invariant before multi-writer. | ⏸️ document in Chunk C |
 | A9 | MINOR | `cargo audit` not installed/run; advisories unverified for pingora/boring/arc-swap. | ⏸️ add to verification (Chunk E) |
