@@ -41,7 +41,7 @@ Guidelines for AI agents working on Denia, a Rust backend PaaS that runs workloa
 
 - Management APIs are versioned under `/v1` and protected by a bearer admin token.
 - SQLite stores control-plane state; secrets are referenced, not stored raw.
-- SOPS-encrypted files hold SSH deploy keys, registry credentials, and service secrets.
+- SOPS-encrypted files hold SSH deploy keys and service secrets. Registry credentials are encrypted by the control plane on the registry CRUD path (no operator-managed `secret_ref`); see ADR-021. Operators must set `DENIA_AGE_RECIPIENT` (encryption) in addition to the existing `SOPS_AGE_KEY_FILE` (decryption).
 - The default SOPS key backend is a host-local age identity with root-only permissions.
 - Denia is its own L7 ingress: an in-process Pingora (0.8, boringssl) proxy binds `:80`/`:443` on a dedicated thread; no external Traefik, no loopback bridge. The operator must not run a separate proxy (Denia owns `:80`/`:443`). See ADR-020 (supersedes ADR-016).
 - Workload ingress upstreams are Denia-owned Unix sockets, dialed directly via `HttpPeer::new_uds` — there are no loopback bridge ports or `bridge_port`.
@@ -70,7 +70,7 @@ Guidelines for AI agents working on Denia, a Rust backend PaaS that runs workloa
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **denia** (3371 symbols, 7367 relationships, 285 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **denia** (4323 symbols, 10035 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

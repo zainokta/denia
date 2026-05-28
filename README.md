@@ -109,7 +109,7 @@ flowchart TB
   Auth -- "Principal + project role" --> API["/v1 handlers<br/>src/api/*"]
 
   API --> Store[("SQLite<br/>services · deployments · users<br/>jobs · routes · domains · registries")]:::store
-  API -. "secret_ref only" .-> SOPS[("SOPS files<br/>data_dir/secrets/*.sops.yaml")]:::store
+  API -- "encrypts inline payload" --> SOPS[("SOPS files<br/>data_dir/secrets/&lt;pid&gt;/*.sops.yaml")]:::store
 
   API -- "POST /v1/deployments" --> Coord["DeploymentCoordinator<br/>src/deploy/coordinator.rs"]
 
@@ -216,12 +216,17 @@ All configuration is environment-driven (`src/config.rs`).
 | `DENIA_AUTOSCALE_INTERVAL_S` | `15` | Autoscale control-loop tick interval (seconds) |
 | `DENIA_AUTOSCALE_HEADROOM_CPU_MILLIS` | `1000` | CPU (millicores) held back from the autoscale resource ledger |
 | `DENIA_AUTOSCALE_HEADROOM_MEM_BYTES` | `536870912` | Memory (bytes) held back from the autoscale resource ledger |
+| `DENIA_AGE_RECIPIENT` | — | Age public key used by the control plane to SOPS-encrypt registry credentials. Required to create or update non-anonymous registries via `/v1/projects/{pid}/registries`. See ADR-021. |
 
 Derived paths: `runtime/`, `artifacts/`, `logs/`, and SOPS files under
-`secrets/*.sops.yaml` below `DENIA_DATA_DIR`. Registry credentials are configured
-as project-scoped `/v1/projects/{project_id}/registries` records that point at
-SOPS secret refs; Denia no longer has `ecr`/`gar` Cargo features or
-`DENIA_ECR_*` / `DENIA_GAR_*` process-wide registry auth variables.
+`secrets/<project_id>/*.sops.yaml` below `DENIA_DATA_DIR`. Registry credentials
+are configured by POSTing the raw payload (`username`/`password` or `token`) to
+`/v1/projects/{project_id}/registries`; the control plane SOPS-encrypts it under
+the project's secrets directory and stores a generated `credential_ref` on the
+registry row. See ADR-021. Set `DENIA_AGE_RECIPIENT` (age public key, used for
+encryption) alongside `SOPS_AGE_KEY_FILE` (used for decryption). Denia no longer
+has `ecr`/`gar` Cargo features or `DENIA_ECR_*` / `DENIA_GAR_*` process-wide
+registry auth variables.
 
 ## In-Process Ingress
 
