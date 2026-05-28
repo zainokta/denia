@@ -3,6 +3,7 @@ pub mod app;
 pub mod artifacts;
 pub mod auth;
 pub mod autoscale;
+pub mod cli;
 pub mod command;
 pub mod config;
 pub mod daemon;
