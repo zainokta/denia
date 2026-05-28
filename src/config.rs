@@ -78,6 +78,10 @@ pub struct AppConfig {
     /// Retention threshold: blobs with `.lastref` mtime older than this and
     /// no live reference are eligible for deletion. Default = 7 days.
     pub oci_gc_retention_secs: u64,
+    /// Age public key used to encrypt control-plane-managed secrets (registry
+    /// credentials, etc.). Required at the point of first encryption; absence
+    /// is reported as a 400/500 at API time, not at boot. See ADR-021.
+    pub age_recipient: Option<String>,
 }
 
 /// How aggressively a cache hit is re-verified before reuse (ADR-022).
@@ -102,7 +106,6 @@ impl OciCacheVerifyMode {
             _ => None,
         }
     }
-}
 
 /// Default ACME directory: Let's Encrypt production.
 pub const DEFAULT_ACME_DIRECTORY_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
@@ -209,6 +212,9 @@ impl AppConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(7 * 24 * 60 * 60);
+        let age_recipient = env::var("DENIA_AGE_RECIPIENT")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
 
         let mut admin_token_hmac_key = [0u8; 32];
         rand::rng().fill(&mut admin_token_hmac_key);
@@ -245,6 +251,7 @@ impl AppConfig {
             oci_cache_verify_on_hit,
             oci_gc_interval_secs,
             oci_gc_retention_secs,
+            age_recipient,
         })
     }
 
@@ -288,6 +295,7 @@ impl AppConfig {
             // calls `sweep_once` synchronously.
             oci_gc_interval_secs: 7 * 24 * 60 * 60,
             oci_gc_retention_secs: 7 * 24 * 60 * 60,
+            age_recipient: Some("age1test".into()),
         }
     }
 
@@ -411,5 +419,57 @@ mod tests {
         );
         assert!(config.admin_token_hash.len() == 64);
         assert!(!config.admin_token_hash.contains("test-token"));
+    }
+
+    // Both presence and absence are asserted in one test because cargo runs
+    // unit tests in parallel and DENIA_AGE_RECIPIENT is process-global env.
+    #[test]
+    fn age_recipient_env_round_trip() {
+        let _admin = EnvGuard::set("DENIA_ADMIN_TOKEN", "x".repeat(64));
+
+        // Absent.
+        unsafe {
+            std::env::remove_var("DENIA_AGE_RECIPIENT");
+        }
+        let cfg = AppConfig::from_env().expect("config from env");
+        assert!(cfg.age_recipient.is_none());
+
+        // Present.
+        let _recipient = EnvGuard::set("DENIA_AGE_RECIPIENT", "age1qy0testrecipient");
+        let cfg = AppConfig::from_env().expect("config from env");
+        assert_eq!(cfg.age_recipient.as_deref(), Some("age1qy0testrecipient"));
+
+        // Empty/whitespace treated as absent.
+        let _empty = EnvGuard::set("DENIA_AGE_RECIPIENT", "   ");
+        let cfg = AppConfig::from_env().expect("config from env");
+        assert!(cfg.age_recipient.is_none());
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, val: impl AsRef<str>) -> Self {
+            let prior = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, val.as_ref());
+            }
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(v) => unsafe {
+                    std::env::set_var(self.key, v);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.key);
+                },
+            }
+        }
     }
 }
