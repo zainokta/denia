@@ -26,6 +26,87 @@ pub fn unit_sha256(ctx: &InstallContext) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+use std::os::unix::fs::PermissionsExt;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const UNIT_PATH: &str = "/etc/systemd/system/denia.service";
+
+/// Write the rendered unit to `/etc/systemd/system/denia.service` via tmp +
+/// rename (atomic) with mode `0644 root:root`.
+pub fn write_unit(ctx: &InstallContext) -> anyhow::Result<()> {
+    let body = render_unit(ctx);
+    let tmp = format!("{UNIT_PATH}.tmp");
+    std::fs::write(&tmp, body)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(&tmp, UNIT_PATH)?;
+    Ok(())
+}
+
+/// Read the on-disk unit at `/etc/systemd/system/denia.service`. Returns
+/// `None` if the file is absent.
+pub fn read_installed_unit() -> anyhow::Result<Option<String>> {
+    match std::fs::read_to_string(UNIT_PATH) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn daemon_reload() -> anyhow::Result<()> {
+    run("systemctl", &["daemon-reload"])
+}
+
+pub fn enable_now(unit: &str) -> anyhow::Result<()> {
+    run("systemctl", &["enable", "--now", unit])
+}
+
+pub fn disable_now(unit: &str) -> anyhow::Result<()> {
+    run("systemctl", &["disable", "--now", unit])
+}
+
+pub fn restart(unit: &str) -> anyhow::Result<()> {
+    run("systemctl", &["restart", unit])
+}
+
+/// Returns true if the unit is in `active` state. Never errors — a missing
+/// unit, a stopped unit, and an unreachable `systemctl` all return false.
+pub fn is_active(unit: &str) -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", unit])
+        .stdin(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Poll `is_active` every 500ms until either the unit is active or the
+/// timeout expires.
+pub fn wait_active(unit: &str, timeout: Duration) -> anyhow::Result<()> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if is_active(unit) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Err(anyhow::anyhow!(
+        "{unit} did not become active within {}s",
+        timeout.as_secs()
+    ))
+}
+
+fn run(bin: &str, args: &[&str]) -> anyhow::Result<()> {
+    let status = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("{bin} {args:?} exited with {status}"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
