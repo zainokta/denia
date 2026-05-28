@@ -38,7 +38,14 @@ async fn create_deployment(
                 state.ingress.clone(),
                 state.routes.clone(),
             );
-            let acquirer = ArtifactAcquirer::new(state.config.clone());
+            // Prefer the AppState-shared cache so the acquirer, the GC task,
+            // and the API observability endpoint all see the same handle
+            // (reservation map). Falls back to the cache-less path when the
+            // cache failed to initialize at boot.
+            let acquirer = match state.oci_cache.clone() {
+                Some(cache) => ArtifactAcquirer::new_with_cache(state.config.clone(), cache),
+                None => ArtifactAcquirer::new(state.config.clone()),
+            };
             let secret_store = crate::secrets::SopsSecretStore::new(state.config.data_dir.clone());
             Ok(Json(
                 coordinator
@@ -60,7 +67,14 @@ async fn create_deployment(
                 state.ingress.clone(),
                 state.routes.clone(),
             );
-            let acquirer = ArtifactAcquirer::new(state.config.clone());
+            // Prefer the AppState-shared cache so the acquirer, the GC task,
+            // and the API observability endpoint all see the same handle
+            // (reservation map). Falls back to the cache-less path when the
+            // cache failed to initialize at boot.
+            let acquirer = match state.oci_cache.clone() {
+                Some(cache) => ArtifactAcquirer::new_with_cache(state.config.clone(), cache),
+                None => ArtifactAcquirer::new(state.config.clone()),
+            };
             Ok(Json(
                 coordinator
                     .deploy_git_source(&service, &acquirer, state.command_runner.as_ref())

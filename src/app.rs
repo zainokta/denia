@@ -18,6 +18,7 @@ use crate::{
     deploy::{DeploymentRepos, SharedRoutes},
     health::{FakeHealthChecker, HealthChecker},
     ingress::pingora::IngressState,
+    oci::cache::{LayerCache, LayerCacheGc},
     rate_limit::{AdminRateLimiter, LoginRateLimiter, rate_limit_admin, rate_limit_login},
     repo::sqlite::{
         SqliteCredentialRepo, SqliteDeploymentRepo, SqliteDomainRepo, SqliteJobRepo,
@@ -55,6 +56,12 @@ pub struct AppState {
     pub acme_challenges: crate::ingress::pingora::acme::ChallengeStore,
     pub(crate) autoscaler:
         Option<Arc<tokio::sync::Mutex<crate::autoscale::controller::Controller>>>,
+    /// Persistent OCI layer cache (ADR-021). `None` in test builds that
+    /// construct `AppState` via the test builder without a cache wired up.
+    pub oci_cache: Option<LayerCache>,
+    /// Garbage collector handle used by both the background loop and the
+    /// `POST /v1/oci/cache/gc` endpoint. Cloneable: shared status state.
+    pub oci_cache_gc: Option<LayerCacheGc>,
 }
 
 impl AppState {
@@ -116,6 +123,39 @@ impl AppState {
             std::time::Duration::from_secs(30),
         );
         state.autoscaler = Some(Arc::new(tokio::sync::Mutex::new(controller)));
+
+        // OCI layer cache + GC (ADR-021). Init failure must not kill the
+        // control plane — fall back to a cache-less puller path. Operators
+        // can tail `eprintln!` output to see why.
+        match LayerCache::new(
+            state.config.oci_cache_dir.clone(),
+            state.config.oci_cache_verify_on_hit,
+        ) {
+            Ok(cache) => {
+                let deployed =
+                    std::sync::Arc::new(crate::oci::cache::deployed::SqliteDeployedDigests::new(
+                        state.services.clone(),
+                        state.deployments.clone(),
+                        state.config.artifact_dir.clone(),
+                    ));
+                let allowed = vec![
+                    state.config.data_dir.clone(),
+                    state.config.oci_cache_dir.clone(),
+                ];
+                let gc = LayerCacheGc::new(
+                    cache.clone(),
+                    std::time::Duration::from_secs(state.config.oci_gc_retention_secs),
+                    deployed,
+                    allowed,
+                );
+                state.oci_cache = Some(cache);
+                state.oci_cache_gc = Some(gc);
+            }
+            Err(e) => {
+                eprintln!("oci layer cache init failed (cache disabled): {e}");
+            }
+        }
+
         state
     }
 
@@ -194,6 +234,8 @@ impl AppState {
             verifying_domains: Arc::new(Mutex::new(std::collections::HashSet::new())),
             acme_challenges: crate::ingress::pingora::acme::ChallengeStore::new(),
             autoscaler: None,
+            oci_cache: None,
+            oci_cache_gc: None,
         }
     }
 
@@ -281,6 +323,8 @@ impl AppStateBuilder {
             verifying_domains: Arc::new(Mutex::new(std::collections::HashSet::new())),
             acme_challenges: crate::ingress::pingora::acme::ChallengeStore::new(),
             autoscaler: None,
+            oci_cache: None,
+            oci_cache_gc: None,
         }
     }
 }
@@ -315,6 +359,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(api::registries::router())
         .merge(api::observability::router())
         .merge(api::ingress::router())
+        .merge(api::oci::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .route_layer(middleware::from_fn_with_state(
             admin_rate_limiter,
