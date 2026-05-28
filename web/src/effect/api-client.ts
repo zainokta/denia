@@ -127,6 +127,9 @@ export class ApiClient extends Context.Service<
       ReadonlyArray<Deployment>,
       ApiError | DecodeError
     >
+    readonly getDeployment: (
+      id: string,
+    ) => Effect.Effect<Deployment, ApiError | DecodeError>
     readonly getServiceLogs: (
       id: string,
     ) => Effect.Effect<ReadonlyArray<string>, ApiError | DecodeError>
@@ -533,6 +536,14 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, Deployments)
       })
 
+    const getDeployment = (id: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/deployments/${id}`), { headers: authHeaders() })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Deployment)
+      })
+
     const getServiceLogs = (id: string) =>
       Effect.gen(function* () {
         const response = yield* http
@@ -880,6 +891,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       getService,
       deleteService,
       getServiceDeployments,
+      getDeployment,
       getServiceLogs,
       getServiceMetrics,
       createDeployment,

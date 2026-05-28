@@ -578,14 +578,20 @@ export function ServiceDetail() {
                       {newestFirst.map((d, i) => (
                         <li
                           key={d.id}
-                          className={`flex items-center gap-4 px-4 py-3 text-sm ${
+                          className={
                             i > 0 ? 'border-t border-[var(--border)]' : ''
-                          }`}
+                          }
                         >
-                          <StatusSignal status={d.status} />
-                          <span className="tnum text-xs text-[var(--fg-muted)]">
-                            {d.created_at}
-                          </span>
+                          <Link
+                            to="/deployments/$deploymentId"
+                            params={{ deploymentId: d.id }}
+                            className="flex items-center gap-4 px-4 py-3 text-sm hover:bg-[var(--bg-elev)]"
+                          >
+                            <StatusSignal status={d.status} />
+                            <span className="tnum text-xs text-[var(--fg-muted)]">
+                              {d.created_at}
+                            </span>
+                          </Link>
                         </li>
                       ))}
                     </ul>

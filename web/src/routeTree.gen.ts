@@ -24,6 +24,7 @@ import { Route as SettingsCredentialsRouteImport } from './routes/settings/crede
 import { Route as ServicesServiceIdRouteImport } from './routes/services/$serviceId'
 import { Route as ProjectsProjectIdRouteImport } from './routes/projects/$projectId'
 import { Route as JobsJobIdRouteImport } from './routes/jobs/$jobId'
+import { Route as DeploymentsDeploymentIdRouteImport } from './routes/deployments/$deploymentId'
 
 const SetupRoute = SetupRouteImport.update({
   id: '/setup',
@@ -100,6 +101,11 @@ const JobsJobIdRoute = JobsJobIdRouteImport.update({
   path: '/jobs/$jobId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DeploymentsDeploymentIdRoute = DeploymentsDeploymentIdRouteImport.update({
+  id: '/deployments/$deploymentId',
+  path: '/deployments/$deploymentId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -107,6 +113,7 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/observability': typeof ObservabilityRoute
   '/setup': typeof SetupRoute
+  '/deployments/$deploymentId': typeof DeploymentsDeploymentIdRoute
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
@@ -124,6 +131,7 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/observability': typeof ObservabilityRoute
   '/setup': typeof SetupRoute
+  '/deployments/$deploymentId': typeof DeploymentsDeploymentIdRoute
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
@@ -142,6 +150,7 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/observability': typeof ObservabilityRoute
   '/setup': typeof SetupRoute
+  '/deployments/$deploymentId': typeof DeploymentsDeploymentIdRoute
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
@@ -161,6 +170,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/observability'
     | '/setup'
+    | '/deployments/$deploymentId'
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
@@ -178,6 +188,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/observability'
     | '/setup'
+    | '/deployments/$deploymentId'
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
@@ -195,6 +206,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/observability'
     | '/setup'
+    | '/deployments/$deploymentId'
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
@@ -213,6 +225,7 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   ObservabilityRoute: typeof ObservabilityRoute
   SetupRoute: typeof SetupRoute
+  DeploymentsDeploymentIdRoute: typeof DeploymentsDeploymentIdRoute
   JobsJobIdRoute: typeof JobsJobIdRoute
   ProjectsProjectIdRoute: typeof ProjectsProjectIdRoute
   ServicesServiceIdRoute: typeof ServicesServiceIdRoute
@@ -332,6 +345,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof JobsJobIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/deployments/$deploymentId': {
+      id: '/deployments/$deploymentId'
+      path: '/deployments/$deploymentId'
+      fullPath: '/deployments/$deploymentId'
+      preLoaderRoute: typeof DeploymentsDeploymentIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -341,6 +361,7 @@ const rootRouteChildren: RootRouteChildren = {
   LoginRoute: LoginRoute,
   ObservabilityRoute: ObservabilityRoute,
   SetupRoute: SetupRoute,
+  DeploymentsDeploymentIdRoute: DeploymentsDeploymentIdRoute,
   JobsJobIdRoute: JobsJobIdRoute,
   ProjectsProjectIdRoute: ProjectsProjectIdRoute,
   ServicesServiceIdRoute: ServicesServiceIdRoute,
