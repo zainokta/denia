@@ -3,6 +3,7 @@
 
 pub mod common;
 pub mod doctor;
+pub mod rotate_token;
 pub mod setup;
 pub mod status;
 pub mod uninstall;
@@ -46,7 +47,7 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Uninstall(args)) => crate::cli::uninstall::run(args),
         Some(Commands::Status) => crate::cli::status::run(),
         Some(Commands::Doctor) => crate::cli::doctor::run(),
-        Some(Commands::RotateToken) => Err(anyhow::anyhow!("rotate-token not yet implemented")),
+        Some(Commands::RotateToken) => crate::cli::rotate_token::run(),
         None => {
             // Daemon is async; build a runtime here so non-daemon subcommands
             // never pay for one.
