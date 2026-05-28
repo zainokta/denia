@@ -79,9 +79,34 @@ pub struct ArtifactAcquirer {
 impl ArtifactAcquirer {
     pub fn new(config: AppConfig) -> Self {
         let staging_dir = config.artifact_dir.clone();
+        // Prefer the persistent layer cache (ADR-021). Cache init failure is
+        // not fatal — fall back to the per-pull TempDir staging path.
+        let puller: Arc<dyn OciImagePuller> = match crate::oci::cache::LayerCache::new(
+            config.oci_cache_dir.clone(),
+            config.oci_cache_verify_on_hit,
+        ) {
+            Ok(cache) => Arc::new(RegistryImagePuller::new_with_cache(staging_dir, cache)),
+            Err(e) => {
+                eprintln!("oci layer cache disabled in acquirer ({e}); using per-pull TempDir");
+                Arc::new(RegistryImagePuller::new(staging_dir))
+            }
+        };
         Self {
             config,
-            puller: Arc::new(RegistryImagePuller::new(staging_dir)),
+            puller,
+            unpacker: Arc::new(TarRootfsUnpacker::new()),
+        }
+    }
+
+    /// Same as [`Self::new`] but reuses an externally-built cache so the
+    /// acquirer, the API observability endpoint, and the GC task all see
+    /// the same `LayerCache` handle (and therefore the same reservation
+    /// map).
+    pub fn new_with_cache(config: AppConfig, cache: crate::oci::cache::LayerCache) -> Self {
+        let staging_dir = config.artifact_dir.clone();
+        Self {
+            config,
+            puller: Arc::new(RegistryImagePuller::new_with_cache(staging_dir, cache)),
             unpacker: Arc::new(TarRootfsUnpacker::new()),
         }
     }
@@ -248,6 +273,14 @@ impl ArtifactAcquirer {
                 return Err(ArtifactAcquireError::Io(std::io::Error::other(io_err)));
             }
         }
+        // Persist the layer-digest list as a sidecar so the OCI cache GC can
+        // tell which cached blobs are still referenced by promoted deployments
+        // (ADR-021). Atomic write: tmp + rename.
+        let layer_digests: Vec<String> = layers.iter().map(|l| l.digest.clone()).collect();
+        let layers_json = bundle_dir.join("layers.json");
+        let layers_tmp = bundle_dir.join("layers.json.tmp");
+        std::fs::write(&layers_tmp, serde_json::to_vec_pretty(&layer_digests)?)?;
+        std::fs::rename(&layers_tmp, &layers_json)?;
         Ok(bundle_dir)
     }
 
