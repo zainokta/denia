@@ -187,6 +187,16 @@ fn safe_join(root: &Path, entry: &Path) -> Result<PathBuf, OciError> {
 
     let joined = root.join(entry);
 
+    let root_canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+
+    // Tar archives commonly include `./` or `.` as the root marker — these
+    // resolve to rootfs itself. Accept them; the caller treats them as a
+    // no-op directory.
+    let joined_canonical = joined.canonicalize().unwrap_or_else(|_| joined.clone());
+    if joined_canonical == root_canonical {
+        return Ok(joined);
+    }
+
     // Only require the PARENT directory to resolve under rootfs. The leaf may
     // legitimately be a stale symlink from a prior layer (e.g.
     // `etc/alternatives/pager -> /usr/bin/less`) that this entry is about to
@@ -196,7 +206,6 @@ fn safe_join(root: &Path, entry: &Path) -> Result<PathBuf, OciError> {
     // to keep parent directories under rootfs and unlink stale targets
     // before writing (caller does this in `apply_layer`).
     let parent = joined.parent().unwrap_or(root);
-    let root_canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let parent_canonical = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
 
     if !parent_canonical.starts_with(&root_canonical) {
