@@ -1,5 +1,6 @@
 mod coordinator;
 mod error;
+pub mod log;
 mod routes;
 
 pub use coordinator::{DeploymentCoordinator, DeploymentPlan, DeploymentRepos};
