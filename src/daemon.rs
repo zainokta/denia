@@ -54,6 +54,7 @@ pub async fn run() -> anyhow::Result<()> {
         tracing::warn!(?error, "daemon cgroup self-relocation failed (workload deploys may fail with EINVAL on cgroup.procs)");
     }
 
+
     let state = AppState::new(config.clone(), &store);
     let tls_in_use = state
         .services
@@ -262,7 +263,10 @@ fn relocate_daemon_cgroup(cgroup_root: &std::path::Path) -> std::io::Result<()> 
     // cgroup v2, writing the TGID to cgroup.procs migrates all threads at
     // once.
     let mut f = std::fs::OpenOptions::new().write(true).open(&procs)?;
-    writeln!(f, "{pid}")?;
+    // Single write — writeln! can split digits and newline, kernel parses
+    // the empty trailing newline as a second write and returns EINVAL even
+    // though the migration already succeeded.
+    f.write_all(format!("{pid}\n").as_bytes())?;
     Ok(())
 }
 
