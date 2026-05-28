@@ -566,7 +566,9 @@ async fn axum_router_lists_registered_credentials_for_admin() {
                     .uri(kind_path)
                     .header(http::header::AUTHORIZATION, "Bearer test-token")
                     .header(http::header::CONTENT_TYPE, "application/json")
-                    .body(axum::body::Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&payload).unwrap(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -1008,6 +1010,29 @@ fn registry_api_test_app() -> (axum::Router, SqliteStore) {
     (app, store)
 }
 
+/// Builds a router whose `command_runner` is a `FakeCommandRunner` (so the
+/// registry encrypt path is observable in tests) and whose `data_dir` lives
+/// in a tempdir (so encrypted YAML files don't escape `/tmp`).
+fn registry_api_test_app_with_runner(
+    runner: FakeCommandRunner,
+    tmp_data_dir: std::path::PathBuf,
+) -> (axum::Router, SqliteStore) {
+    let mut cfg = AppConfig::for_test("test-token");
+    cfg.data_dir = tmp_data_dir;
+    let store = SqliteStore::open_in_memory().expect("open sqlite");
+    store.migrate().expect("migrate");
+    let ingress = std::sync::Arc::new(denia::ingress::pingora::IngressState::default());
+    let state = AppState::new_with_deploy_dependencies(
+        cfg,
+        &store,
+        denia::runtime::FakeRuntime::default(),
+        denia::health::FakeHealthChecker::healthy(),
+        runner,
+        ingress,
+    );
+    (build_router(state), store)
+}
+
 fn create_project_for_test(store: &SqliteStore, name: &str) -> denia::domain::Project {
     store
         .put_project(denia::domain::Project::new(name, None).expect("project"))
@@ -1016,7 +1041,22 @@ fn create_project_for_test(store: &SqliteStore, name: &str) -> denia::domain::Pr
 
 #[tokio::test]
 async fn registry_api_admin_can_crud_no_credential_leak() {
-    let (app, store) = registry_api_test_app();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let fake_yaml_create = "data: ENC[AES256_GCM,...create]\n".to_string();
+    let fake_yaml_patch = "data: ENC[AES256_GCM,...patch]\n".to_string();
+    let runner = FakeCommandRunner::new(vec![
+        CommandOutput {
+            status: 0,
+            stdout: fake_yaml_create.clone(),
+            stderr: String::new(),
+        },
+        CommandOutput {
+            status: 0,
+            stdout: fake_yaml_patch.clone(),
+            stderr: String::new(),
+        },
+    ]);
+    let (app, store) = registry_api_test_app_with_runner(runner.clone(), tmp.path().to_path_buf());
     let project = create_project_for_test(&store, "p1");
 
     // POST /v1/projects/{pid}/registries
@@ -1024,7 +1064,8 @@ async fn registry_api_admin_can_crud_no_credential_leak() {
         "name": "ghcr",
         "endpoint": "ghcr.io",
         "auth_kind": "basic",
-        "secret_ref": "ghcr-token",
+        "username": "zainokta",
+        "password": "example-redacted-token"
     });
     let response = app
         .clone()
@@ -1047,15 +1088,29 @@ async fn registry_api_admin_can_crud_no_credential_leak() {
     let value: serde_json::Value = serde_json::from_str(&body_text).unwrap();
     let registry_id_str = value["id"].as_str().unwrap();
     let registry_id = Uuid::parse_str(registry_id_str).unwrap();
-    assert_eq!(value["credential_ref"].as_str(), Some("ghcr-token"));
+    let credential_ref = value["credential_ref"]
+        .as_str()
+        .expect("credential_ref returned")
+        .to_string();
     assert!(
-        !body_text.contains("password"),
-        "response leaks password field: {body_text}"
+        credential_ref.starts_with("registry-"),
+        "ref should be generated: {credential_ref}"
     );
-    assert!(
-        !body_text.contains("\"value\""),
-        "response leaks decrypted secret payload: {body_text}"
-    );
+    for needle in ["password", "username", "example-redacted-token-prefix", "zainokta", "\"value\""] {
+        assert!(
+            !body_text.contains(needle),
+            "response leaks credential field {needle}: {body_text}"
+        );
+    }
+
+    // Encrypted file landed on disk under the data_dir tempdir.
+    let secret_path = tmp
+        .path()
+        .join("secrets")
+        .join(project.id.to_string())
+        .join(format!("{credential_ref}.sops.yaml"));
+    let written = std::fs::read_to_string(&secret_path).expect("encrypted file written");
+    assert_eq!(written, fake_yaml_create);
 
     // GET /v1/projects/{pid}/registries
     let response = app
@@ -1096,12 +1151,13 @@ async fn registry_api_admin_can_crud_no_credential_leak() {
         .unwrap();
     assert_eq!(response.status(), http::StatusCode::OK);
 
-    // PATCH /v1/projects/{pid}/registries/{id} (rename)
+    // PATCH /v1/projects/{pid}/registries/{id} (rotate password + rename)
     let patch_body = serde_json::json!({
         "name": "ghcr-renamed",
         "endpoint": "ghcr.io",
         "auth_kind": "basic",
-        "secret_ref": "ghcr-token",
+        "username": "zainokta",
+        "password": "example-redacted-token"
     });
     let response = app
         .clone()
@@ -1128,6 +1184,20 @@ async fn registry_api_admin_can_crud_no_credential_leak() {
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(value["name"].as_str(), Some("ghcr-renamed"));
     assert_eq!(value["id"].as_str(), Some(registry_id_str));
+    assert_eq!(
+        value["credential_ref"].as_str(),
+        Some(credential_ref.as_str())
+    );
+    // PATCH overwrites the same encrypted file.
+    let written = std::fs::read_to_string(&secret_path).expect("rotated encrypted file");
+    assert_eq!(written, fake_yaml_patch);
+
+    let cmds = runner.commands();
+    assert_eq!(cmds.len(), 2);
+    for c in &cmds {
+        assert!(c.contains("--encrypt"));
+        assert!(c.contains("--age age1test"));
+    }
 
     // DELETE /v1/projects/{pid}/registries/{id}
     let response = app
@@ -1152,6 +1222,101 @@ async fn registry_api_admin_can_crud_no_credential_leak() {
 }
 
 #[tokio::test]
+async fn registry_api_ignores_legacy_secret_ref_when_payload_missing() {
+    // Legacy `secret_ref` field is silently dropped by the new schema; if no
+    // inline payload is supplied alongside a non-anonymous auth_kind, the
+    // request must fail (missing username/password/token), proving the legacy
+    // field cannot be used to register a credential anymore.
+    let (app, store) = registry_api_test_app();
+    let project = create_project_for_test(&store, "p1");
+    let body = serde_json::json!({
+        "name": "ghcr",
+        "endpoint": "ghcr.io",
+        "auth_kind": "basic",
+        "secret_ref": "ghcr-token"
+    });
+    let resp = app
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri(format!("/v1/projects/{}/registries", project.id))
+                .header(http::header::AUTHORIZATION, "Bearer test-token")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == http::StatusCode::BAD_REQUEST
+            || resp.status() == http::StatusCode::UNPROCESSABLE_ENTITY,
+        "expected 400/422, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn registry_api_rejects_basic_without_password() {
+    let (app, store) = registry_api_test_app();
+    let project = create_project_for_test(&store, "p1");
+    let body = serde_json::json!({
+        "name": "ghcr",
+        "endpoint": "ghcr.io",
+        "auth_kind": "basic",
+        "username": "zainokta"
+    });
+    let resp = app
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri(format!("/v1/projects/{}/registries", project.id))
+                .header(http::header::AUTHORIZATION, "Bearer test-token")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == http::StatusCode::BAD_REQUEST
+            || resp.status() == http::StatusCode::UNPROCESSABLE_ENTITY,
+        "expected 400/422, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn registry_api_anonymous_needs_no_payload() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let runner = FakeCommandRunner::new(vec![]);
+    let (app, store) = registry_api_test_app_with_runner(runner, tmp.path().to_path_buf());
+    let project = create_project_for_test(&store, "p1");
+    let body = serde_json::json!({
+        "name": "pub",
+        "endpoint": "docker.io",
+        "auth_kind": "anonymous"
+    });
+    let resp = app
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri(format!("/v1/projects/{}/registries", project.id))
+                .header(http::header::AUTHORIZATION, "Bearer test-token")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), http::StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(value["credential_ref"].is_null());
+}
+
+#[tokio::test]
 async fn registry_api_non_admin_forbidden() {
     let (app, store) = registry_api_test_app();
     let project = create_project_for_test(&store, "p1");
@@ -1168,7 +1333,8 @@ async fn registry_api_non_admin_forbidden() {
         "name": "ghcr",
         "endpoint": "ghcr.io",
         "auth_kind": "basic",
-        "secret_ref": "ghcr-token",
+        "username": "u",
+        "password": "p"
     });
     let response = app
         .oneshot(
