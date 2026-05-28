@@ -103,6 +103,152 @@ where
         }
     }
 
+    /// Persist a `Pending` deployment row up front so the API can return it
+    /// immediately while the rest of the pipeline runs asynchronously.
+    ///
+    /// The `service` argument is reserved for future per-service validation
+    /// (e.g. rejecting deploys for stopped services); today it is unused.
+    pub async fn create_pending(
+        &self,
+        service: &ServiceConfig,
+        request: DeploymentRequest,
+    ) -> Result<Deployment, DeployError> {
+        let _ = service;
+        let deployment = self.repos.deployments.create_deployment(request)?;
+        Ok(deployment)
+    }
+
+    /// Drive a previously-`Pending` deployment through Building → Starting →
+    /// Healthy, emitting per-phase log lines via `log`. On failure, writes an
+    /// `ERROR` log line and transitions the row to `Failed`.
+    pub async fn run(
+        &self,
+        deployment_id: Uuid,
+        service: ServiceConfig,
+        request: DeploymentRequest,
+        log: &crate::deploy::log::DeploymentLogWriter,
+    ) -> Result<(), DeployError> {
+        let res = self.run_inner(deployment_id, service, request, log).await;
+        if let Err(ref e) = res {
+            let _ = log.write("ERROR", &format!("{e:?}"));
+            let _ = self
+                .repos
+                .deployments
+                .update_deployment_status(deployment_id, DeploymentStatus::Failed);
+        }
+        res
+    }
+
+    async fn run_inner(
+        &self,
+        deployment_id: Uuid,
+        service: ServiceConfig,
+        request: DeploymentRequest,
+        log: &crate::deploy::log::DeploymentLogWriter,
+    ) -> Result<(), DeployError> {
+        log.write("START", &format!("deployment_id={deployment_id}"))
+            .ok();
+
+        self.repos
+            .deployments
+            .update_deployment_status(deployment_id, DeploymentStatus::Building)?;
+        log.write("BUILDING", "acquiring artifact").ok();
+
+        let artifact = self
+            .acquire_artifact_for_run(&service, &request, log)
+            .await?;
+        self.repos.deployments.put_artifact(artifact.clone())?;
+        self.repos
+            .deployments
+            .set_deployment_artifact(deployment_id, &artifact.digest)?;
+
+        self.repos
+            .deployments
+            .update_deployment_status(deployment_id, DeploymentStatus::Starting)?;
+        log.write("STARTING", "launching runtime").ok();
+
+        self.finalize(deployment_id, &service, artifact, log)
+            .await?;
+
+        self.repos
+            .deployments
+            .update_deployment_status(deployment_id, DeploymentStatus::Healthy)?;
+        log.write("HEALTHY", "deployment promoted").ok();
+        Ok(())
+    }
+
+    /// STUB: Task 4 wires the acquirer + runner + secret store + sops_binary
+    /// dependencies through `run_with_deps` so this method can resolve the
+    /// service source (ExternalImage / Git) into an `ArtifactRecord`. Until
+    /// then, callers of `run` MUST NOT exercise this path — tests that drive
+    /// `run` end-to-end are marked `#[ignore]`.
+    async fn acquire_artifact_for_run(
+        &self,
+        service: &ServiceConfig,
+        request: &DeploymentRequest,
+        log: &crate::deploy::log::DeploymentLogWriter,
+    ) -> Result<ArtifactRecord, DeployError> {
+        let _ = (service, request, log);
+        unimplemented!("filled in by Task 4")
+    }
+
+    /// Runtime-start + healthcheck + promote + write_routing_config portion of
+    /// the deploy pipeline. Mirrors the body of `deploy()` but uses the
+    /// supplied `deployment_id` (no `create_deployment` here) and emits log
+    /// lines for the SSE viewer.
+    async fn finalize(
+        &self,
+        deployment_id: Uuid,
+        service: &ServiceConfig,
+        artifact: ArtifactRecord,
+        log: &crate::deploy::log::DeploymentLogWriter,
+    ) -> Result<(), DeployError> {
+        let project = self
+            .repos
+            .projects
+            .get_project(service.project_id)?
+            .ok_or(DeployError::Repo(RepoError::UnknownProject))?;
+        let limits = service.effective_limits(&project);
+        let env: Vec<(String, String)> = service.effective_env(&project).into_iter().collect();
+
+        log.write("RUNTIME_START", &format!("port={}", service.internal_port))
+            .ok();
+        let runtime_status = self
+            .runtime
+            .start(RuntimeStartRequest {
+                service_name: service.name.clone(),
+                service_id: service.id,
+                deployment_id,
+                artifact,
+                internal_port: service.internal_port,
+                socket_path: format!("/var/lib/denia/runtime/{}/current.sock", service.id).into(),
+                cpu_millis: limits.cpu_millis,
+                memory_bytes: limits.memory_bytes,
+                env,
+                pids_max: None,
+                memory_swap_max: None,
+                io_weight: None,
+                replica_index: 0,
+            })
+            .await?;
+
+        log.write("HEALTHCHECK", "starting").ok();
+        self.health
+            .check(
+                &format!("http://127.0.0.1:{}", service.internal_port),
+                &service.health_check,
+            )
+            .await?;
+        log.write("HEALTHCHECK", "passed").ok();
+
+        self.repos
+            .deployments
+            .promote_deployment(service.id, deployment_id)?;
+        self.write_routing_config(service, &runtime_status.socket_path)
+            .await?;
+        Ok(())
+    }
+
     pub async fn deploy(&self, plan: DeploymentPlan) -> Result<Deployment, DeployError> {
         let mut deployment = self
             .repos
@@ -371,5 +517,91 @@ fn deployment_request(service: &ServiceConfig, artifact: &ArtifactRecord) -> Dep
             repo_url: repo_url.clone(),
             git_ref: git_ref.clone(),
         },
+    }
+}
+
+#[cfg(test)]
+mod async_tests {
+    use super::*;
+    use crate::domain::{
+        ExternalImageSource, HealthCheck, ResourceLimits, ServiceConfig, ServiceSource,
+    };
+    use crate::health::FakeHealthChecker;
+    use crate::repo::sqlite::{
+        SqliteDeploymentRepo, SqliteDomainRepo, SqliteProjectRepo, SqliteRegistryRepo,
+    };
+    use crate::runtime::FakeRuntime;
+    use crate::state::SqliteStore;
+
+    fn build_repos(store: &SqliteStore) -> DeploymentRepos {
+        let pool = store.pool();
+        DeploymentRepos {
+            deployments: SqliteDeploymentRepo::new(pool.clone()),
+            projects: SqliteProjectRepo::new(pool.clone()),
+            registries: SqliteRegistryRepo::new(pool.clone()),
+            domains: SqliteDomainRepo::new(pool),
+        }
+    }
+
+    fn coord_for_pending() -> (
+        SqliteStore,
+        DeploymentCoordinator<FakeRuntime, FakeHealthChecker>,
+        ServiceConfig,
+        DeploymentRequest,
+    ) {
+        let store = SqliteStore::open_in_memory().expect("sqlite");
+        store.migrate().expect("migrate");
+        let runtime = FakeRuntime::default();
+        let health = FakeHealthChecker::healthy();
+        let coordinator = DeploymentCoordinator::new(build_repos(&store), runtime, health);
+
+        let project_id = store.default_project_id().expect("default project");
+        let service = store
+            .put_service(
+                ServiceConfig::new(
+                    project_id,
+                    "web",
+                    vec!["web.example.test".to_string()],
+                    ServiceSource::ExternalImage(ExternalImageSource {
+                        image: "ghcr.io/acme/web:latest".to_string(),
+                        credential: None,
+                        registry_id: None,
+                        image_ref: None,
+                    }),
+                    3000,
+                    HealthCheck::new("/ready", 5),
+                    Some(ResourceLimits::default()),
+                    vec![],
+                )
+                .expect("service"),
+            )
+            .expect("stored service");
+
+        let request = DeploymentRequest::external_image(service.id, "ghcr.io/acme/web:latest");
+        (store, coordinator, service, request)
+    }
+
+    #[tokio::test]
+    async fn create_pending_persists_row_in_pending_status() {
+        let (store, coord, svc, request) = coord_for_pending();
+        let d = coord
+            .create_pending(&svc, request.clone())
+            .await
+            .expect("create_pending");
+        assert_eq!(d.status, DeploymentStatus::Pending);
+
+        let row = store
+            .list_deployments(svc.id)
+            .expect("list deployments")
+            .into_iter()
+            .find(|d2| d2.id == d.id)
+            .expect("row exists");
+        assert_eq!(row.status, DeploymentStatus::Pending);
+    }
+
+    #[tokio::test]
+    #[ignore = "filled in by Task 4 — acquire_artifact_for_run is unimplemented"]
+    async fn run_transitions_pending_building_starting_healthy() {
+        unimplemented!()
     }
 }
