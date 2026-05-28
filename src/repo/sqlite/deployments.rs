@@ -84,6 +84,41 @@ pub(super) fn list_deployments_q(
     Ok(deployments)
 }
 
+pub(super) fn get_deployment_q(
+    conn: &Connection,
+    id: Uuid,
+) -> Result<Option<Deployment>, RepoError> {
+    let row = conn
+        .query_row(
+            r#"
+            SELECT id, service_id, request_json, status, created_at
+            FROM deployments
+            WHERE id = ?1
+            "#,
+            params![id.to_string()],
+            |row| {
+                Ok(DeploymentRow {
+                    id: row.get(0)?,
+                    service_id: row.get(1)?,
+                    request_json: row.get(2)?,
+                    status_json: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    row.map(|row| {
+        Ok(Deployment {
+            id: Uuid::parse_str(&row.id)?,
+            service_id: Uuid::parse_str(&row.service_id)?,
+            request: serde_json::from_str(&row.request_json)?,
+            status: serde_json::from_str(&row.status_json)?,
+            created_at: row.created_at.parse()?,
+        })
+    })
+    .transpose()
+}
+
 pub(super) fn update_deployment_status_q(
     conn: &Connection,
     deployment_id: Uuid,
@@ -102,8 +137,7 @@ pub(super) fn fail_orphan_deployments_q(conn: &Connection) -> Result<Vec<Uuid>, 
     let starting = serde_json::to_string(&DeploymentStatus::Starting)?;
     let failed = serde_json::to_string(&DeploymentStatus::Failed)?;
 
-    let mut stmt =
-        conn.prepare("SELECT id FROM deployments WHERE status IN (?1, ?2, ?3)")?;
+    let mut stmt = conn.prepare("SELECT id FROM deployments WHERE status IN (?1, ?2, ?3)")?;
     let id_strings: Vec<String> = stmt
         .query_map(params![&pending, &building, &starting], |row| {
             row.get::<_, String>(0)
@@ -242,6 +276,11 @@ impl SqliteStore {
         list_deployments_q(&connection, service_id).map_err(StateError::from)
     }
 
+    pub fn get_deployment(&self, deployment_id: Uuid) -> Result<Option<Deployment>, StateError> {
+        let connection = self.connection()?;
+        get_deployment_q(&connection, deployment_id).map_err(StateError::from)
+    }
+
     pub fn update_deployment_status(
         &self,
         deployment_id: Uuid,
@@ -323,6 +362,11 @@ impl SqliteDeploymentRepo {
     pub fn list_deployments(&self, service_id: Uuid) -> Result<Vec<Deployment>, RepoError> {
         let conn = self.pool.connection()?;
         list_deployments_q(&conn, service_id)
+    }
+
+    pub fn get_deployment(&self, deployment_id: Uuid) -> Result<Option<Deployment>, RepoError> {
+        let conn = self.pool.connection()?;
+        get_deployment_q(&conn, deployment_id)
     }
 
     pub fn update_deployment_status(
@@ -432,6 +476,20 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn get_deployment_returns_row_by_id() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        let svc = Uuid::now_v7();
+        let d = store
+            .create_deployment(DeploymentRequest::external_image(svc, "img"))
+            .unwrap();
+        let fetched = store.get_deployment(d.id).unwrap();
+        assert!(fetched.is_some());
+        assert_eq!(fetched.unwrap().id, d.id);
+        assert!(store.get_deployment(Uuid::now_v7()).unwrap().is_none());
     }
 
     #[test]

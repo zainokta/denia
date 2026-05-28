@@ -12,7 +12,7 @@ use denia::{
     app::{AppState, build_router},
     config::AppConfig,
     domain::{
-        DeploymentRequest, ExternalImageSource, HealthCheck, Project, ResourceLimits,
+        Deployment, DeploymentRequest, ExternalImageSource, HealthCheck, Project, ResourceLimits,
         ServiceConfig, ServiceSource,
     },
     state::SqliteStore,
@@ -99,4 +99,60 @@ async fn post_deployments_returns_202_and_row_is_pending() {
         "unexpected status: {:?}",
         row.status,
     );
+}
+
+#[tokio::test]
+async fn get_deployment_returns_row() {
+    let store = SqliteStore::open_in_memory().expect("open sqlite");
+    store.migrate().expect("migrate");
+    let state = AppState::new(AppConfig::for_test(ADMIN_TOKEN), &store);
+
+    let project = Project::new("team-get", None).expect("project");
+    state
+        .projects
+        .put_project(project.clone())
+        .expect("project stored");
+    let svc = ServiceConfig::new(
+        project.id,
+        "web",
+        vec!["get.example.test".into()],
+        ServiceSource::ExternalImage(ExternalImageSource {
+            image: "alpine:3".into(),
+            credential: None,
+            registry_id: None,
+            image_ref: None,
+        }),
+        3000,
+        HealthCheck::new("/ready", 5),
+        Some(ResourceLimits::default()),
+        vec![],
+    )
+    .expect("valid service");
+    let service = state.services.put_service(svc).expect("service stored");
+
+    let deployment = state
+        .deployments
+        .create_deployment(DeploymentRequest::external_image(service.id, "alpine:3"))
+        .expect("create deployment row");
+
+    let app = build_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/deployments/{}", deployment.id))
+                .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("request completed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let fetched: Deployment = serde_json::from_slice(&bytes).expect("parse deployment json");
+    assert_eq!(fetched.id, deployment.id);
+    assert_eq!(fetched.service_id, service.id);
 }

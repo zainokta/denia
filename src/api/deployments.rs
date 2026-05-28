@@ -15,6 +15,7 @@ use crate::domain::{DeploymentRequest, Role};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/deployments", post(create_deployment))
+        .route("/deployments/{deployment_id}", get(get_deployment))
         .route(
             "/services/{service_id}/deployments",
             get(list_service_deployments),
@@ -103,4 +104,25 @@ async fn list_service_deployments(
     };
     ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
     Ok(Json(state.deployments.list_deployments(service_id)?))
+}
+
+/// `GET /v1/deployments/{deployment_id}` — fetch a single deployment row.
+///
+/// The deployment-detail page polls this endpoint while the deploy task is
+/// running to observe status transitions (Pending → Building → Starting →
+/// Healthy|Failed). Returns 404 if the deployment or its parent service no
+/// longer exists; otherwise returns the JSON-encoded `Deployment`.
+async fn get_deployment(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(deployment_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<crate::domain::Deployment>, ApiError> {
+    let Some(deployment) = state.deployments.get_deployment(deployment_id)? else {
+        return Err(ApiError::NotFound("deployment not found".to_string()));
+    };
+    let Some(service) = state.services.get_service(deployment.service_id)? else {
+        return Err(ApiError::NotFound("service not found".to_string()));
+    };
+    ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
+    Ok(Json(deployment))
 }
