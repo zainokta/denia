@@ -246,9 +246,6 @@ impl ServiceConfig {
     /// that was deserialized at an API boundary (which bypasses `new`).
     pub fn validate(&self) -> Result<(), DomainError> {
         validate_service_name(&self.name)?;
-        if self.domains.is_empty() {
-            return Err(DomainError::MissingDomain);
-        }
         for domain in &self.domains {
             if let Err(e) = crate::verification::validate_hostname(domain) {
                 return Err(DomainError::InvalidHostname(format!(
@@ -416,6 +413,26 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn validate_allows_empty_domains() {
+        let cfg = ServiceConfig::new(
+            uuid::Uuid::now_v7(),
+            "no-domain-svc",
+            vec![],
+            ServiceSource::ExternalImage(ExternalImageSource {
+                image: "nginx:latest".into(),
+                credential: None,
+                registry_id: None,
+                image_ref: None,
+            }),
+            80,
+            HealthCheck::new("/", 5),
+            None,
+            vec![],
+        );
+        assert!(cfg.is_ok(), "empty domains must be valid: {cfg:?}");
     }
 
     #[test]
