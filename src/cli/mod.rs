@@ -2,6 +2,7 @@
 //! 2026-05-28-denia-binary-subcommands-design.md.
 
 pub mod common;
+pub mod doctor;
 pub mod setup;
 pub mod status;
 pub mod uninstall;
@@ -44,7 +45,7 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Setup(args)) => crate::cli::setup::run(args),
         Some(Commands::Uninstall(args)) => crate::cli::uninstall::run(args),
         Some(Commands::Status) => crate::cli::status::run(),
-        Some(Commands::Doctor) => Err(anyhow::anyhow!("doctor not yet implemented")),
+        Some(Commands::Doctor) => crate::cli::doctor::run(),
         Some(Commands::RotateToken) => Err(anyhow::anyhow!("rotate-token not yet implemented")),
         None => {
             // Daemon is async; build a runtime here so non-daemon subcommands
