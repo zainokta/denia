@@ -19,6 +19,8 @@ import { Route as ProjectsIndexRouteImport } from './routes/projects/index'
 import { Route as JobsIndexRouteImport } from './routes/jobs/index'
 import { Route as SettingsUsersRouteImport } from './routes/settings/users'
 import { Route as SettingsTokensRouteImport } from './routes/settings/tokens'
+import { Route as SettingsSessionsRouteImport } from './routes/settings/sessions'
+import { Route as SettingsCredentialsRouteImport } from './routes/settings/credentials'
 import { Route as ServicesServiceIdRouteImport } from './routes/services/$serviceId'
 import { Route as ProjectsProjectIdRouteImport } from './routes/projects/$projectId'
 import { Route as JobsJobIdRouteImport } from './routes/jobs/$jobId'
@@ -73,6 +75,16 @@ const SettingsTokensRoute = SettingsTokensRouteImport.update({
   path: '/settings/tokens',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SettingsSessionsRoute = SettingsSessionsRouteImport.update({
+  id: '/settings/sessions',
+  path: '/settings/sessions',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsCredentialsRoute = SettingsCredentialsRouteImport.update({
+  id: '/settings/credentials',
+  path: '/settings/credentials',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ServicesServiceIdRoute = ServicesServiceIdRouteImport.update({
   id: '/services/$serviceId',
   path: '/services/$serviceId',
@@ -98,6 +110,8 @@ export interface FileRoutesByFullPath {
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
+  '/settings/credentials': typeof SettingsCredentialsRoute
+  '/settings/sessions': typeof SettingsSessionsRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/settings/users': typeof SettingsUsersRoute
   '/jobs/': typeof JobsIndexRoute
@@ -113,6 +127,8 @@ export interface FileRoutesByTo {
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
+  '/settings/credentials': typeof SettingsCredentialsRoute
+  '/settings/sessions': typeof SettingsSessionsRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/settings/users': typeof SettingsUsersRoute
   '/jobs': typeof JobsIndexRoute
@@ -129,6 +145,8 @@ export interface FileRoutesById {
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
+  '/settings/credentials': typeof SettingsCredentialsRoute
+  '/settings/sessions': typeof SettingsSessionsRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/settings/users': typeof SettingsUsersRoute
   '/jobs/': typeof JobsIndexRoute
@@ -146,6 +164,8 @@ export interface FileRouteTypes {
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
+    | '/settings/credentials'
+    | '/settings/sessions'
     | '/settings/tokens'
     | '/settings/users'
     | '/jobs/'
@@ -161,6 +181,8 @@ export interface FileRouteTypes {
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
+    | '/settings/credentials'
+    | '/settings/sessions'
     | '/settings/tokens'
     | '/settings/users'
     | '/jobs'
@@ -176,6 +198,8 @@ export interface FileRouteTypes {
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
+    | '/settings/credentials'
+    | '/settings/sessions'
     | '/settings/tokens'
     | '/settings/users'
     | '/jobs/'
@@ -192,6 +216,8 @@ export interface RootRouteChildren {
   JobsJobIdRoute: typeof JobsJobIdRoute
   ProjectsProjectIdRoute: typeof ProjectsProjectIdRoute
   ServicesServiceIdRoute: typeof ServicesServiceIdRoute
+  SettingsCredentialsRoute: typeof SettingsCredentialsRoute
+  SettingsSessionsRoute: typeof SettingsSessionsRoute
   SettingsTokensRoute: typeof SettingsTokensRoute
   SettingsUsersRoute: typeof SettingsUsersRoute
   JobsIndexRoute: typeof JobsIndexRoute
@@ -271,6 +297,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsTokensRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/settings/sessions': {
+      id: '/settings/sessions'
+      path: '/settings/sessions'
+      fullPath: '/settings/sessions'
+      preLoaderRoute: typeof SettingsSessionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/settings/credentials': {
+      id: '/settings/credentials'
+      path: '/settings/credentials'
+      fullPath: '/settings/credentials'
+      preLoaderRoute: typeof SettingsCredentialsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/services/$serviceId': {
       id: '/services/$serviceId'
       path: '/services/$serviceId'
@@ -304,6 +344,8 @@ const rootRouteChildren: RootRouteChildren = {
   JobsJobIdRoute: JobsJobIdRoute,
   ProjectsProjectIdRoute: ProjectsProjectIdRoute,
   ServicesServiceIdRoute: ServicesServiceIdRoute,
+  SettingsCredentialsRoute: SettingsCredentialsRoute,
+  SettingsSessionsRoute: SettingsSessionsRoute,
   SettingsTokensRoute: SettingsTokensRoute,
   SettingsUsersRoute: SettingsUsersRoute,
   JobsIndexRoute: JobsIndexRoute,

@@ -514,6 +514,98 @@ async fn axum_router_accepts_credentials_and_lifecycle_commands_with_admin_token
 }
 
 #[tokio::test]
+async fn axum_router_lists_registered_credentials_for_admin() {
+    let store = SqliteStore::open_in_memory().expect("open sqlite");
+    store.migrate().expect("migrate");
+    let app = build_router(AppState::new(AppConfig::for_test("test-token"), &store));
+
+    // Empty list before any registration.
+    let empty = app
+        .clone()
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri("/v1/credentials")
+                .header(http::header::AUTHORIZATION, "Bearer test-token")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.status(), http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(empty.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let initial: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+    assert!(initial.is_empty());
+
+    // Register one git credential + one registry credential.
+    for (kind_path, payload) in [
+        (
+            "/v1/credentials/git",
+            serde_json::json!({
+                "name": "git-main",
+                "kind": "SshDeployKey",
+                "secret_ref": "git-main",
+            }),
+        ),
+        (
+            "/v1/credentials/registry",
+            serde_json::json!({
+                "name": "ghcr-token",
+                "kind": "RegistryToken",
+                "secret_ref": "ghcr-token",
+            }),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                http::Request::builder()
+                    .method(http::Method::POST)
+                    .uri(kind_path)
+                    .header(http::header::AUTHORIZATION, "Bearer test-token")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+    }
+
+    // List returns both, name-sorted.
+    let listed = app
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri("/v1/credentials")
+                .header(http::header::AUTHORIZATION, "Bearer test-token")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(listed.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let credentials: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(credentials.len(), 2);
+    let names: Vec<&str> = credentials
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["ghcr-token", "git-main"]);
+    let kinds: Vec<&str> = credentials
+        .iter()
+        .map(|c| c["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"SshDeployKey"));
+    assert!(kinds.contains(&"RegistryToken"));
+}
+
+#[tokio::test]
 async fn deployment_endpoint_rejects_unknown_service() {
     let store = SqliteStore::open_in_memory().expect("open sqlite");
     store.migrate().expect("migrate");

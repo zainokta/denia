@@ -15,6 +15,7 @@ import { TlsToggle } from '#/components/TlsToggle'
 import { ServiceForm } from '#/components/ServiceForm'
 import { Tabs } from '#/components/Tabs'
 import { useAuth, can } from '#/hooks/useAuth'
+import { useServiceLogs } from '#/hooks/useServiceLogs'
 import type { Deployment, Service, ServiceInput } from '#/effect/schema'
 
 const getService = (id: string) =>
@@ -27,12 +28,6 @@ const getDeployments = (id: string) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
     return yield* api.getServiceDeployments(id)
-  })
-
-const getLogs = (id: string) =>
-  Effect.gen(function* () {
-    const api = yield* ApiClient
-    return yield* api.getServiceLogs(id)
   })
 
 const getMetrics = (id: string) =>
@@ -161,12 +156,10 @@ export function ServiceDetail() {
       ? deployments.reduce((a, b) => (a.id > b.id ? a : b))
       : undefined
 
-  const { data: logs = [] } = useQuery({
-    queryKey: ['services', id, 'logs'],
-    queryFn: () => runQuery(getLogs(id)),
-    refetchInterval: 3000,
-    refetchIntervalInBackground: false,
-  })
+  const { lines: logs, error: logsError } = useServiceLogs(
+    id,
+    activeTab === 'logs',
+  )
 
   const { data: metrics = [] } = useQuery({
     queryKey: ['services', id, 'metrics'],
@@ -603,30 +596,50 @@ export function ServiceDetail() {
           }
 
           if (active === 'logs') {
-            return logs.length === 0 ? (
-              <p className="text-sm text-[var(--fg-muted)]">
-                No logs available.
-              </p>
-            ) : (
-              <div className="panel overflow-hidden">
-                <ul className="m-0 list-none">
-                  {logs.map((line, i) => (
-                    <li
-                      key={`${i}:${line}`}
-                      className={`flex gap-4 px-4 py-1.5 text-xs ${
-                        i > 0 ? 'border-t border-[var(--border)]' : ''
-                      }`}
-                    >
-                      <span className="tnum flex-shrink-0 text-[var(--fg-muted)]">
-                        {String(i + 1).padStart(3, '0')}
+            return (
+              <>
+                <div className="mb-2 flex items-center gap-2 text-xs">
+                  {logsError ? (
+                    <span className="text-[var(--violet)]">
+                      <span className="signal signal-fault mr-2 inline-block align-middle" />
+                      {logsError}
+                    </span>
+                  ) : (
+                    <>
+                      <span className="signal signal-steady" />
+                      <span className="kicker">live</span>
+                      <span className="tnum text-[var(--fg-muted)]">
+                        {logs.length} line{logs.length === 1 ? '' : 's'}
                       </span>
-                      <code className="flex-1 whitespace-pre-wrap break-all font-mono text-[var(--fg)]">
-                        {line}
-                      </code>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+                    </>
+                  )}
+                </div>
+                {logs.length === 0 ? (
+                  <p className="text-sm text-[var(--fg-muted)]">
+                    {logsError ? 'Stream unavailable.' : 'Waiting for logs...'}
+                  </p>
+                ) : (
+                  <div className="panel overflow-hidden">
+                    <ul className="m-0 list-none">
+                      {logs.map((line, i) => (
+                        <li
+                          key={`${i}:${line}`}
+                          className={`flex gap-4 px-4 py-1.5 text-xs ${
+                            i > 0 ? 'border-t border-[var(--border)]' : ''
+                          }`}
+                        >
+                          <span className="tnum flex-shrink-0 text-[var(--fg-muted)]">
+                            {String(i + 1).padStart(3, '0')}
+                          </span>
+                          <code className="flex-1 whitespace-pre-wrap break-all font-mono text-[var(--fg)]">
+                            {line}
+                          </code>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </>
             )
           }
 

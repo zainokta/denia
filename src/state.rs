@@ -35,6 +35,8 @@ pub enum StateError {
     RegistryInUse,
     #[error("admin already initialized")]
     AdminAlreadyInitialized,
+    #[error("invalid column value: {0}")]
+    InvalidColumn(String),
 }
 
 impl From<RepoError> for StateError {
@@ -53,6 +55,7 @@ impl From<RepoError> for StateError {
             RepoError::RegistryNotFound => StateError::RegistryNotFound,
             RepoError::RegistryInUse => StateError::RegistryInUse,
             RepoError::AdminAlreadyInitialized => StateError::AdminAlreadyInitialized,
+            RepoError::InvalidColumn(s) => StateError::InvalidColumn(s),
         }
     }
 }
