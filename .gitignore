@@ -3,7 +3,6 @@
 .repos/effect
 codedb.snapshot
 .worktrees/
-TODO.md
 
 # Secrets and local state — never commit
 *.sops.yaml

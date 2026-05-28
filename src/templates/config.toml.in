@@ -1,0 +1,54 @@
+# {{user_config_dir}}/config.toml
+# Denia control-plane configuration (TOML; mirrors src/config.rs::FileConfig).
+# Read by the daemon at boot. DENIA_* environment variables in the systemd unit
+# override per-field (see docs/adr/023). The admin token lives in
+# {{token_file}}; keep it out of this file.
+# Rendered by cli::common::config_writer::render_config_toml.
+
+# --- Control plane bind ---
+# Management API socket. Pingora handles :80/:443; this is only the
+# operator-facing /v1 + /healthz + SPA.
+bind_addr = "0.0.0.0:7180"
+
+# --- On-disk layout ---
+data_dir = "/var/lib/denia"
+database_path = "/var/lib/denia/sqlite/denia.sqlite3"
+tls_dir = "/var/lib/denia/tls"
+node_disk_path = "/var/lib/denia"
+
+# --- Workload runtime ---
+cgroup_root = "/sys/fs/cgroup/denia"
+# Subuid/subgid mapping for workloads (see ADR-005). Default 100000 / 65536;
+# raise userns_size if you run many workloads.
+userns_base = 100000
+userns_size = 65536
+
+# --- External tool paths (PATH lookup if commented) ---
+# buildkit_binary = "/usr/local/bin/buildctl"
+# git_binary = "/usr/bin/git"
+# sops_binary = "/usr/local/bin/sops"
+
+# --- Ingress (Pingora) ---
+# ACME HTTP-01 lives on :80; keep it 80 unless you front it (don't -- Denia
+# owns these).
+http_port = 80
+https_port = 443
+# Let's Encrypt production. Use the staging URL on non-prod nodes:
+# acme_directory_url = "https://acme-staging-v02.api.letsencrypt.org/directory"
+acme_directory_url = "https://acme-v02.api.letsencrypt.org/directory"
+# Required if any service has tls_enabled = true:
+# acme_email = "ops@example.com"
+
+# --- Control-plane TLS gating ---
+# control_domain = "denia.example.com"
+# control_tls = false
+
+# --- Autoscaler ---
+autoscale_interval_s = 15
+autoscale_headroom_cpu_millis = 1000
+autoscale_headroom_mem_bytes = 536870912
+
+# --- Control-plane secret encryption (ADR-021) ---
+# Age private key file. The public recipient is auto-derived from the
+# "# public key:" comment unless age_recipient is set explicitly.
+age_key_file = "{{age_key_file}}"

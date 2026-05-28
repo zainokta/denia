@@ -191,20 +191,44 @@ with the dashboard as a fallback for non-API routes.
 
 ## Installation
 
-`install.sh` is the recommended production install path. It must be invoked
-via **sudo from a regular user account** (not directly as root). That user
-becomes the operator: their `~/.config/denia/` holds the config, admin token,
-and age key, edited without sudo. The daemon itself runs unprivileged as a
-dedicated `denia` system user with a narrow capability set.
+Production installs use a two-step flow:
+
+**Step 1 — Build and install the binary:**
 
 ```bash
 sudo ./install.sh
 ```
 
+`install.sh` must be invoked via **sudo from a regular user account** (not
+directly as root). It runs preflight checks, installs OS dependencies, sets
+up Rust (via `rustup`) and Node, builds the release binary (with the embedded
+SPA), and copies it to `/usr/local/bin/denia`.
+
 `--dry-run` previews every command without changing anything. `--skip-build`
-reuses an existing `target/release/denia`. `--uninstall [--purge]` removes
-the service (and, with `--purge`, wipes `/var/lib/denia` and
-`~/.config/denia`).
+reuses an existing `target/release/denia`.
+
+**Step 2 — Provision the host:**
+
+```bash
+sudo denia setup
+```
+
+`denia setup` creates the `denia` system user and group, lays out
+`/var/lib/denia`, generates `~/.config/denia/{config.toml,admin.token,age.key}`
+owned `<operator>:denia 0640`, writes and enables the systemd unit, and starts
+the service. That user becomes the operator: their `~/.config/denia/` is
+editable without sudo. See [ADR-025](docs/adr/025-cli-driven-host-provisioning.md).
+
+### Subcommands
+
+| Subcommand | Purpose |
+|------------|---------|
+| `denia setup` | Provision the host (user, dirs, keys, config, systemd unit, start). |
+| `denia uninstall [--purge]` | Stop and remove the service; `--purge` also wipes `/var/lib/denia` and `~/.config/denia`. |
+| `denia status` | Print service state (systemctl status + recent journal lines). |
+| `denia doctor` | Diagnose host requirements and install health (no privilege needed). |
+| `denia rotate-token` | Rotate the admin token in `~/.config/denia/admin.token` and restart the service. |
+| `denia --version` / `denia --help` | Print version string or usage. |
 
 ### What it sets up
 

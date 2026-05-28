@@ -19,7 +19,7 @@
 | Path | Responsibility |
 |------|----------------|
 | `Makefile` | `make build`, `make install`, `make clean`, etc. Single build entry point. |
-| `docs/adr/024-cli-driven-host-provisioning.md` | ADR documenting the split + the rationale. |
+| `docs/adr/025-cli-driven-host-provisioning.md` | ADR documenting the split + the rationale. |
 | `src/daemon.rs` | Existing `main()` body extracted verbatim into `pub async fn run() -> anyhow::Result<()>`. |
 | `src/cli/mod.rs` | `Cli` + `Commands` enums, top-level `dispatch()`. |
 | `src/cli/setup.rs` | `denia setup` orchestration. |
@@ -49,7 +49,7 @@
 | `install.sh` | Drop steps 9–12 (provision/secrets/config/unit/start). Step 6 becomes `make install`. Print "Now run: sudo denia setup" at the end. Trim to ~200 lines. |
 | `README.md` | Installation section: rewrite to two-step (`sudo ./install.sh` then `sudo denia setup`); add subcommand reference. |
 | `docs/adr/023-toml-config-file.md` | Footnote: `denia setup` is now the canonical writer of the operator-home config; update References. |
-| `docs/adr/README.md` | Add ADR-024 row. |
+| `docs/adr/README.md` | Add ADR-025 row. |
 | `AGENTS.md` | Reference `denia <subcommand>` for setup/uninstall/status/doctor. |
 | `TODO.md` | Update line 10 (install.sh description) to reflect the new responsibilities. |
 
@@ -65,18 +65,18 @@
 
 ---
 
-## Task 1: ADR-024 — CLI-Driven Host Provisioning
+## Task 1: ADR-025 — CLI-Driven Host Provisioning
 
 **Files:**
-- Create: `docs/adr/024-cli-driven-host-provisioning.md`
+- Create: `docs/adr/025-cli-driven-host-provisioning.md`
 - Modify: `docs/adr/README.md`
 
-- [ ] **Step 1: Write ADR-024**
+- [ ] **Step 1: Write ADR-025**
 
 Use the same template as recent ADRs (Status, Date, Context, Decision, Consequences, Alternatives Considered, References). Paste:
 
 ```markdown
-# ADR-024: CLI-Driven Host Provisioning
+# ADR-025: CLI-Driven Host Provisioning
 
 - Status: Accepted
 - Date: 2026-05-28
@@ -135,15 +135,15 @@ templates embedded via `include_str!`, so changes track the binary version.
 - ADR-023 (TOML config file)
 ```
 
-- [ ] **Step 2: Index ADR-024 in the README**
+- [ ] **Step 2: Index ADR-025 in the README**
 
-Open `docs/adr/README.md`, add a row at the end of the table that lists ADR-024 with its title.
+Open `docs/adr/README.md`, add a row at the end of the table that lists ADR-025 with its title.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/adr/024-cli-driven-host-provisioning.md docs/adr/README.md
-git commit -m "docs(adr): add ADR-024 cli-driven host provisioning"
+git add docs/adr/025-cli-driven-host-provisioning.md docs/adr/README.md
+git commit -m "docs(adr): add ADR-025 cli-driven host provisioning"
 ```
 
 ---
@@ -473,7 +473,7 @@ pub use privilege::{detect_install_user, require_root};
 `src/cli/mod.rs`:
 
 ```rust
-//! Subcommand surface for the denia binary. See ADR-024 + spec
+//! Subcommand surface for the denia binary. See ADR-025 + spec
 //! 2026-05-28-denia-binary-subcommands-design.md.
 
 pub mod common;
@@ -1480,7 +1480,7 @@ Replace the existing "Installation" section with:
 
 - [ ] **Step 2: ADR-023 references**
 
-Add a one-line footnote: "Provisioning is done by `denia setup` (ADR-024),
+Add a one-line footnote: "Provisioning is done by `denia setup` (ADR-025),
 which writes the file using the same paths defined here."
 
 - [ ] **Step 3: AGENTS.md operators section**

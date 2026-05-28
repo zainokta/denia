@@ -117,3 +117,5 @@ variables layered on top.
   `~/.config/denia/config.toml` of the installing operator; the systemd unit
   pins `DENIA_CONFIG_FILE` to that path and supplies `DENIA_ADMIN_TOKEN`
   (and `SOPS_AGE_KEY_FILE`) via env. Env still wins per-field.
+- Provisioning is owned by `denia setup` (ADR-025), which writes this file
+  on first run.

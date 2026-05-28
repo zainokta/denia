@@ -1,0 +1,66 @@
+[Unit]
+Description=Denia control plane + L7 ingress (Pingora)
+After=network-online.target
+Wants=network-online.target
+# Denia owns :80/:443; refuse to coexist with the typical reverse proxies.
+Conflicts=traefik.service nginx.service caddy.service apache2.service httpd.service
+
+[Service]
+Type=simple
+User={{denia_user}}
+Group={{denia_group}}
+WorkingDirectory={{denia_home}}
+
+# Config file is the source of truth (TOML); admin token is supplied via env
+# from a separate file for credential hygiene. Env wins per-field, so the
+# token EnvironmentFile is loaded after the config-file pin.
+# SOPS_AGE_KEY_FILE is read by the external sops binary the daemon shells out
+# to at deploy time (see ADR-021); pinning it here keeps that path consistent
+# with config.toml's age_key_file.
+Environment=DENIA_CONFIG_FILE={{config_file}}
+Environment=SOPS_AGE_KEY_FILE={{age_key_file}}
+EnvironmentFile={{token_file}}
+
+ExecStart={{denia_bin}}
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=1048576
+TimeoutStopSec=30s
+
+# --- Capabilities ---
+# Denia's workload launcher creates user/mount/pid/uts/ipc namespaces and
+# writes cgroup v2 controllers -> CAP_SYS_ADMIN. Pingora binds :80/:443 as a
+# non-root user -> CAP_NET_BIND_SERVICE. CAP_SETUID/SETGID are needed to
+# write the child uid_map/gid_map and to drop into the mapped user (see
+# src/syscall/ns.rs).
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID
+
+# --- Filesystem confinement ---
+# Workload launcher and rustix syscall helpers handle the child's
+# no_new_privs + bounding-set drop (src/syscall/caps.rs); we do NOT set
+# NoNewPrivileges=true here because that would block the parent from
+# applying it post-fork.
+NoNewPrivileges=false
+ProtectSystem=strict
+# ProtectHome=true would hide /home entirely; we keep it true and punch a
+# narrow read-only bind mount through to the operator's denia config dir so
+# the daemon can read config.toml + admin.token + age.key without seeing the
+# rest of the user's home.
+ProtectHome=true
+BindReadOnlyPaths={{user_config_dir}}
+PrivateTmp=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectClock=true
+ProtectControlGroups=false
+ReadWritePaths={{denia_home}} /sys/fs/cgroup
+# Denia must be able to mount/unmount inside child namespaces.
+MountFlags=shared
+
+# --- Cgroup v2 delegation ---
+Delegate=yes
+DelegateControllers=cpu cpuset io memory pids
+
+[Install]
+WantedBy=multi-user.target

@@ -48,7 +48,7 @@ Guidelines for AI agents working on Denia, a Rust backend PaaS that runs workloa
 - TLS is in-process: ACME via `instant-acme` (HTTP-01), per-SNI certs served by a `TlsAccept` callback from an `ArcSwap<CertStore>`; certs persisted `0600` under `<tls_dir>` (`DENIA_TLS_DIR`), boot-loaded before `:443` accepts; renewal scan task. `DENIA_ACME_DIRECTORY_URL` defaults to Let's Encrypt prod — set the LE staging URL for non-prod. ACME is gated to `tls_enabled` services with verified domains. Every hostname is run through `validate_domain` before becoming a route/SNI/ACME identifier.
 - Runtime metrics come from cgroup v2 and procfs.
 - Runtime security hardening uses `DENIA_USERNS_BASE` (default `100000`) and `DENIA_USERNS_SIZE` (default `65536`). `no_new_privs` and capability-bounding-set drop are applied in-process via the `rustix` syscall module (`src/syscall/`); the `setpriv` host binary is no longer required.
-- The web console (`web/`) is served by the binary itself: `src/web.rs` embeds the SPA build (`web/dist/client`) via `rust-embed` and `build_router` adds it as a fallback after `/healthz` and `/v1`. SSR is dropped; the UI is a static SPA on the same origin as `/v1`. See ADR-004. Build flow: `cd web && pnpm build`, then `cargo run` serves API + UI on `DENIA_BIND_ADDR` (default `127.0.0.1:7180`). A release `cargo build` requires `web/dist/client` to exist first (it is gitignored).
+- The web console (`web/`) is served by the binary itself: `src/web.rs` embeds the SPA build (`web/dist/client`) via `rust-embed` and `build_router` adds it as a fallback after `/healthz` and `/v1`. SSR is dropped; the UI is a static SPA on the same origin as `/v1`. See ADR-004. Build flow: `cd web && pnpm build`, then `cargo run` serves API + UI on `DENIA_BIND_ADDR` (default `127.0.0.1:7180`). A release `cargo build` requires `web/dist/client` to exist first (it is gitignored). Production installs are `sudo ./install.sh` (build + binary) then `sudo denia setup` (provisioning); see ADR-025.
 
 ## Commits And Security
 
@@ -86,7 +86,7 @@ This project is indexed by GitNexus as **denia** (4709 symbols, 10796 relationsh
 
 1. `gitnexus_query({query: "<error or symptom>"})` — find execution flows related to the issue
 2. `gitnexus_context({name: "<suspect function>"})` — see all callers, callees, and process participation
-3. `READ gitnexus://repo/denia/process/{processName}` — trace the full execution flow step by step
+3. `READ gitnexus://repo/cli-driven-setup/process/{processName}` — trace the full execution flow step by step
 4. For regressions: `gitnexus_detect_changes({scope: "compare", base_ref: "main"})` — see what your branch changed
 
 ## When Refactoring
@@ -125,10 +125,10 @@ This project is indexed by GitNexus as **denia** (4709 symbols, 10796 relationsh
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/denia/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/denia/clusters` | All functional areas |
-| `gitnexus://repo/denia/processes` | All execution flows |
-| `gitnexus://repo/denia/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/cli-driven-setup/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/cli-driven-setup/clusters` | All functional areas |
+| `gitnexus://repo/cli-driven-setup/processes` | All execution flows |
+| `gitnexus://repo/cli-driven-setup/process/{name}` | Step-by-step execution trace |
 
 ## Self-Check Before Finishing
 
