@@ -48,9 +48,10 @@ fn resolve_home(user: &str) -> anyhow::Result<PathBuf> {
         .split(':')
         .nth(5)
         .ok_or_else(|| anyhow!("malformed passwd line for {user}: {line:?}"))?
+        .trim()
         .to_string();
     if home.is_empty() {
-        return Err(anyhow!("empty HOME for {user}"));
+        return Err(anyhow!("empty or whitespace-only HOME for {user}"));
     }
     Ok(PathBuf::from(home))
 }
