@@ -230,6 +230,35 @@ pub fn config_file_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// Fallback admin-token source for manual (non-systemd) runs: read the
+/// `admin.token` env-file `denia setup` writes next to `config.toml`. In
+/// production the systemd unit loads it via `EnvironmentFile`; this lets a
+/// direct `./denia` run pick it up from the same operator config dir. Accepts
+/// either the `DENIA_ADMIN_TOKEN=<value>` env-file line or a bare token. The
+/// token value is never logged.
+fn read_admin_token_file() -> Option<String> {
+    let token_path = config_file_path().parent()?.join("admin.token");
+    let contents = std::fs::read_to_string(&token_path).ok()?;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("DENIA_ADMIN_TOKEN=") {
+            let value = value.trim().trim_matches('"');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        } else if !line.contains('=') {
+            let value = line.trim_matches('"');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Build a fully-populated default `FileConfig` template. Used when the
 /// config file is missing so the operator sees every tunable on first run.
 /// `admin_token` is freshly generated (32 random bytes -> 64 hex chars).
@@ -344,6 +373,7 @@ impl AppConfig {
             .ok()
             .filter(|v| !v.is_empty())
             .or_else(|| file_cfg.admin_token.clone().filter(|v| !v.is_empty()))
+            .or_else(read_admin_token_file)
             .ok_or(ConfigError::MissingAdminToken)?;
         if admin_token.len() < 64 {
             return Err(ConfigError::AdminTokenTooShort);
@@ -720,6 +750,35 @@ mod tests {
         let path = dir.path().join("config.toml");
         let guard = EnvGuard::set("DENIA_CONFIG_FILE", path.to_string_lossy().as_ref());
         (dir, guard)
+    }
+
+    // Mirrors `denia setup`: a config.toml that omits admin_token, with the
+    // token in a sibling admin.token env-file. A manual run (no systemd
+    // EnvironmentFile, no DENIA_ADMIN_TOKEN) must still pick it up.
+    #[test]
+    fn admin_token_read_from_sibling_token_file() {
+        let _lock = FROM_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (cfg_dir, _cfg_file) = isolated_config_file();
+        std::fs::write(
+            cfg_dir.path().join("config.toml"),
+            "bind_addr = \"127.0.0.1:0\"\n",
+        )
+        .unwrap();
+        unsafe {
+            std::env::remove_var("DENIA_ADMIN_TOKEN");
+        }
+        let token = "a".repeat(64);
+        std::fs::write(
+            cfg_dir.path().join("admin.token"),
+            format!("DENIA_ADMIN_TOKEN={token}\n"),
+        )
+        .unwrap();
+        // Keep the recipient auto-detect inert.
+        let _key_file = EnvGuard::set("DENIA_AGE_KEY_FILE", "/nonexistent/denia-test/age.key");
+
+        let cfg = AppConfig::from_env().expect("admin token read from sibling admin.token");
+        assert_eq!(cfg.admin_token_hash.len(), 64);
+        assert!(!cfg.admin_token_hash.contains(token.as_str()));
     }
 
     // Both presence and absence are asserted in one test because cargo runs
