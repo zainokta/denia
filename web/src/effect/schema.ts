@@ -278,12 +278,21 @@ export class ServiceDomain extends Schema.Class<ServiceDomain>('ServiceDomain')(
 
 export const ServiceDomains = Schema.Array(ServiceDomain)
 
+export const RegistryAuthKind = Schema.Literals([
+  'anonymous',
+  'basic',
+  'token',
+  'ecr_token',
+  'gar_token',
+])
+export type RegistryAuthKind = typeof RegistryAuthKind.Type
+
 export class Registry extends Schema.Class<Registry>('Registry')({
   id: Schema.String,
   project_id: Schema.String,
   name: Schema.String,
   endpoint: Schema.String,
-  auth_kind: Schema.Literals(['Anonymous', 'Basic', 'Token', 'EcrToken', 'GarToken']),
+  auth_kind: RegistryAuthKind,
   credential_ref: Schema.NullOr(Schema.String),
 }) {}
 
@@ -292,6 +301,6 @@ export const Registries = Schema.Array(Registry)
 export class RegistryInput extends Schema.Class<RegistryInput>('RegistryInput')({
   name: Schema.String,
   endpoint: Schema.String,
-  auth_kind: Schema.Literals(['Anonymous', 'Basic', 'Token', 'EcrToken', 'GarToken']),
-  credential_ref: Schema.NullOr(Schema.String),
+  auth_kind: RegistryAuthKind,
+  secret_ref: Schema.NullOr(Schema.String),
 }) {}

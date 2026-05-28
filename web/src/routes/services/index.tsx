@@ -1,6 +1,12 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import { useState } from 'react'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
@@ -27,6 +33,12 @@ export const listProjects = Effect.gen(function* () {
   const api = yield* ApiClient
   return yield* api.listProjects
 })
+
+const listRegistries = (projectId: string) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.listRegistries(projectId)
+  })
 
 export const createService = (input: ServiceInput | Service) =>
   Effect.gen(function* () {
@@ -81,6 +93,19 @@ export function ServicesIndex() {
     queryKey: ['projects'],
     queryFn: () => runQuery(listProjects),
   })
+
+  const manageableProjects = projects.filter(
+    (p) => isSuperAdmin || roleForActiveProject(p.id) === 'admin',
+  )
+
+  const registryQueries = useQueries({
+    queries: manageableProjects.map((p) => ({
+      queryKey: ['projects', p.id, 'registries'],
+      queryFn: () => runQuery(listRegistries(p.id)),
+    })),
+  })
+
+  const registries = registryQueries.flatMap((q) => q.data ?? [])
 
   const statusByService = new Map<string, DeploymentStatusValue | null>()
   for (const wl of workloads) {
@@ -155,21 +180,34 @@ export function ServicesIndex() {
           <button
             type="button"
             className="flex w-full items-center justify-between px-4 py-2.5 text-left text-sm font-semibold text-[var(--fg)] hover:bg-[var(--surface-2)]"
+            aria-expanded={createOpen}
+            aria-controls="new-service-panel"
             onClick={() => setCreateOpen((v) => !v)}
           >
             <span className="flex items-center gap-2">
               <span className="signal signal-steady" aria-hidden="true" />
               new service
             </span>
-            <span className="text-xs text-[var(--fg-muted)]">
-              {createOpen ? '▲' : '▼'}
-            </span>
+            {createOpen ? (
+              <ChevronUp size={14} className="text-[var(--fg-muted)]" aria-hidden="true" />
+            ) : (
+              <ChevronDown size={14} className="text-[var(--fg-muted)]" aria-hidden="true" />
+            )}
           </button>
 
           {createOpen ? (
-            <div className="border-t border-[var(--border)] px-4 py-3">
+            <div
+              id="new-service-panel"
+              className="border-t border-[var(--border)] px-4 py-3"
+            >
               <ServiceForm
                 projects={projects.map((p) => ({ id: p.id, name: p.name }))}
+                registries={registries.map((r) => ({
+                  id: r.id,
+                  name: r.name,
+                  project_id: r.project_id,
+                  endpoint: r.endpoint,
+                }))}
                 pending={create.isPending}
                 error={createError || undefined}
                 onSubmit={(value) => create.mutate(value)}

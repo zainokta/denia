@@ -1,11 +1,22 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import type { Service, ServiceInput } from '#/effect/schema'
 
 type ServiceSourceValue = Service['source']
 type SourceType = ServiceSourceValue['type']
+type ImageMode = 'direct' | 'registry'
+type RequiredField = 'name' | 'domains' | 'port'
+
+interface RegistryOption {
+  id: string
+  name: string
+  project_id: string
+  endpoint: string
+}
 
 interface ServiceFormProps {
   projects: ReadonlyArray<{ id: string; name: string }>
+  registries?: ReadonlyArray<RegistryOption>
   initial?: Service
   submitLabel?: string
   pending?: boolean
@@ -20,7 +31,7 @@ interface EnvRow {
 }
 
 const inputClass =
-  'border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]'
+  'field-input border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]'
 
 function envFromInitial(env: ReadonlyArray<readonly [string, string]>): EnvRow[] {
   return env.map(([key, value]) => ({ id: crypto.randomUUID(), key, value }))
@@ -35,6 +46,7 @@ function parseDomains(raw: string): string[] {
 
 export function ServiceForm({
   projects,
+  registries = [],
   initial,
   submitLabel = 'create service',
   pending = false,
@@ -71,8 +83,7 @@ export function ServiceForm({
     initial ? envFromInitial(initial.env) : [],
   )
 
-  const [sourceType, setSourceType] =
-    useState<SourceType>(initialType)
+  const [sourceType, setSourceType] = useState<SourceType>(initialType)
 
   // git source state
   const gitInitial = initialSource?.type === 'git' ? initialSource : undefined
@@ -95,6 +106,33 @@ export function ServiceForm({
     extInitial?.registry_id ?? '',
   )
   const [extImageRef, setExtImageRef] = useState(extInitial?.image_ref ?? '')
+  // Explicit mode replaces inferring direct-vs-registry from which fields are
+  // filled, which let "both filled" fail silently.
+  const [imageMode, setImageMode] = useState<ImageMode>(
+    extInitial?.registry_id ? 'registry' : 'direct',
+  )
+
+  // Advanced block is collapsed for the common path; opened on edit when the
+  // service already carries non-default health/resource/env values.
+  const [advancedOpen, setAdvancedOpen] = useState(
+    isEdit &&
+      ((initial?.env.length ?? 0) > 0 || initial?.resource_limits != null),
+  )
+
+  // A required field flags its error only after it has been blurred, so the
+  // form stays quiet while the operator is still typing.
+  const [touched, setTouched] = useState<Record<RequiredField, boolean>>({
+    name: false,
+    domains: false,
+    port: false,
+  })
+  const markTouched = (field: RequiredField) =>
+    setTouched((t) => ({ ...t, [field]: true }))
+
+  const nameRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    nameRef.current?.focus()
+  }, [])
 
   const buildSource = (): ServiceSourceValue | undefined => {
     if (sourceType === 'git') {
@@ -109,17 +147,26 @@ export function ServiceForm({
         credential: { name: gitCredName.trim(), key: gitCredKey.trim() },
       }
     }
-    // external_image — XOR: legacy image OR (registry_id + image_ref)
-    const hasLegacy = extImage.trim().length > 0
-    const hasNew =
-      extRegistryId.trim().length > 0 && extImageRef.trim().length > 0
-    if (hasLegacy === hasNew) return undefined // neither, or both -> invalid
+    if (imageMode === 'direct') {
+      const image = extImage.trim()
+      if (image.length === 0) return undefined
+      return {
+        type: 'external_image',
+        image,
+        credential: null,
+        registry_id: null,
+        image_ref: null,
+      }
+    }
+    const registryId = extRegistryId.trim()
+    const imageRef = extImageRef.trim()
+    if (registryId.length === 0 || imageRef.length === 0) return undefined
     return {
       type: 'external_image',
-      image: hasLegacy ? extImage.trim() : '',
+      image: '',
       credential: null,
-      registry_id: hasNew ? extRegistryId.trim() : null,
-      image_ref: hasNew ? extImageRef.trim() : null,
+      registry_id: registryId,
+      image_ref: imageRef,
     }
   }
 
@@ -128,14 +175,36 @@ export function ServiceForm({
   const portValid = Number.isInteger(port) && port > 0
   const source = buildSource()
 
+  const nameEmpty = name.trim().length === 0
+  const domainsEmpty = parsedDomains.length === 0
+
   const valid =
-    name.trim().length > 0 &&
-    parsedDomains.length > 0 &&
+    !nameEmpty &&
+    !domainsEmpty &&
     portValid &&
     source !== undefined &&
     projectId.length > 0
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const missing: string[] = []
+  if (projectId.length === 0) missing.push('project')
+  if (nameEmpty) missing.push('name')
+  if (domainsEmpty) missing.push('domains')
+  if (!portValid) missing.push('valid port')
+  if (source === undefined) {
+    if (sourceType === 'git') missing.push('repo url')
+    else if (imageMode === 'direct') missing.push('image')
+    else missing.push('registry + ref')
+  }
+
+  // Inline error shows only for a required field that's been blurred and is
+  // still empty/invalid.
+  const err = (field: RequiredField, bad: boolean) => touched[field] && bad
+  const fieldClass = (field: RequiredField, bad: boolean) =>
+    `${inputClass}${err(field, bad) ? ' is-invalid' : ''}`
+  const labelClass = (field: RequiredField, bad: boolean) =>
+    `kicker req${err(field, bad) ? ' err' : ''}`
+
+  const handleSubmit: React.FormEventHandler<HTMLFormElement> = (e) => {
     e.preventDefault()
     if (!valid || source === undefined) return
 
@@ -181,15 +250,15 @@ export function ServiceForm({
   }
 
   return (
-    <form className="panel p-4" onSubmit={handleSubmit}>
+    <form onSubmit={handleSubmit}>
       {error ? (
-        <div className="mb-3 text-xs text-[var(--violet)]">
+        <div role="alert" className="mb-4 text-xs text-[var(--violet)]">
           <span className="signal signal-fault mr-2 inline-block align-middle" />
           {error}
         </div>
       ) : null}
 
-      <div className="mb-3 flex flex-col gap-1">
+      <div className="mb-4 flex flex-col gap-1">
         <label className="kicker" htmlFor="sf-project">
           project
         </label>
@@ -208,50 +277,62 @@ export function ServiceForm({
         </select>
       </div>
 
-      <div className="mb-3 flex flex-col gap-1">
-        <label className="kicker" htmlFor="sf-name">
+      <div className="mb-4 flex flex-col gap-1">
+        <label className={labelClass('name', nameEmpty)} htmlFor="sf-name">
           name
         </label>
         <input
           id="sf-name"
+          ref={nameRef}
           type="text"
-          aria-label="service name"
-          className={inputClass}
+          aria-required="true"
+          aria-invalid={err('name', nameEmpty)}
+          className={fieldClass('name', nameEmpty)}
           value={name}
           onChange={(e) => setName(e.target.value)}
+          onBlur={() => markTouched('name')}
         />
       </div>
 
-      <div className="mb-3 flex flex-col gap-1">
-        <label className="kicker" htmlFor="sf-domains">
+      <div className="mb-4 flex flex-col gap-1">
+        <label
+          className={labelClass('domains', domainsEmpty)}
+          htmlFor="sf-domains"
+        >
           domains
         </label>
         <input
           id="sf-domains"
           type="text"
-          aria-label="domains"
+          aria-required="true"
+          aria-invalid={err('domains', domainsEmpty)}
           placeholder="comma or space separated"
-          className={inputClass}
+          className={fieldClass('domains', domainsEmpty)}
           value={domains}
           onChange={(e) => setDomains(e.target.value)}
+          onBlur={() => markTouched('domains')}
         />
       </div>
 
-      <div className="mb-3 flex flex-col gap-1">
-        <label className="kicker" htmlFor="sf-port">
+      <div className="mb-5 flex flex-col gap-1">
+        <label className={labelClass('port', !portValid)} htmlFor="sf-port">
           internal port
         </label>
         <input
           id="sf-port"
           type="number"
-          aria-label="internal port"
-          className={inputClass}
+          inputMode="numeric"
+          min={1}
+          aria-required="true"
+          aria-invalid={err('port', !portValid)}
+          className={`${fieldClass('port', !portValid)} w-32 tnum`}
           value={internalPort}
           onChange={(e) => setInternalPort(e.target.value)}
+          onBlur={() => markTouched('port')}
         />
       </div>
 
-      <fieldset className="mb-3 flex flex-wrap items-center gap-4 text-sm">
+      <fieldset className="mb-4 flex flex-wrap items-center gap-4 text-sm">
         <legend className="kicker mb-1">source type</legend>
         <label className="inline-flex items-center gap-1.5 text-[var(--fg)]">
           <input
@@ -278,190 +359,289 @@ export function ServiceForm({
       </fieldset>
 
       {sourceType === 'git' ? (
-        <div className="mb-3 flex flex-wrap items-end gap-2">
-          <input
-            type="text"
-            aria-label="repo url"
-            placeholder="repo url"
-            value={gitRepoUrl}
-            onChange={(e) => setGitRepoUrl(e.target.value)}
-            className={`${inputClass} w-72`}
-          />
-          <input
-            type="text"
-            aria-label="git ref"
-            placeholder="branch/tag"
-            value={gitRef}
-            onChange={(e) => setGitRef(e.target.value)}
-            className={inputClass}
-          />
-          <input
-            type="text"
-            aria-label="dockerfile path"
-            placeholder="Dockerfile path"
-            value={gitDockerfilePath}
-            onChange={(e) => setGitDockerfilePath(e.target.value)}
-            className={inputClass}
-          />
-          <input
-            type="text"
-            aria-label="context path"
-            placeholder="context path"
-            value={gitContextPath}
-            onChange={(e) => setGitContextPath(e.target.value)}
-            className={inputClass}
-          />
-          <input
-            type="text"
-            aria-label="credential name"
-            placeholder="credential name"
-            value={gitCredName}
-            onChange={(e) => setGitCredName(e.target.value)}
-            className={inputClass}
-          />
-          <input
-            type="text"
-            aria-label="credential key"
-            placeholder="credential key"
-            value={gitCredKey}
-            onChange={(e) => setGitCredKey(e.target.value)}
-            className={inputClass}
-          />
+        <div className="mb-5 flex flex-wrap items-end gap-2">
+          <div className="flex flex-col gap-1">
+            <label className="kicker req" htmlFor="sf-git-repo">
+              repo url
+            </label>
+            <input
+              id="sf-git-repo"
+              type="text"
+              aria-required="true"
+              placeholder="https://github.com/org/repo"
+              value={gitRepoUrl}
+              onChange={(e) => setGitRepoUrl(e.target.value)}
+              className={`${inputClass} w-full sm:w-72`}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="kicker" htmlFor="sf-git-ref">
+              branch/tag
+            </label>
+            <input
+              id="sf-git-ref"
+              type="text"
+              placeholder="main"
+              value={gitRef}
+              onChange={(e) => setGitRef(e.target.value)}
+              className={inputClass}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="kicker" htmlFor="sf-git-dockerfile">
+              dockerfile path
+            </label>
+            <input
+              id="sf-git-dockerfile"
+              type="text"
+              placeholder="Dockerfile"
+              value={gitDockerfilePath}
+              onChange={(e) => setGitDockerfilePath(e.target.value)}
+              className={inputClass}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="kicker" htmlFor="sf-git-context">
+              context path
+            </label>
+            <input
+              id="sf-git-context"
+              type="text"
+              placeholder="."
+              value={gitContextPath}
+              onChange={(e) => setGitContextPath(e.target.value)}
+              className={inputClass}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="kicker" htmlFor="sf-git-cred-name">
+              credential name
+            </label>
+            <input
+              id="sf-git-cred-name"
+              type="text"
+              placeholder="deploy-key"
+              value={gitCredName}
+              onChange={(e) => setGitCredName(e.target.value)}
+              className={inputClass}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="kicker" htmlFor="sf-git-cred-key">
+              credential key
+            </label>
+            <input
+              id="sf-git-cred-key"
+              type="text"
+              placeholder="ssh_key"
+              value={gitCredKey}
+              onChange={(e) => setGitCredKey(e.target.value)}
+              className={inputClass}
+            />
+          </div>
         </div>
       ) : (
-        <div className="mb-3 flex flex-wrap items-end gap-2">
-          <input
-            type="text"
-            aria-label="image"
-            placeholder="image (legacy)"
-            value={extImage}
-            onChange={(e) => setExtImage(e.target.value)}
-            className={`${inputClass} w-72`}
-          />
-          <span className="text-xs text-[var(--fg-muted)]">or</span>
-          <input
-            type="text"
-            aria-label="registry id"
-            placeholder="registry id"
-            value={extRegistryId}
-            onChange={(e) => setExtRegistryId(e.target.value)}
-            className={inputClass}
-          />
-          <input
-            type="text"
-            aria-label="image ref"
-            placeholder="image ref"
-            value={extImageRef}
-            onChange={(e) => setExtImageRef(e.target.value)}
-            className={inputClass}
-          />
+        <div className="mb-5">
+          <p className="kicker req mb-2">image source</p>
+          <div
+            className="segmented mb-3"
+            role="group"
+            aria-label="image source mode"
+          >
+            <button
+              type="button"
+              aria-pressed={imageMode === 'direct'}
+              onClick={() => setImageMode('direct')}
+            >
+              direct image
+            </button>
+            <button
+              type="button"
+              aria-pressed={imageMode === 'registry'}
+              onClick={() => setImageMode('registry')}
+            >
+              registry + ref
+            </button>
+          </div>
+
+          {imageMode === 'direct' ? (
+            <div className="flex flex-col gap-1">
+              <label className="kicker" htmlFor="sf-ext-image">
+                image
+              </label>
+              <input
+                id="sf-ext-image"
+                type="text"
+                placeholder="ghcr.io/org/app:latest"
+                value={extImage}
+                onChange={(e) => setExtImage(e.target.value)}
+                className={`${inputClass} w-full sm:w-96`}
+              />
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="flex flex-col gap-1">
+                <label className="kicker" htmlFor="sf-ext-registry">
+                  registry
+                </label>
+                <select
+                  id="sf-ext-registry"
+                  value={extRegistryId}
+                  onChange={(e) => setExtRegistryId(e.target.value)}
+                  className={`${inputClass} w-48`}
+                >
+                  <option value="">select registry</option>
+                  {registries
+                    .filter((r) => r.project_id === projectId)
+                    .map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name}
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="kicker" htmlFor="sf-ext-ref">
+                  image ref
+                </label>
+                <input
+                  id="sf-ext-ref"
+                  type="text"
+                  placeholder="org/app:latest"
+                  value={extImageRef}
+                  onChange={(e) => setExtImageRef(e.target.value)}
+                  className={`${inputClass} w-full sm:w-72`}
+                />
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      <div className="mb-3 flex flex-wrap items-end gap-2">
-        <div className="flex flex-col gap-1">
-          <label className="kicker" htmlFor="sf-health-path">
-            health path
-          </label>
-          <input
-            id="sf-health-path"
-            type="text"
-            aria-label="health path"
-            className={inputClass}
-            value={healthPath}
-            onChange={(e) => setHealthPath(e.target.value)}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <label className="kicker" htmlFor="sf-health-timeout">
-            health timeout (s)
-          </label>
-          <input
-            id="sf-health-timeout"
-            type="number"
-            aria-label="health timeout in seconds"
-            className={inputClass}
-            value={healthTimeout}
-            onChange={(e) => setHealthTimeout(e.target.value)}
-          />
-        </div>
-      </div>
-
-      <div className="mb-3 flex flex-wrap items-end gap-2">
-        <div className="flex flex-col gap-1">
-          <label className="kicker" htmlFor="sf-cpu">
-            cpu millis (optional)
-          </label>
-          <input
-            id="sf-cpu"
-            type="number"
-            aria-label="cpu millis"
-            className={inputClass}
-            value={cpuMillis}
-            onChange={(e) => setCpuMillis(e.target.value)}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <label className="kicker" htmlFor="sf-mem">
-            memory bytes (optional)
-          </label>
-          <input
-            id="sf-mem"
-            type="number"
-            aria-label="memory bytes"
-            className={inputClass}
-            value={memoryBytes}
-            onChange={(e) => setMemoryBytes(e.target.value)}
-          />
-        </div>
-      </div>
-
-      <div className="mb-3">
-        <p className="kicker mb-1">env</p>
-        {envRows.map((row, i) => (
-          <div key={row.id} className="mb-2 flex items-center gap-2">
-            <input
-              type="text"
-              aria-label={`env key ${i}`}
-              placeholder="KEY"
-              value={row.key}
-              onChange={(e) => updateEnvRow(i, { key: e.target.value })}
-              className={inputClass}
-            />
-            <input
-              type="text"
-              aria-label={`env value ${i}`}
-              placeholder="value"
-              value={row.value}
-              onChange={(e) => updateEnvRow(i, { value: e.target.value })}
-              className={inputClass}
-            />
-            <button
-              type="button"
-              className="btn text-xs"
-              onClick={() =>
-                setEnvRows((rows) => rows.filter((_, idx) => idx !== i))
-              }
-            >
-              remove
-            </button>
-          </div>
-        ))}
+      <div className="mb-4 border-t border-[var(--border)] pt-3">
         <button
           type="button"
-          className="btn text-xs"
-          onClick={() =>
-            setEnvRows((rows) => [
-              ...rows,
-              { id: crypto.randomUUID(), key: '', value: '' },
-            ])
-          }
+          className="disclosure"
+          aria-expanded={advancedOpen}
+          aria-controls="sf-advanced"
+          onClick={() => setAdvancedOpen((v) => !v)}
         >
-          add env var
+          <span className="kicker">advanced</span>
+          {advancedOpen ? (
+            <ChevronUp size={14} aria-hidden="true" />
+          ) : (
+            <ChevronDown size={14} aria-hidden="true" />
+          )}
         </button>
+
+        {advancedOpen ? (
+          <div id="sf-advanced" className="pt-3">
+            <div className="mb-4 flex flex-wrap items-end gap-2">
+              <div className="flex flex-col gap-1">
+                <label className="kicker" htmlFor="sf-health-path">
+                  health path
+                </label>
+                <input
+                  id="sf-health-path"
+                  type="text"
+                  className={inputClass}
+                  value={healthPath}
+                  onChange={(e) => setHealthPath(e.target.value)}
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="kicker" htmlFor="sf-health-timeout">
+                  health timeout (s)
+                </label>
+                <input
+                  id="sf-health-timeout"
+                  type="number"
+                  aria-label="health timeout in seconds"
+                  className={`${inputClass} w-28 tnum`}
+                  value={healthTimeout}
+                  onChange={(e) => setHealthTimeout(e.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="mb-4 flex flex-wrap items-end gap-2">
+              <div className="flex flex-col gap-1">
+                <label className="kicker" htmlFor="sf-cpu">
+                  cpu millis (optional)
+                </label>
+                <input
+                  id="sf-cpu"
+                  type="number"
+                  aria-label="cpu millis"
+                  className={`${inputClass} w-32 tnum`}
+                  value={cpuMillis}
+                  onChange={(e) => setCpuMillis(e.target.value)}
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="kicker" htmlFor="sf-mem">
+                  memory bytes (optional)
+                </label>
+                <input
+                  id="sf-mem"
+                  type="number"
+                  aria-label="memory bytes"
+                  className={`${inputClass} w-40 tnum`}
+                  value={memoryBytes}
+                  onChange={(e) => setMemoryBytes(e.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="mb-1">
+              <p className="kicker mb-2">env</p>
+              {envRows.map((row, i) => (
+                <div key={row.id} className="mb-2 flex items-center gap-2">
+                  <input
+                    type="text"
+                    aria-label={`env key ${i}`}
+                    placeholder="KEY"
+                    value={row.key}
+                    onChange={(e) => updateEnvRow(i, { key: e.target.value })}
+                    className={inputClass}
+                  />
+                  <input
+                    type="text"
+                    aria-label={`env value ${i}`}
+                    placeholder="value"
+                    value={row.value}
+                    onChange={(e) => updateEnvRow(i, { value: e.target.value })}
+                    className={inputClass}
+                  />
+                  <button
+                    type="button"
+                    className="btn text-xs"
+                    onClick={() =>
+                      setEnvRows((rows) => rows.filter((_, idx) => idx !== i))
+                    }
+                  >
+                    remove
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="btn text-xs"
+                onClick={() =>
+                  setEnvRows((rows) => [
+                    ...rows,
+                    { id: crypto.randomUUID(), key: '', value: '' },
+                  ])
+                }
+              >
+                add env var
+              </button>
+            </div>
+          </div>
+        ) : null}
       </div>
 
-      <label className="mb-4 inline-flex items-center gap-1.5 text-sm text-[var(--fg)]">
+      <label className="mb-5 inline-flex items-center gap-1.5 text-sm text-[var(--fg)]">
         <input
           type="checkbox"
           aria-label="TLS enabled"
@@ -471,7 +651,7 @@ export function ServiceForm({
         TLS enabled
       </label>
 
-      <div>
+      <div className="flex flex-wrap items-center gap-3">
         <button
           type="submit"
           className="btn btn-primary text-xs"
@@ -479,6 +659,11 @@ export function ServiceForm({
         >
           {pending ? 'saving...' : submitLabel}
         </button>
+        {!valid && missing.length > 0 ? (
+          <p className="text-xs text-[var(--fg-muted)]" aria-live="polite">
+            needs: {missing.join(', ')}
+          </p>
+        ) : null}
       </div>
     </form>
   )

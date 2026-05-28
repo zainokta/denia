@@ -283,7 +283,10 @@ const mockApi = (success = true) =>
     verifyDomain: ((_id: number, _did: string) => emptyApi()) as never,
     deleteDomain: ((_id: number, _did: string) => Effect.void) as never,
     listRegistries: ((_pid: string) => emptyApi()) as never,
+    getRegistry: ((_pid: string, _rid: string) => emptyApi()) as never,
     createRegistry: ((_pid: string, _input: never) => emptyApi()) as never,
+    updateRegistry: ((_pid: string, _rid: string, _input: never) =>
+      emptyApi()) as never,
     deleteRegistry: ((_pid: string, _rid: string) => Effect.void) as never,
   })
 
@@ -423,7 +426,10 @@ describe('ApiClient jobs', () => {
     verifyDomain: ((_id: number, _did: string) => emptyApi()) as never,
     deleteDomain: ((_id: number, _did: string) => Effect.void) as never,
     listRegistries: ((_pid: string) => emptyApi()) as never,
+    getRegistry: ((_pid: string, _rid: string) => emptyApi()) as never,
     createRegistry: ((_pid: string, _input: never) => emptyApi()) as never,
+    updateRegistry: ((_pid: string, _rid: string, _input: never) =>
+      emptyApi()) as never,
     deleteRegistry: ((_pid: string, _rid: string) => Effect.void) as never,
   })
 
@@ -736,7 +742,10 @@ const mockIngressApi = () =>
     verifyDomain: ((_id: number, _did: string) => emptyApi()) as never,
     deleteDomain: ((_id: number, _did: string) => Effect.void) as never,
     listRegistries: ((_pid: string) => emptyApi()) as never,
+    getRegistry: ((_pid: string, _rid: string) => emptyApi()) as never,
     createRegistry: ((_pid: string, _input: never) => emptyApi()) as never,
+    updateRegistry: ((_pid: string, _rid: string, _input: never) =>
+      emptyApi()) as never,
     deleteRegistry: ((_pid: string, _rid: string) => Effect.void) as never,
   })
 
@@ -867,7 +876,10 @@ describe('putService', () => {
           verifyDomain: ((_id: number, _did: string) => emptyApi()) as never,
           deleteDomain: ((_id: number, _did: string) => Effect.void) as never,
           listRegistries: ((_pid: string) => emptyApi()) as never,
+          getRegistry: ((_pid: string, _rid: string) => emptyApi()) as never,
           createRegistry: ((_pid: string, _input: never) => emptyApi()) as never,
+          updateRegistry: ((_pid: string, _rid: string, _input: never) =>
+            emptyApi()) as never,
           deleteRegistry: ((_pid: string, _rid: string) => Effect.void) as never,
         }),
       ),

@@ -192,8 +192,17 @@ export class ApiClient extends Context.Service<
       ReadonlyArray<Registry>,
       ApiError | DecodeError
     >
+    readonly getRegistry: (
+      projectId: string,
+      registryId: string,
+    ) => Effect.Effect<Registry, ApiError | DecodeError>
     readonly createRegistry: (
       projectId: string,
+      input: RegistryInput,
+    ) => Effect.Effect<Registry, ApiError | DecodeError>
+    readonly updateRegistry: (
+      projectId: string,
+      registryId: string,
       input: RegistryInput,
     ) => Effect.Effect<Registry, ApiError | DecodeError>
     readonly deleteRegistry: (
@@ -720,10 +729,38 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, Registries)
       })
 
+    const getRegistry = (projectId: string, registryId: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/projects/${projectId}/registries/${registryId}`), {
+            headers: authHeaders(),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Registry)
+      })
+
     const createRegistry = (projectId: string, input: RegistryInput) =>
       Effect.gen(function* () {
         const response = yield* http
           .post(url(`/v1/projects/${projectId}/registries`), {
+            headers: {
+              ...authHeaders(),
+              'content-type': 'application/json',
+            },
+            body: jsonBody(input),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Registry)
+      })
+
+    const updateRegistry = (
+      projectId: string,
+      registryId: string,
+      input: RegistryInput,
+    ) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .patch(url(`/v1/projects/${projectId}/registries/${registryId}`), {
             headers: {
               ...authHeaders(),
               'content-type': 'application/json',
@@ -788,7 +825,9 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       verifyDomain,
       deleteDomain,
       listRegistries,
+      getRegistry,
       createRegistry,
+      updateRegistry,
       deleteRegistry,
     }
   }),

@@ -100,6 +100,12 @@ const listProjects = Effect.gen(function* () {
   return yield* api.listProjects
 })
 
+const listRegistries = (projectId: string) =>
+  Effect.gen(function* () {
+    const api = yield* ApiClient
+    return yield* api.listRegistries(projectId)
+  })
+
 export const Route = createFileRoute('/services/$serviceId')({
   component: ServiceDetail,
 })
@@ -187,6 +193,16 @@ export function ServiceDetail() {
     queryKey: ['services', id, 'domains'],
     queryFn: () => runQuery(listDomains(id)),
     enabled: canOperate,
+  })
+
+  const canManageProject =
+    service !== undefined &&
+    (isSuperAdmin || roleForActiveProject(service.project_id) === 'admin')
+
+  const { data: registries = [] } = useQuery({
+    queryKey: ['projects', service?.project_id, 'registries'],
+    queryFn: () => runQuery(listRegistries(service!.project_id)),
+    enabled: canManageProject,
   })
 
   const addDomainMutation = useMutation({
@@ -405,7 +421,10 @@ export function ServiceDetail() {
             return (
               <div>
                 {service ? (
-                  <SourceSummary source={service.source} />
+                  <SourceSummary
+                    source={service.source}
+                    registries={registries}
+                  />
                 ) : (
                   <p className="text-sm text-[var(--fg-muted)]">Loading…</p>
                 )}
@@ -425,17 +444,25 @@ export function ServiceDetail() {
                             cancel
                           </button>
                         </div>
-                        <ServiceForm
-                          projects={projects.map((p) => ({
-                            id: p.id,
-                            name: p.name,
-                          }))}
-                          initial={service}
-                          submitLabel="save"
-                          pending={update.isPending}
-                          error={editError || undefined}
-                          onSubmit={(value) => update.mutate(value)}
-                        />
+                        <div className="panel p-4">
+                          <ServiceForm
+                            projects={projects.map((p) => ({
+                              id: p.id,
+                              name: p.name,
+                            }))}
+                            registries={registries.map((r) => ({
+                              id: r.id,
+                              name: r.name,
+                              project_id: r.project_id,
+                              endpoint: r.endpoint,
+                            }))}
+                            initial={service}
+                            submitLabel="save"
+                            pending={update.isPending}
+                            error={editError || undefined}
+                            onSubmit={(value) => update.mutate(value)}
+                          />
+                        </div>
                       </>
                     ) : (
                       <button
@@ -709,8 +736,19 @@ export function ServiceDetail() {
   )
 }
 
-function SourceSummary({ source }: { source: Service['source'] }) {
-  const rows: Array<[string, string]> =
+function SourceSummary({
+  source,
+  registries,
+}: {
+  source: Service['source']
+  registries: ReadonlyArray<{ id: string; name: string; project_id: string }>
+}) {
+  const registry =
+    source.type === 'external_image' && source.registry_id
+      ? registries.find((r) => r.id === source.registry_id)
+      : undefined
+
+  const rows: Array<[string, React.ReactNode]> =
     source.type === 'git'
       ? [
           ['type', 'git'],
@@ -722,13 +760,30 @@ function SourceSummary({ source }: { source: Service['source'] }) {
       : [
           ['type', 'external image'],
           ...(source.image
-            ? ([['image', source.image]] as Array<[string, string]>)
+            ? ([['image', source.image]] as Array<[string, React.ReactNode]>)
             : []),
           ...(source.registry_id
-            ? ([['registry id', source.registry_id]] as Array<[string, string]>)
+            ? ([
+                [
+                  'registry',
+                  registry ? (
+                    <Link
+                      to="/projects/$projectId"
+                      params={{ projectId: registry.project_id }}
+                      className="text-[var(--pink)] no-underline hover:underline"
+                    >
+                      {registry.name}
+                    </Link>
+                  ) : (
+                    source.registry_id
+                  ),
+                ],
+              ] as Array<[string, React.ReactNode]>)
             : []),
           ...(source.image_ref
-            ? ([['image ref', source.image_ref]] as Array<[string, string]>)
+            ? ([
+                ['image ref', source.image_ref],
+              ] as Array<[string, React.ReactNode]>)
             : []),
         ]
 

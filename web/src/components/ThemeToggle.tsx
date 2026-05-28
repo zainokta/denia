@@ -19,7 +19,12 @@ function applyTheme(theme: Theme) {
 }
 
 export default function ThemeToggle() {
-  const [theme, setTheme] = useState<Theme>('dark')
+  const [theme, setTheme] = useState<Theme>(() =>
+    typeof document !== 'undefined' &&
+    document.documentElement.classList.contains('light')
+      ? 'light'
+      : 'dark',
+  )
 
   useEffect(() => {
     const initial = getInitialTheme()
