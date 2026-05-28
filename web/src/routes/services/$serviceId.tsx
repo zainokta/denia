@@ -278,7 +278,7 @@ export function ServiceDetail() {
     },
   })
 
-  const newestFirst = [...deployments].reverse()
+  const newestFirst = deployments
 
   const tabs = [
     { id: 'overview', label: 'overview' },
