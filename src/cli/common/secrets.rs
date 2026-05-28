@@ -63,14 +63,24 @@ mod tests {
         // where the generator returns a constant or a short cycle.
         let tokens: std::collections::HashSet<String> =
             (0..10).map(|_| generate_admin_token()).collect();
-        assert_eq!(tokens.len(), 10, "expected 10 distinct tokens, got duplicates");
+        assert_eq!(
+            tokens.len(),
+            10,
+            "expected 10 distinct tokens, got duplicates"
+        );
     }
 
     #[test]
     fn age_identity_has_public_key_comment() {
         let s = generate_age_identity();
-        assert!(s.contains("# public key: age1"), "missing public key comment in:\n{s}");
-        assert!(s.contains("AGE-SECRET-KEY-1"), "missing secret body in:\n{s}");
+        assert!(
+            s.contains("# public key: age1"),
+            "missing public key comment in:\n{s}"
+        );
+        assert!(
+            s.contains("AGE-SECRET-KEY-1"),
+            "missing secret body in:\n{s}"
+        );
     }
 
     #[test]
@@ -82,9 +92,7 @@ mod tests {
             .lines()
             .find(|l| l.starts_with("AGE-SECRET-KEY-1"))
             .expect("secret body present");
-        let parsed: age::x25519::Identity = secret_line
-            .parse()
-            .expect("identity parses");
+        let parsed: age::x25519::Identity = secret_line.parse().expect("identity parses");
         let expected_comment = format!("# public key: {}", parsed.to_public());
         assert!(
             s.lines().any(|l| l == expected_comment),

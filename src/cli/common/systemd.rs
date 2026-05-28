@@ -15,7 +15,10 @@ pub fn render_unit(ctx: &InstallContext) -> String {
         .replace("{{config_file}}", &ctx.config_file.display().to_string())
         .replace("{{age_key_file}}", &ctx.age_key_file.display().to_string())
         .replace("{{token_file}}", &ctx.token_file.display().to_string())
-        .replace("{{user_config_dir}}", &ctx.user_config_dir.display().to_string())
+        .replace(
+            "{{user_config_dir}}",
+            &ctx.user_config_dir.display().to_string(),
+        )
 }
 
 /// SHA-256 of the rendered unit. Used by `denia doctor` (Task 16) to detect
@@ -97,10 +100,7 @@ pub fn wait_active(unit: &str, timeout: Duration) -> anyhow::Result<()> {
 }
 
 fn run(bin: &str, args: &[&str]) -> anyhow::Result<()> {
-    let status = Command::new(bin)
-        .args(args)
-        .stdin(Stdio::null())
-        .status()?;
+    let status = Command::new(bin).args(args).stdin(Stdio::null()).status()?;
     if !status.success() {
         return Err(anyhow::anyhow!("{bin} {args:?} exited with {status}"));
     }
@@ -124,12 +124,15 @@ mod tests {
             "EnvironmentFile=/home/rakei/.config/denia/admin.token",
             "ExecStart=/usr/local/bin/denia",
             "BindReadOnlyPaths=/home/rakei/.config/denia",
-            "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID",
+            "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_CHOWN",
             "Delegate=yes",
             "ProtectHome=true",
             "Conflicts=traefik.service nginx.service caddy.service apache2.service httpd.service",
         ] {
-            assert!(unit.contains(needle), "expected `{needle}` in unit:\n{unit}");
+            assert!(
+                unit.contains(needle),
+                "expected `{needle}` in unit:\n{unit}"
+            );
         }
     }
 

@@ -12,10 +12,7 @@ pub fn render_config_toml(ctx: &InstallContext) -> String {
             "{{user_config_dir}}",
             &ctx.user_config_dir.display().to_string(),
         )
-        .replace(
-            "{{age_key_file}}",
-            &ctx.age_key_file.display().to_string(),
-        )
+        .replace("{{age_key_file}}", &ctx.age_key_file.display().to_string())
         .replace("{{token_file}}", &ctx.token_file.display().to_string())
 }
 
@@ -29,8 +26,8 @@ mod tests {
     fn rendered_config_parses_as_file_config() {
         let ctx = InstallContext::from_user("rakei", "/home/rakei");
         let toml_str = render_config_toml(&ctx);
-        let parsed: FileConfig = toml::from_str(&toml_str)
-            .expect("rendered config.toml must parse as FileConfig");
+        let parsed: FileConfig =
+            toml::from_str(&toml_str).expect("rendered config.toml must parse as FileConfig");
         assert_eq!(
             parsed.age_key_file.as_deref(),
             Some(PathBuf::from("/home/rakei/.config/denia/age.key").as_path())

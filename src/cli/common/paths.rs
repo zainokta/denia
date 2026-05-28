@@ -40,9 +40,21 @@ mod tests {
         let ctx = InstallContext::from_user("rakei", "/home/rakei");
         assert_eq!(ctx.install_user, "rakei");
         assert_eq!(ctx.install_home, PathBuf::from("/home/rakei"));
-        assert_eq!(ctx.user_config_dir, PathBuf::from("/home/rakei/.config/denia"));
-        assert_eq!(ctx.config_file, PathBuf::from("/home/rakei/.config/denia/config.toml"));
-        assert_eq!(ctx.token_file, PathBuf::from("/home/rakei/.config/denia/admin.token"));
-        assert_eq!(ctx.age_key_file, PathBuf::from("/home/rakei/.config/denia/age.key"));
+        assert_eq!(
+            ctx.user_config_dir,
+            PathBuf::from("/home/rakei/.config/denia")
+        );
+        assert_eq!(
+            ctx.config_file,
+            PathBuf::from("/home/rakei/.config/denia/config.toml")
+        );
+        assert_eq!(
+            ctx.token_file,
+            PathBuf::from("/home/rakei/.config/denia/admin.token")
+        );
+        assert_eq!(
+            ctx.age_key_file,
+            PathBuf::from("/home/rakei/.config/denia/age.key")
+        );
     }
 }

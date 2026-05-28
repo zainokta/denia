@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::config::{config_file_path, FileConfig};
+use crate::config::{FileConfig, config_file_path};
 
 use super::common::systemd;
 
@@ -37,7 +37,10 @@ pub fn run() -> anyhow::Result<()> {
     println!("config:     {}", config_path.display());
     println!("bind_addr:  {bind_addr}");
     match &healthz {
-        Ok(code) => println!("healthz:    {code} {}", code.canonical_reason().unwrap_or("")),
+        Ok(code) => println!(
+            "healthz:    {code} {}",
+            code.canonical_reason().unwrap_or("")
+        ),
         Err(e) => println!("healthz:    unreachable ({e})"),
     }
 

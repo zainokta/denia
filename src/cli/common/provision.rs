@@ -23,14 +23,20 @@ pub fn ensure_user(user: &str, group: &str, home: &str) -> anyhow::Result<bool> 
     if user_exists(user)? {
         return Ok(false);
     }
-    run("useradd", &[
-        "--system",
-        "--gid", group,
-        "--home-dir", home,
-        "--no-create-home",
-        "--shell", "/usr/sbin/nologin",
-        user,
-    ])?;
+    run(
+        "useradd",
+        &[
+            "--system",
+            "--gid",
+            group,
+            "--home-dir",
+            home,
+            "--no-create-home",
+            "--shell",
+            "/usr/sbin/nologin",
+            user,
+        ],
+    )?;
     Ok(true)
 }
 
@@ -49,7 +55,11 @@ pub fn ensure_dir(path: &Path, mode: u32, owner: &str, group: &str) -> anyhow::R
 pub fn ensure_data_dirs() -> anyhow::Result<()> {
     let base = Path::new("/var/lib/denia");
     for sub in ["", "sqlite", "artifacts", "tls", "runtime", "logs"] {
-        let p = if sub.is_empty() { base.to_path_buf() } else { base.join(sub) };
+        let p = if sub.is_empty() {
+            base.to_path_buf()
+        } else {
+            base.join(sub)
+        };
         ensure_dir(&p, 0o700, "denia", "denia")?;
     }
     Ok(())
@@ -68,7 +78,10 @@ pub fn ensure_cgroup_root() -> anyhow::Result<()> {
 pub fn ensure_user_config_dir(ctx: &InstallContext) -> anyhow::Result<()> {
     // ~/.config — usually exists; create if missing, leave alone if present.
     let parent = ctx.user_config_dir.parent().ok_or_else(|| {
-        anyhow::anyhow!("user_config_dir has no parent: {}", ctx.user_config_dir.display())
+        anyhow::anyhow!(
+            "user_config_dir has no parent: {}",
+            ctx.user_config_dir.display()
+        )
     })?;
     if !parent.exists() {
         ensure_dir(parent, 0o700, &ctx.install_user, &ctx.install_user)?;
@@ -98,14 +111,9 @@ fn user_exists(name: &str) -> anyhow::Result<bool> {
 }
 
 fn run(bin: &str, args: &[&str]) -> anyhow::Result<()> {
-    let status = Command::new(bin)
-        .args(args)
-        .stdin(Stdio::null())
-        .status()?;
+    let status = Command::new(bin).args(args).stdin(Stdio::null()).status()?;
     if !status.success() {
-        return Err(anyhow::anyhow!(
-            "{bin} {args:?} exited with {status}"
-        ));
+        return Err(anyhow::anyhow!("{bin} {args:?} exited with {status}"));
     }
     Ok(())
 }

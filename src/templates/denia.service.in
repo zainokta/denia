@@ -32,9 +32,12 @@ TimeoutStopSec=30s
 # writes cgroup v2 controllers -> CAP_SYS_ADMIN. Pingora binds :80/:443 as a
 # non-root user -> CAP_NET_BIND_SERVICE. CAP_SETUID/SETGID are needed to
 # write the child uid_map/gid_map and to drop into the mapped user (see
-# src/syscall/ns.rs).
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID
+# src/syscall/ns.rs). CAP_CHOWN lets the daemon chown the per-replica overlay
+# upper/work layers to the userns base uid so the unprivileged-userns overlay
+# mount can write them (without it the mount fails EACCES; see
+# src/runtime/linux.rs).
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_CHOWN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_CHOWN
 
 # --- Filesystem confinement ---
 # Workload launcher and rustix syscall helpers handle the child's

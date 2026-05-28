@@ -637,8 +637,8 @@ fn attach_pid_to_cgroup(pid: u32, cgroup_procs_path: &Path) -> Result<(), Syscal
         })?;
     let src_cg = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
         .unwrap_or_else(|e| format!("<read err: {e}>"));
-    let parent_cg = std::fs::read_to_string("/proc/self/cgroup")
-        .unwrap_or_else(|e| format!("<read err: {e}>"));
+    let parent_cg =
+        std::fs::read_to_string("/proc/self/cgroup").unwrap_or_else(|e| format!("<read err: {e}>"));
     let leaf_dir = cgroup_procs_path.parent().unwrap_or(cgroup_procs_path);
     let leaf_type = std::fs::read_to_string(leaf_dir.join("cgroup.type"))
         .unwrap_or_else(|e| format!("<read err: {e}>"));

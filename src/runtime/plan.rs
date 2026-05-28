@@ -30,6 +30,12 @@ pub struct LinuxRuntimePlan {
     pub upper: PathBuf,
     pub work: PathBuf,
     pub merged: PathBuf,
+    /// Base artifact directory (e.g., `/var/lib/denia/artifacts`).
+    /// The child process needs traverse permission to access the lowerdir.
+    pub artifact_dir: PathBuf,
+    /// Base runtime directory (e.g., `/var/lib/denia/runtime`).
+    /// The child process needs traverse permission to access overlay directories.
+    pub runtime_dir: PathBuf,
 }
 
 #[derive(Debug)]

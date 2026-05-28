@@ -206,7 +206,9 @@ fn safe_join(root: &Path, entry: &Path) -> Result<PathBuf, OciError> {
     // to keep parent directories under rootfs and unlink stale targets
     // before writing (caller does this in `apply_layer`).
     let parent = joined.parent().unwrap_or(root);
-    let parent_canonical = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+    let parent_canonical = parent
+        .canonicalize()
+        .unwrap_or_else(|_| parent.to_path_buf());
 
     if !parent_canonical.starts_with(&root_canonical) {
         return Err(OciError::UnsafePath(format!(

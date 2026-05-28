@@ -73,9 +73,7 @@ impl Step {
         use Step::*;
         match self {
             EnsureGroup => "groupadd --system denia (if absent)".into(),
-            EnsureUser => {
-                "useradd --system denia (gid=denia, no home, nologin)".into()
-            }
+            EnsureUser => "useradd --system denia (gid=denia, no home, nologin)".into(),
             EnsureDataDirs => {
                 "create /var/lib/denia/{sqlite,artifacts,tls,runtime,logs} 0700 denia:denia".into()
             }
@@ -100,9 +98,7 @@ impl Step {
                 ctx.config_file.display(),
                 ctx.install_user
             ),
-            WriteSystemdUnit => {
-                "write /etc/systemd/system/denia.service (always overwrite)".into()
-            }
+            WriteSystemdUnit => "write /etc/systemd/system/denia.service (always overwrite)".into(),
             SystemctlDaemonReload => "systemctl daemon-reload".into(),
             SystemctlEnableNow => "systemctl enable --now denia.service".into(),
             WaitActive => "wait up to 30s for systemctl is-active denia.service".into(),
