@@ -1,3 +1,4 @@
+pub mod cache;
 pub mod config;
 pub mod credentials;
 pub mod layout;
@@ -9,6 +10,10 @@ use async_trait::async_trait;
 use std::path::Path;
 use thiserror::Error;
 
+pub use cache::{
+    CacheError, CacheReservation, CacheStatus, GcReport, GcStatus, LayerCache, LayerCacheGc,
+    gc_run_until_shutdown,
+};
 pub use config::OciImageConfig;
 pub use oci_client::secrets::RegistryAuth;
 pub use pull_to_dir::pull_image_to_dir;
@@ -32,7 +37,12 @@ pub struct PulledImage {
     pub digest: String,
     pub config: OciImageConfig,
     pub layers: Vec<LayerBlob>,
+    /// Legacy per-pull `TempDir` staging (ADR-015). `None` when the puller
+    /// is backed by a persistent [`LayerCache`] (ADR-021).
     pub _staging: Option<tempfile::TempDir>,
+    /// In-flight cache reservations (ADR-021). Held until `PulledImage` drops
+    /// so the GC cannot delete a layer while the deploy is still consuming it.
+    pub _cache_reservations: Vec<CacheReservation>,
 }
 
 #[derive(Debug, Error)]

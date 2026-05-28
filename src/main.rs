@@ -151,6 +151,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Wire the autoscaler: hand the ingress its activation hook, run boot
     // reconcile once, then spawn the periodic control loop until shutdown.
+    // OCI layer cache garbage collector (ADR-021). Cancel-safe loop, mirrors
+    // the scheduler/ACME `run_until_shutdown` pattern. Failure to spawn must
+    // not kill the control plane — the cache continues to fill, just without
+    // automated cleanup, until `POST /v1/oci/cache/gc` is invoked manually.
+    let oci_gc_task = state.oci_cache_gc.clone().map(|gc| {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let interval = std::time::Duration::from_secs(config.oci_gc_interval_secs);
+        let handle = tokio::spawn(denia::oci::cache::gc_run_until_shutdown(gc, interval, rx));
+        (tx, handle)
+    });
+
     let autoscale_interval = config.autoscale_interval_s;
     let autoscaler_task = if let Some((ingress, controller)) = state.autoscaler_handle() {
         ingress
@@ -197,6 +208,10 @@ async fn main() -> anyhow::Result<()> {
         let _ = handle.await;
     }
     if let Some((tx, handle)) = autoscaler_task {
+        let _ = tx.send(());
+        let _ = handle.await;
+    }
+    if let Some((tx, handle)) = oci_gc_task {
         let _ = tx.send(());
         let _ = handle.await;
     }

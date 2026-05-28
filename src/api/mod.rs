@@ -9,6 +9,7 @@ pub mod ingress;
 pub mod jobs;
 pub mod members;
 pub mod observability;
+pub mod oci;
 pub mod projects;
 pub mod registries;
 pub mod services;
