@@ -1,13 +1,9 @@
 //! `denia setup`: provision the host (idempotent).
 
-use std::fs;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 use std::time::Duration;
 
 use super::common::{
-    config_writer, paths::InstallContext, privilege, provision, secrets, systemd,
+    config_writer, io, paths::InstallContext, privilege, provision, secrets, systemd,
 };
 
 #[derive(clap::Args, Debug)]
@@ -127,7 +123,7 @@ impl Step {
             EnsureUserConfigDir => provision::ensure_user_config_dir(ctx)?,
             GenerateAgeIdentityIfAbsent => {
                 if !ctx.age_key_file.exists() {
-                    write_owned_secret(
+                    io::write_owned_secret(
                         &ctx.age_key_file,
                         &secrets::generate_age_identity(),
                         &ctx.install_user,
@@ -138,13 +134,13 @@ impl Step {
                 if !ctx.token_file.exists() {
                     let token = secrets::generate_admin_token();
                     let body = format!("DENIA_ADMIN_TOKEN={token}\n");
-                    write_owned_secret(&ctx.token_file, &body, &ctx.install_user)?;
+                    io::write_owned_secret(&ctx.token_file, &body, &ctx.install_user)?;
                 }
             }
             WriteConfigIfAbsent => {
                 if !ctx.config_file.exists() {
                     let body = config_writer::render_config_toml(ctx);
-                    write_owned_secret(&ctx.config_file, &body, &ctx.install_user)?;
+                    io::write_owned_secret(&ctx.config_file, &body, &ctx.install_user)?;
                 }
             }
             WriteSystemdUnit => systemd::write_unit(ctx)?,
@@ -154,40 +150,6 @@ impl Step {
         }
         Ok(())
     }
-}
-
-/// Write a file atomically (tmp + rename) with mode 0640 owned by
-/// `<owner>:denia`. Used for config + token + age key.
-fn write_owned_secret(path: &Path, body: &str, owner: &str) -> anyhow::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("no parent for {}", path.display()))?;
-    fs::create_dir_all(parent)?;
-    let tmp_path = parent.join(format!(
-        ".{}.tmp",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("denia-tmp")
-    ));
-    {
-        let mut f = fs::File::create(&tmp_path)?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-    }
-    fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o640))?;
-    // chown via shell; std doesn't expose chown directly without rustix.
-    let owner_group = format!("{owner}:denia");
-    let status = std::process::Command::new("chown")
-        .args([&owner_group, &tmp_path.display().to_string()])
-        .status()?;
-    if !status.success() {
-        return Err(anyhow::anyhow!(
-            "chown {owner_group} {} failed",
-            tmp_path.display()
-        ));
-    }
-    fs::rename(&tmp_path, path)?;
-    Ok(())
 }
 
 fn print_summary(ctx: &InstallContext) {
