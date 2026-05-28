@@ -36,6 +36,8 @@ import {
   ServiceDomains,
   Services,
   User,
+  UserSummaries,
+  UserSummary,
   WorkloadView,
   WorkloadViews,
 } from './schema'
@@ -55,6 +57,10 @@ export class ApiClient extends Context.Service<
     readonly me: Effect.Effect<Me, ApiError | DecodeError>
     readonly listUsers: Effect.Effect<
       ReadonlyArray<User>,
+      ApiError | DecodeError
+    >
+    readonly listUserDirectory: Effect.Effect<
+      ReadonlyArray<UserSummary>,
       ApiError | DecodeError
     >
     readonly createUser: (
@@ -341,6 +347,13 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         .get(url('/v1/users'), { headers: authHeaders() })
         .pipe(Effect.mapError(httpError))
       return yield* parseResponse(response, Schema.Array(User))
+    })
+
+    const listUserDirectory = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/users/directory'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, UserSummaries)
     })
 
     const createUser = (username: string, password: string) =>
@@ -788,6 +801,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       logout,
       me,
       listUsers,
+      listUserDirectory,
       createUser,
       bootstrap,
       deleteUser,

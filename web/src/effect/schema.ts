@@ -16,6 +16,12 @@ export class User extends Schema.Class<User>('User')({
   created_at: Schema.String,
 }) {}
 
+export class UserSummary extends Schema.Class<UserSummary>('UserSummary')({
+  id: Schema.String,
+  username: Schema.String,
+}) {}
+export const UserSummaries = Schema.Array(UserSummary)
+
 export const PrincipalUser = Schema.Struct({
   kind: Schema.Literal('user'),
   user: User,

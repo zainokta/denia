@@ -67,6 +67,12 @@ pub struct MeUser {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserSummary {
+    pub id: Uuid,
+    pub username: String,
+}
+
 impl From<User> for MeUser {
     fn from(u: User) -> Self {
         Self {

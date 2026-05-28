@@ -13,6 +13,7 @@ use crate::auth::Principal;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/users", get(list_users).post(create_user_handler))
+        .route("/users/directory", get(list_user_directory))
         .route("/users/{user_id}", delete(delete_user_handler))
 }
 
@@ -24,6 +25,13 @@ async fn list_users(
         return Err(ApiError::Forbidden("super admin required".to_string()));
     }
     Ok(Json(state.users.list_users()?))
+}
+
+async fn list_user_directory(
+    State(state): State<AppState>,
+    _principal: Principal,
+) -> Result<Json<Vec<crate::domain::UserSummary>>, ApiError> {
+    Ok(Json(state.users.list_user_directory()?))
 }
 
 #[derive(Debug, Deserialize)]

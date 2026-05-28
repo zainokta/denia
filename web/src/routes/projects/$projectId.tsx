@@ -26,6 +26,11 @@ const listMembers = (projectId: string) =>
     return yield* api.listMembers(projectId)
   })
 
+const listUserDirectory = Effect.gen(function* () {
+  const api = yield* ApiClient
+  return yield* api.listUserDirectory
+})
+
 const addMember = (projectId: string, userId: string, role: Role) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
@@ -107,6 +112,16 @@ export function ProjectDetail() {
     queryFn: () => runQuery(listMembers(projectId)),
     enabled: projectId.length > 0,
   })
+
+  const { data: userDirectory = [] } = useQuery({
+    queryKey: ['users', 'directory'],
+    queryFn: () => runQuery(listUserDirectory),
+    enabled: canManage,
+  })
+
+  const usernameById = new Map(userDirectory.map((u) => [u.id, u.username]))
+  const memberIds = new Set(members.map((m) => m.user_id))
+  const availableUsers = userDirectory.filter((u) => !memberIds.has(u.id))
 
   const addMemberMutation = useMutation({
     mutationFn: (input: { userId: string; role: Role }) =>
@@ -384,8 +399,18 @@ export function ProjectDetail() {
                   i > 0 ? 'border-t border-[var(--border)]' : ''
                 }`}
               >
-                <span className="font-mono text-xs text-[var(--fg-muted)]">
-                  {m.user_id}
+                <span className="flex flex-col">
+                  <span className="text-sm text-[var(--fg)]">
+                    {usernameById.get(m.user_id) ?? m.user_id}
+                  </span>
+                  {usernameById.has(m.user_id) ? (
+                    <span
+                      className="font-mono text-[10px] text-[var(--fg-muted)]"
+                      title={m.user_id}
+                    >
+                      {m.user_id.slice(0, 8)}…
+                    </span>
+                  ) : null}
                 </span>
                 <span className="kicker">{m.role}</span>
                 {canManage ? (
@@ -448,16 +473,26 @@ export function ProjectDetail() {
               <div className="form-grid mb-3">
                 <div className="flex flex-col gap-1 col-span-12 sm:col-span-8">
                   <label className="kicker" htmlFor="add-member-user">
-                    user id
+                    user
                   </label>
-                  <input
+                  <select
                     id="add-member-user"
-                    type="text"
-                    placeholder="uuid"
                     value={newUserId}
                     onChange={(e) => setNewUserId(e.target.value)}
                     className="field-input w-full"
-                  />
+                    disabled={availableUsers.length === 0}
+                  >
+                    <option value="">
+                      {availableUsers.length === 0
+                        ? 'no users available'
+                        : 'select a user…'}
+                    </option>
+                    {availableUsers.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.username}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div className="flex flex-col gap-1 col-span-12 sm:col-span-4">
                   <label className="kicker" htmlFor="add-member-role">
@@ -478,7 +513,7 @@ export function ProjectDetail() {
               <button
                 type="submit"
                 className="btn btn-primary text-xs"
-                disabled={addMemberMutation.isPending}
+                disabled={addMemberMutation.isPending || !newUserId}
               >
                 {addMemberMutation.isPending ? 'adding...' : 'add member'}
               </button>

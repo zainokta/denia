@@ -9,7 +9,7 @@ use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::domain::{ProjectMembership, Role, Session, User};
+use crate::domain::{ProjectMembership, Role, Session, User, UserSummary};
 use crate::repo::error::RepoError;
 use crate::repo::sqlite::pool::SqlitePool;
 use crate::state::{SqliteStore, StateError};
@@ -61,6 +61,22 @@ pub(super) fn get_user_q(conn: &Connection, user_id: Uuid) -> Result<Option<User
             },
         )
         .transpose()
+}
+
+pub(super) fn list_user_directory_q(conn: &Connection) -> Result<Vec<UserSummary>, RepoError> {
+    let mut stmt = conn.prepare("SELECT id, username FROM users ORDER BY username")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut users = Vec::new();
+    for row in rows {
+        let (id, username) = row?;
+        users.push(UserSummary {
+            id: Uuid::parse_str(&id)?,
+            username,
+        });
+    }
+    Ok(users)
 }
 
 pub(super) fn list_users_q(conn: &Connection) -> Result<Vec<User>, RepoError> {
@@ -419,6 +435,11 @@ impl SqliteStore {
         list_users_q(&connection).map_err(StateError::from)
     }
 
+    pub fn list_user_directory(&self) -> Result<Vec<UserSummary>, StateError> {
+        let connection = self.connection()?;
+        list_user_directory_q(&connection).map_err(StateError::from)
+    }
+
     pub fn delete_user(&self, user_id: Uuid) -> Result<(), StateError> {
         let connection = self.connection()?;
         delete_user_q(&connection, user_id).map_err(StateError::from)
@@ -525,6 +546,11 @@ impl SqliteUserRepo {
     pub fn list_users(&self) -> Result<Vec<User>, RepoError> {
         let conn = self.pool.connection()?;
         list_users_q(&conn)
+    }
+
+    pub fn list_user_directory(&self) -> Result<Vec<UserSummary>, RepoError> {
+        let conn = self.pool.connection()?;
+        list_user_directory_q(&conn)
     }
 
     pub fn delete_user(&self, user_id: Uuid) -> Result<(), RepoError> {
