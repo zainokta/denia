@@ -43,11 +43,6 @@ const removeMember = (projectId: string, userId: string) =>
     return yield* api.removeMember(projectId, userId)
   })
 
-const listCredentials = Effect.gen(function* () {
-  const api = yield* ApiClient
-  return yield* api.listCredentials
-})
-
 const listRegistries = (projectId: string) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
@@ -128,15 +123,6 @@ export function ProjectDetail() {
   const memberIds = new Set(members.map((m) => m.user_id))
   const availableUsers = userDirectory.filter((u) => !memberIds.has(u.id))
 
-  const { data: credentials = [] } = useQuery({
-    queryKey: ['credentials'],
-    queryFn: () => runQuery(listCredentials),
-    enabled: canManage && isSuperAdmin,
-  })
-
-  const registryCredentials = credentials.filter(
-    (c) => c.kind === 'RegistryBasic' || c.kind === 'RegistryToken',
-  )
 
   const addMemberMutation = useMutation({
     mutationFn: (input: { userId: string; role: Role }) =>
@@ -190,7 +176,9 @@ export function ProjectDetail() {
   const [regEndpoint, setRegEndpoint] = useState('')
   const [regAuthKind, setRegAuthKind] =
     useState<RegistryInput['auth_kind']>('anonymous')
-  const [regCredRef, setRegCredRef] = useState('')
+  const [regUsername, setRegUsername] = useState('')
+  const [regPassword, setRegPassword] = useState('')
+  const [regToken, setRegToken] = useState('')
   const [regCreateError, setRegCreateError] = useState('')
   const [regDeleteConfirm, setRegDeleteConfirm] = useState<string | null>(null)
   const [regDeleteError, setRegDeleteError] = useState('')
@@ -200,8 +188,37 @@ export function ProjectDetail() {
   const [editEndpoint, setEditEndpoint] = useState('')
   const [editAuthKind, setEditAuthKind] =
     useState<RegistryInput['auth_kind']>('anonymous')
-  const [editCredRef, setEditCredRef] = useState('')
+  const [editUsername, setEditUsername] = useState('')
+  const [editPassword, setEditPassword] = useState('')
+  const [editToken, setEditToken] = useState('')
   const [regEditError, setRegEditError] = useState('')
+
+  const buildRegistryPayload = (
+    name: string,
+    endpoint: string,
+    authKind: RegistryInput['auth_kind'],
+    username: string,
+    password: string,
+    token: string,
+  ): RegistryInput | { error: string } => {
+    const base = { name, endpoint, auth_kind: authKind } as RegistryInput
+    switch (authKind) {
+      case 'anonymous':
+        return base
+      case 'basic':
+        if (username.trim().length === 0 || password.length === 0) {
+          return { error: 'Username and password are required for basic auth.' }
+        }
+        return { ...base, username: username.trim(), password }
+      case 'token':
+      case 'ecr_token':
+      case 'gar_token':
+        if (token.length === 0) {
+          return { error: 'Token is required for this auth kind.' }
+        }
+        return { ...base, token }
+    }
+  }
 
   const { data: registries = [] } = useQuery({
     queryKey: ['projects', projectId, 'registries'],
@@ -216,7 +233,9 @@ export function ProjectDetail() {
       setRegName('')
       setRegEndpoint('')
       setRegAuthKind('anonymous')
-      setRegCredRef('')
+      setRegUsername('')
+      setRegPassword('')
+      setRegToken('')
       setRegCreateError('')
       queryClient.invalidateQueries({
         queryKey: ['projects', projectId, 'registries'],
@@ -258,7 +277,11 @@ export function ProjectDetail() {
     setEditName(r.name)
     setEditEndpoint(r.endpoint)
     setEditAuthKind(r.auth_kind)
-    setEditCredRef(r.credential_ref ?? '')
+    // Always cleared: editing never reveals the existing credential. PATCH
+    // overwrites the stored secret only if new fields are filled in.
+    setEditUsername('')
+    setEditPassword('')
+    setEditToken('')
   }
 
   const [regDeleteErrorFor, setRegDeleteErrorFor] = useState<string | null>(null)
@@ -563,17 +586,22 @@ export function ProjectDetail() {
                         const name = editName.trim()
                         const endpoint = editEndpoint.trim()
                         if (!name || !endpoint) return
+                        const built = buildRegistryPayload(
+                          name,
+                          endpoint,
+                          editAuthKind,
+                          editUsername,
+                          editPassword,
+                          editToken,
+                        )
+                        if ('error' in built) {
+                          setRegEditError(built.error)
+                          return
+                        }
+                        setRegEditError('')
                         updateRegMutation.mutate({
                           registryId: r.id,
-                          body: {
-                            name,
-                            endpoint,
-                            auth_kind: editAuthKind,
-                            secret_ref:
-                              editCredRef.trim().length > 0
-                                ? editCredRef.trim()
-                                : null,
-                          },
+                          body: built,
                         })
                       }}
                     >
@@ -650,38 +678,69 @@ export function ProjectDetail() {
                             ))}
                           </select>
                         </div>
-                        <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
-                          <div className="flex items-center gap-1.5">
-                            <label className="kicker" htmlFor={`reg-edit-cred-${r.id}`}>
-                              credential ref
-                            </label>
-                            <span className="text-xs text-[var(--fg-muted)]">
-                              optional
-                            </span>
-                            <FieldHint
-                              id={`hint-reg-edit-cred-${r.id}`}
-                              label="about credential ref"
+                        {editAuthKind === 'basic' ? (
+                          <>
+                            <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                              <label
+                                className="kicker"
+                                htmlFor={`reg-edit-username-${r.id}`}
+                              >
+                                username
+                              </label>
+                              <input
+                                id={`reg-edit-username-${r.id}`}
+                                type="text"
+                                aria-label="edit registry username"
+                                autoComplete="off"
+                                placeholder="ci-bot"
+                                value={editUsername}
+                                onChange={(e) =>
+                                  setEditUsername(e.target.value)
+                                }
+                                className="field-input w-full"
+                              />
+                            </div>
+                            <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                              <label
+                                className="kicker"
+                                htmlFor={`reg-edit-password-${r.id}`}
+                              >
+                                password
+                              </label>
+                              <input
+                                id={`reg-edit-password-${r.id}`}
+                                type="password"
+                                aria-label="edit registry password"
+                                autoComplete="new-password"
+                                placeholder="••••••••"
+                                value={editPassword}
+                                onChange={(e) =>
+                                  setEditPassword(e.target.value)
+                                }
+                                className="field-input w-full"
+                              />
+                            </div>
+                          </>
+                        ) : editAuthKind === 'anonymous' ? null : (
+                          <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                            <label
+                              className="kicker"
+                              htmlFor={`reg-edit-token-${r.id}`}
                             >
-                              Pick a credential registered under{' '}
-                              <code>/settings/credentials</code>. Required for
-                              every auth kind except <code>anonymous</code>.
-                            </FieldHint>
+                              token
+                            </label>
+                            <input
+                              id={`reg-edit-token-${r.id}`}
+                              type="password"
+                              aria-label="edit registry token"
+                              autoComplete="new-password"
+                              placeholder="••••••••"
+                              value={editToken}
+                              onChange={(e) => setEditToken(e.target.value)}
+                              className="field-input w-full"
+                            />
                           </div>
-                          <select
-                            id={`reg-edit-cred-${r.id}`}
-                            aria-label="edit registry credential ref"
-                            value={editCredRef}
-                            onChange={(e) => setEditCredRef(e.target.value)}
-                            className="field-input w-full"
-                          >
-                            <option value="">none</option>
-                            {registryCredentials.map((c) => (
-                              <option key={c.id} value={c.name}>
-                                {c.name}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
+                        )}
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
                         <button
@@ -799,15 +858,20 @@ export function ProjectDetail() {
               const name = regName.trim()
               const endpoint = regEndpoint.trim()
               if (!name || !endpoint) return
-              createRegMutation.mutate({
+              const built = buildRegistryPayload(
                 name,
                 endpoint,
-                auth_kind: regAuthKind,
-                secret_ref:
-                  regCredRef.trim().length > 0
-                    ? regCredRef.trim()
-                    : null,
-              })
+                regAuthKind,
+                regUsername,
+                regPassword,
+                regToken,
+              )
+              if ('error' in built) {
+                setRegCreateError(built.error)
+                return
+              }
+              setRegCreateError('')
+              createRegMutation.mutate(built)
             }}
           >
             <div className="form-grid mb-3">
@@ -877,37 +941,59 @@ export function ProjectDetail() {
                   ))}
                 </select>
               </div>
-              <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
-                <div className="flex items-center gap-1.5">
-                  <label className="kicker" htmlFor="reg-cred-ref">
-                    credential ref
-                  </label>
-                  <span className="text-xs text-[var(--fg-muted)]">
-                    optional
-                  </span>
-                  <FieldHint
-                    id="hint-reg-cred-ref"
-                    label="about credential ref"
-                  >
-                    Pick a credential registered under{' '}
-                    <code>/settings/credentials</code>. Required for every auth
-                    kind except <code>anonymous</code>.
-                  </FieldHint>
+              {regAuthKind === 'basic' ? (
+                <>
+                  <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                    <label className="kicker" htmlFor="reg-username">
+                      username
+                    </label>
+                    <input
+                      id="reg-username"
+                      type="text"
+                      autoComplete="off"
+                      placeholder="ci-bot"
+                      value={regUsername}
+                      onChange={(e) => setRegUsername(e.target.value)}
+                      className="field-input w-full"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                    <label className="kicker" htmlFor="reg-password">
+                      password
+                    </label>
+                    <input
+                      id="reg-password"
+                      type="password"
+                      autoComplete="new-password"
+                      placeholder="••••••••"
+                      value={regPassword}
+                      onChange={(e) => setRegPassword(e.target.value)}
+                      className="field-input w-full"
+                    />
+                  </div>
+                </>
+              ) : regAuthKind === 'anonymous' ? null : (
+                <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                  <div className="flex items-center gap-1.5">
+                    <label className="kicker" htmlFor="reg-token">
+                      token
+                    </label>
+                    <FieldHint id="hint-reg-token" label="about token">
+                      Encrypted server-side via SOPS (ADR-021). Stored
+                      <code>0600</code> under the project secrets directory.
+                    </FieldHint>
+                  </div>
+                  <input
+                    id="reg-token"
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder="••••••••"
+                    value={regToken}
+                    onChange={(e) => setRegToken(e.target.value)}
+                    className="field-input w-full"
+                  />
                 </div>
-                <select
-                  id="reg-cred-ref"
-                  value={regCredRef}
-                  onChange={(e) => setRegCredRef(e.target.value)}
-                  className="field-input w-full"
-                >
-                  <option value="">none</option>
-                  {registryCredentials.map((c) => (
-                    <option key={c.id} value={c.name}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              )}
             </div>
             <button
               type="submit"
