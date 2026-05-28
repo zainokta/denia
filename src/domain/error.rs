@@ -6,8 +6,6 @@ pub enum DomainError {
     EmptyName,
     #[error("invalid service name '{0}': only ASCII alphanumeric, '-' and '_' are allowed")]
     InvalidName(String),
-    #[error("service must have at least one domain")]
-    MissingDomain,
     #[error("internal port must be between 1 and 65535")]
     InvalidPort,
     #[error("health check path must start with /")]
