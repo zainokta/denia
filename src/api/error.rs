@@ -1,4 +1,5 @@
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -150,6 +151,6 @@ impl IntoResponse for ApiError {
                 "internal server error".to_string(),
             ),
         };
-        (status, message).into_response()
+        (status, Json(serde_json::json!({ "error": message }))).into_response()
     }
 }
