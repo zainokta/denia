@@ -30,6 +30,8 @@ pub enum RepoError {
     RegistryNotFound,
     #[error("registry is referenced by one or more services")]
     RegistryInUse,
+    #[error("invalid column value: {0}")]
+    InvalidColumn(String),
     #[error("admin already initialized")]
     AdminAlreadyInitialized,
 }

@@ -238,6 +238,11 @@ const mockApi = (success = true) =>
     createUser: ((_u: string, _p: string) => emptyApi()) as never,
     bootstrap: ((_u: string, _p: string) => emptyApi()) as never,
     deleteUser: ((_id: number) => emptyApi()) as never,
+    listCredentials: emptyApi() as never,
+    putCredential: ((_input: { name: string; kind: string; secret_ref: string }) =>
+      emptyApi()) as never,
+    listSessions: emptyApi() as never,
+    revokeAllSessions: emptyApi() as never,
     listApiTokens: emptyApi() as never,
     createApiToken: ((_n: string) => emptyApi()) as never,
     deleteApiToken: ((_id: number) => emptyApi()) as never,
@@ -392,6 +397,11 @@ describe('ApiClient jobs', () => {
     createUser: ((_u: string, _p: string) => emptyApi()) as never,
     bootstrap: ((_u: string, _p: string) => emptyApi()) as never,
     deleteUser: ((_id: number) => emptyApi()) as never,
+    listCredentials: emptyApi() as never,
+    putCredential: ((_input: { name: string; kind: string; secret_ref: string }) =>
+      emptyApi()) as never,
+    listSessions: emptyApi() as never,
+    revokeAllSessions: emptyApi() as never,
     listApiTokens: emptyApi() as never,
     createApiToken: ((_n: string) => emptyApi()) as never,
     deleteApiToken: ((_id: number) => emptyApi()) as never,
@@ -709,6 +719,11 @@ const mockIngressApi = () =>
     createUser: ((_u: string, _p: string) => emptyApi()) as never,
     bootstrap: ((_u: string, _p: string) => emptyApi()) as never,
     deleteUser: ((_id: number) => emptyApi()) as never,
+    listCredentials: emptyApi() as never,
+    putCredential: ((_input: { name: string; kind: string; secret_ref: string }) =>
+      emptyApi()) as never,
+    listSessions: emptyApi() as never,
+    revokeAllSessions: emptyApi() as never,
     listApiTokens: emptyApi() as never,
     createApiToken: ((_n: string) => emptyApi()) as never,
     deleteApiToken: ((_id: number) => emptyApi()) as never,
@@ -844,6 +859,14 @@ describe('putService', () => {
           createUser: ((_u: string, _p: string) => emptyApi()) as never,
           bootstrap: ((_u: string, _p: string) => emptyApi()) as never,
           deleteUser: ((_id: number) => emptyApi()) as never,
+          listCredentials: emptyApi() as never,
+          putCredential: ((_input: {
+            name: string
+            kind: string
+            secret_ref: string
+          }) => emptyApi()) as never,
+          listSessions: emptyApi() as never,
+          revokeAllSessions: emptyApi() as never,
           listApiTokens: emptyApi() as never,
           createApiToken: ((_n: string) => emptyApi()) as never,
           deleteApiToken: ((_id: number) => emptyApi()) as never,

@@ -68,6 +68,37 @@ export class ApiToken extends Schema.Class<ApiToken>('ApiToken')({
   created_at: Schema.String,
 }) {}
 
+export class Session extends Schema.Class<Session>('Session')({
+  id: Schema.String,
+  expires_at: Schema.String,
+}) {}
+
+export const Sessions = Schema.Array(Session)
+
+export const SessionRevoke = Schema.Struct({ revoked: Schema.Number })
+
+export const CredentialKind = Schema.Literals([
+  'SshDeployKey',
+  'RegistryBasic',
+  'RegistryToken',
+])
+export type CredentialKind = typeof CredentialKind.Type
+
+export class Credential extends Schema.Class<Credential>('Credential')({
+  id: Schema.String,
+  name: Schema.String,
+  kind: CredentialKind,
+  secret_ref: Schema.String,
+}) {}
+
+export const Credentials = Schema.Array(Credential)
+
+export interface CredentialInput {
+  readonly name: string
+  readonly kind: CredentialKind
+  readonly secret_ref: string
+}
+
 export class Project extends Schema.Class<Project>('Project')({
   id: Schema.String,
   name: Schema.String,

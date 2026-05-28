@@ -1,4 +1,8 @@
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{get, post},
+};
 use serde::Deserialize;
 
 use crate::api::ApiError;
@@ -9,6 +13,7 @@ use crate::secrets::SecretRef;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/credentials", get(list_credentials))
         .route("/credentials/git", post(put_credential))
         .route("/credentials/registry", post(put_credential))
 }
@@ -32,4 +37,12 @@ async fn put_credential(
             .credentials
             .put_credential(input.name, input.kind, secret_ref)?,
     ))
+}
+
+async fn list_credentials(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Json<Vec<Credential>>, ApiError> {
+    ensure_super_admin(&principal)?;
+    Ok(Json(state.credentials.list_credentials()?))
 }

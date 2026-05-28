@@ -6,6 +6,9 @@ import {
   AccessEntries,
   AccessEntry,
   ApiToken,
+  Credential,
+  type CredentialInput,
+  Credentials,
   Deployment,
   Deployments,
   Job,
@@ -27,6 +30,9 @@ import {
   Registries,
   Registry,
   RegistryInput,
+  Session,
+  Sessions,
+  SessionRevoke,
   type Role,
   RouteView,
   RouteViews,
@@ -72,6 +78,21 @@ export class ApiClient extends Context.Service<
       password: string,
     ) => Effect.Effect<User, ApiError | DecodeError>
     readonly deleteUser: (id: string) => Effect.Effect<void, ApiError>
+    readonly listCredentials: Effect.Effect<
+      ReadonlyArray<Credential>,
+      ApiError | DecodeError
+    >
+    readonly putCredential: (
+      input: CredentialInput,
+    ) => Effect.Effect<Credential, ApiError | DecodeError>
+    readonly listSessions: Effect.Effect<
+      ReadonlyArray<Session>,
+      ApiError | DecodeError
+    >
+    readonly revokeAllSessions: Effect.Effect<
+      { readonly revoked: number },
+      ApiError | DecodeError
+    >
     readonly listApiTokens: Effect.Effect<
       ReadonlyArray<ApiToken>,
       ApiError | DecodeError
@@ -391,6 +412,45 @@ export const ApiClientLive = Layer.effect(ApiClient)(
           .pipe(Effect.mapError(httpError))
         return yield* parseDeleteResponse(response)
       })
+
+    const listCredentials = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/credentials'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, Credentials)
+    })
+
+    const putCredential = (input: CredentialInput) =>
+      Effect.gen(function* () {
+        const path =
+          input.kind === 'SshDeployKey'
+            ? '/v1/credentials/git'
+            : '/v1/credentials/registry'
+        const response = yield* http
+          .post(url(path), {
+            headers: {
+              ...authHeaders(),
+              'content-type': 'application/json',
+            },
+            body: jsonBody(input),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, Credential)
+      })
+
+    const listSessions = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/auth/sessions'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, Sessions)
+    })
+
+    const revokeAllSessions = Effect.gen(function* () {
+      const response = yield* http
+        .del(url('/v1/auth/sessions'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, SessionRevoke)
+    })
 
     const listApiTokens = Effect.gen(function* () {
       const response = yield* http
@@ -805,6 +865,10 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       createUser,
       bootstrap,
       deleteUser,
+      listCredentials,
+      putCredential,
+      listSessions,
+      revokeAllSessions,
       listApiTokens,
       createApiToken,
       deleteApiToken,

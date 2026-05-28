@@ -43,6 +43,11 @@ const removeMember = (projectId: string, userId: string) =>
     return yield* api.removeMember(projectId, userId)
   })
 
+const listCredentials = Effect.gen(function* () {
+  const api = yield* ApiClient
+  return yield* api.listCredentials
+})
+
 const listRegistries = (projectId: string) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
@@ -122,6 +127,16 @@ export function ProjectDetail() {
   const usernameById = new Map(userDirectory.map((u) => [u.id, u.username]))
   const memberIds = new Set(members.map((m) => m.user_id))
   const availableUsers = userDirectory.filter((u) => !memberIds.has(u.id))
+
+  const { data: credentials = [] } = useQuery({
+    queryKey: ['credentials'],
+    queryFn: () => runQuery(listCredentials),
+    enabled: canManage && isSuperAdmin,
+  })
+
+  const registryCredentials = credentials.filter(
+    (c) => c.kind === 'RegistryBasic' || c.kind === 'RegistryToken',
+  )
 
   const addMemberMutation = useMutation({
     mutationFn: (input: { userId: string; role: Role }) =>
@@ -647,20 +662,25 @@ export function ProjectDetail() {
                               id={`hint-reg-edit-cred-${r.id}`}
                               label="about credential ref"
                             >
-                              Name of a credential pre-registered via{' '}
-                              <code>POST /v1/credentials/registry</code>. Required
-                              for every auth kind except <code>anonymous</code>.
+                              Pick a credential registered under{' '}
+                              <code>/settings/credentials</code>. Required for
+                              every auth kind except <code>anonymous</code>.
                             </FieldHint>
                           </div>
-                          <input
+                          <select
                             id={`reg-edit-cred-${r.id}`}
-                            type="text"
                             aria-label="edit registry credential ref"
-                            placeholder="ghcr-token"
                             value={editCredRef}
                             onChange={(e) => setEditCredRef(e.target.value)}
                             className="field-input w-full"
-                          />
+                          >
+                            <option value="">none</option>
+                            {registryCredentials.map((c) => (
+                              <option key={c.id} value={c.name}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
@@ -869,19 +889,24 @@ export function ProjectDetail() {
                     id="hint-reg-cred-ref"
                     label="about credential ref"
                   >
-                    Name of a credential pre-registered via{' '}
-                    <code>POST /v1/credentials/registry</code>. Required for
-                    every auth kind except <code>anonymous</code>.
+                    Pick a credential registered under{' '}
+                    <code>/settings/credentials</code>. Required for every auth
+                    kind except <code>anonymous</code>.
                   </FieldHint>
                 </div>
-                <input
+                <select
                   id="reg-cred-ref"
-                  type="text"
-                  placeholder="ghcr-token"
                   value={regCredRef}
                   onChange={(e) => setRegCredRef(e.target.value)}
                   className="field-input w-full"
-                />
+                >
+                  <option value="">none</option>
+                  {registryCredentials.map((c) => (
+                    <option key={c.id} value={c.name}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
             <button
