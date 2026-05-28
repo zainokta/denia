@@ -66,6 +66,42 @@ pub struct AppConfig {
     /// Directory holding the ACME account key and per-domain cert material
     /// (`<tls_dir>/account.key`, `<tls_dir>/<domain>/{fullchain,key}.pem`).
     pub tls_dir: PathBuf,
+    /// Persistent OCI layer cache root. Content-addressed: blobs filed under
+    /// `<oci_cache_dir>/blobs/<algorithm>/<digest_hex>` with a sibling
+    /// `<digest_hex>.lastref` mtime sidecar (ADR-021).
+    pub oci_cache_dir: PathBuf,
+    /// Verification mode for cache hits: `none` (path-only), `size`
+    /// (default; matches `OciDescriptor.size`), or `full` (re-hashes).
+    pub oci_cache_verify_on_hit: OciCacheVerifyMode,
+    /// Garbage collection scan interval. Default = 7 days.
+    pub oci_gc_interval_secs: u64,
+    /// Retention threshold: blobs with `.lastref` mtime older than this and
+    /// no live reference are eligible for deletion. Default = 7 days.
+    pub oci_gc_retention_secs: u64,
+}
+
+/// How aggressively a cache hit is re-verified before reuse (ADR-021).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OciCacheVerifyMode {
+    /// Trust the on-disk file as-is (cheapest; assume the cache is local and
+    /// not externally modified). Path existence is still required.
+    None,
+    /// Confirm the on-disk size matches the descriptor's declared size.
+    Size,
+    /// Re-stream the file through SHA-256 and confirm the digest matches the
+    /// descriptor. Catches silent on-disk corruption.
+    Full,
+}
+
+impl OciCacheVerifyMode {
+    pub fn parse_env(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "size" => Some(Self::Size),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
 }
 
 /// Default ACME directory: Let's Encrypt production.
@@ -158,6 +194,21 @@ impl AppConfig {
         let tls_dir = env::var("DENIA_TLS_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| data_dir.join("tls"));
+        let oci_cache_dir = env::var("DENIA_OCI_CACHE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| data_dir.join("oci-cache"));
+        let oci_cache_verify_on_hit = env::var("DENIA_OCI_CACHE_VERIFY_ON_HIT")
+            .ok()
+            .and_then(|v| OciCacheVerifyMode::parse_env(&v))
+            .unwrap_or(OciCacheVerifyMode::Size);
+        let oci_gc_interval_secs = env::var("DENIA_OCI_GC_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(7 * 24 * 60 * 60);
+        let oci_gc_retention_secs = env::var("DENIA_OCI_GC_RETENTION_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(7 * 24 * 60 * 60);
 
         let mut admin_token_hmac_key = [0u8; 32];
         rand::rng().fill(&mut admin_token_hmac_key);
@@ -190,6 +241,10 @@ impl AppConfig {
             autoscale_headroom_mem_bytes,
             acme_directory_url,
             tls_dir,
+            oci_cache_dir,
+            oci_cache_verify_on_hit,
+            oci_gc_interval_secs,
+            oci_gc_retention_secs,
         })
     }
 
@@ -226,6 +281,13 @@ impl AppConfig {
             autoscale_headroom_mem_bytes: 536870912,
             acme_directory_url: DEFAULT_ACME_DIRECTORY_URL.to_string(),
             tls_dir: data_dir.join("tls"),
+            oci_cache_dir: data_dir.join("oci-cache"),
+            oci_cache_verify_on_hit: OciCacheVerifyMode::Size,
+            // Tests do not rely on the GC interval directly; the loop runs
+            // a `sweep_once` per tick and any test that needs determinism
+            // calls `sweep_once` synchronously.
+            oci_gc_interval_secs: 7 * 24 * 60 * 60,
+            oci_gc_retention_secs: 7 * 24 * 60 * 60,
         }
     }
 
