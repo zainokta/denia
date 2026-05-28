@@ -127,6 +127,14 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
             if let Some(parent) = safe_path.parent() {
                 fs::create_dir_all(parent)?;
             }
+            // Unlink any prior file/symlink at this path so File::create
+            // cannot follow a stale symlink (from an earlier layer) out of
+            // rootfs and overwrite a host file.
+            if let Ok(meta) = fs::symlink_metadata(&safe_path)
+                && !meta.is_dir()
+            {
+                let _ = fs::remove_file(&safe_path);
+            }
             let mut file = fs::File::create(&safe_path)?;
             let written = std::io::copy(&mut entry, &mut file)?;
             total_bytes += written;
@@ -179,10 +187,19 @@ fn safe_join(root: &Path, entry: &Path) -> Result<PathBuf, OciError> {
 
     let joined = root.join(entry);
 
-    let canonical = joined.canonicalize().unwrap_or_else(|_| joined.clone());
+    // Only require the PARENT directory to resolve under rootfs. The leaf may
+    // legitimately be a stale symlink from a prior layer (e.g.
+    // `etc/alternatives/pager -> /usr/bin/less`) that this entry is about to
+    // overwrite — canonicalizing the leaf would follow that symlink to the
+    // host path and falsely report a traversal. Workload isolation comes
+    // from pivot_root + mount namespace at runtime; the extractor's job is
+    // to keep parent directories under rootfs and unlink stale targets
+    // before writing (caller does this in `apply_layer`).
+    let parent = joined.parent().unwrap_or(root);
     let root_canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let parent_canonical = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
 
-    if !canonical.starts_with(&root_canonical) {
+    if !parent_canonical.starts_with(&root_canonical) {
         return Err(OciError::UnsafePath(format!(
             "path traversal rejected: {}",
             entry.display()
