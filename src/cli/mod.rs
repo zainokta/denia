@@ -23,8 +23,10 @@ pub enum Commands {
     Setup,
     /// Tear down the service. With --purge: also wipe data + user + config.
     Uninstall {
+        /// Also wipe /var/lib/denia, ~/.config/denia, and the denia system user.
         #[arg(long)]
         purge: bool,
+        /// Print the plan without executing it.
         #[arg(long)]
         dry_run: bool,
     },
