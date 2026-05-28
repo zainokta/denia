@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Wire the autoscaler: hand the ingress its activation hook, run boot
     // reconcile once, then spawn the periodic control loop until shutdown.
-    // OCI layer cache garbage collector (ADR-021). Cancel-safe loop, mirrors
+    // OCI layer cache garbage collector (ADR-022). Cancel-safe loop, mirrors
     // the scheduler/ACME `run_until_shutdown` pattern. Failure to spawn must
     // not kill the control plane — the cache continues to fill, just without
     // automated cleanup, until `POST /v1/oci/cache/gc` is invoked manually.

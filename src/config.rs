@@ -68,7 +68,7 @@ pub struct AppConfig {
     pub tls_dir: PathBuf,
     /// Persistent OCI layer cache root. Content-addressed: blobs filed under
     /// `<oci_cache_dir>/blobs/<algorithm>/<digest_hex>` with a sibling
-    /// `<digest_hex>.lastref` mtime sidecar (ADR-021).
+    /// `<digest_hex>.lastref` mtime sidecar (ADR-022).
     pub oci_cache_dir: PathBuf,
     /// Verification mode for cache hits: `none` (path-only), `size`
     /// (default; matches `OciDescriptor.size`), or `full` (re-hashes).
@@ -80,7 +80,7 @@ pub struct AppConfig {
     pub oci_gc_retention_secs: u64,
 }
 
-/// How aggressively a cache hit is re-verified before reuse (ADR-021).
+/// How aggressively a cache hit is re-verified before reuse (ADR-022).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OciCacheVerifyMode {
     /// Trust the on-disk file as-is (cheapest; assume the cache is local and

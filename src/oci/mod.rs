@@ -38,9 +38,9 @@ pub struct PulledImage {
     pub config: OciImageConfig,
     pub layers: Vec<LayerBlob>,
     /// Legacy per-pull `TempDir` staging (ADR-015). `None` when the puller
-    /// is backed by a persistent [`LayerCache`] (ADR-021).
+    /// is backed by a persistent [`LayerCache`] (ADR-022).
     pub _staging: Option<tempfile::TempDir>,
-    /// In-flight cache reservations (ADR-021). Held until `PulledImage` drops
+    /// In-flight cache reservations (ADR-022). Held until `PulledImage` drops
     /// so the GC cannot delete a layer while the deploy is still consuming it.
     pub _cache_reservations: Vec<CacheReservation>,
 }

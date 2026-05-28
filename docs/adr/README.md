@@ -38,7 +38,7 @@ Each ADR should include:
 | [018](018-autoscaling.md) | Autoscaling | Accepted | 2026-05-27 |
 | [019](019-runtime-filesystem-isolation.md) | Per-Replica Runtime Filesystem Isolation | Accepted | 2026-05-27 |
 | [020](020-pingora-ingress.md) | In-Process Pingora Ingress | Accepted | 2026-05-28 |
-| [021](021-oci-layer-cache.md) | Persistent OCI Layer Cache With Weekly GC | Accepted | 2026-05-28 |
+| [022](022-oci-layer-cache.md) | Persistent OCI Layer Cache With Weekly GC | Accepted | 2026-05-28 |
 
 ## Contributing
 

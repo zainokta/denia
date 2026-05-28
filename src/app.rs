@@ -56,7 +56,7 @@ pub struct AppState {
     pub acme_challenges: crate::ingress::pingora::acme::ChallengeStore,
     pub(crate) autoscaler:
         Option<Arc<tokio::sync::Mutex<crate::autoscale::controller::Controller>>>,
-    /// Persistent OCI layer cache (ADR-021). `None` in test builds that
+    /// Persistent OCI layer cache (ADR-022). `None` in test builds that
     /// construct `AppState` via the test builder without a cache wired up.
     pub oci_cache: Option<LayerCache>,
     /// Garbage collector handle used by both the background loop and the
@@ -124,7 +124,7 @@ impl AppState {
         );
         state.autoscaler = Some(Arc::new(tokio::sync::Mutex::new(controller)));
 
-        // OCI layer cache + GC (ADR-021). Init failure must not kill the
+        // OCI layer cache + GC (ADR-022). Init failure must not kill the
         // control plane — fall back to a cache-less puller path. Operators
         // can tail `eprintln!` output to see why.
         match LayerCache::new(

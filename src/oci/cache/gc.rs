@@ -89,7 +89,7 @@ impl LayerCacheGc {
 
     /// Run one sweep and return what was deleted.
     ///
-    /// Locking strategy (per ADR-021):
+    /// Locking strategy (per ADR-022):
     /// 1. Take the cache's coarse write lock for the duration of the walk.
     ///    This blocks new pull-side reservations briefly but does NOT block
     ///    in-flight downloads (they hold reservations, not the lock).

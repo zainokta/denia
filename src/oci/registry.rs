@@ -14,7 +14,7 @@ use super::cache::{CacheReservation, LayerCache};
 use super::{LayerBlob, LayerCompression, OciError, OciImagePuller, PulledImage};
 
 /// Streaming OCI registry puller backed by a persistent on-disk layer cache
-/// (ADR-021). If `cache` is `Some`, layers are content-addressed under the
+/// (ADR-022). If `cache` is `Some`, layers are content-addressed under the
 /// cache root and reused across pulls; if `None`, layers fall back to a
 /// per-pull `tempfile::TempDir` under `staging_dir` (the ADR-015 path).
 ///
@@ -38,7 +38,7 @@ impl RegistryImagePuller {
         }
     }
 
-    /// Cache-backed puller (ADR-021). Layers are reused across pulls; new
+    /// Cache-backed puller (ADR-022). Layers are reused across pulls; new
     /// layers are streamed to a `<digest>.tmp` file inside the cache and
     /// atomically renamed into place after digest verification.
     pub fn new_with_cache(staging_dir: PathBuf, cache: LayerCache) -> Self {

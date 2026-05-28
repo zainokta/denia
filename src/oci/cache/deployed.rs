@@ -2,7 +2,7 @@
 //! per-bundle `layers.json` sidecar written by
 //! [`crate::artifacts::acquirer::ArtifactAcquirer::write_bundle`].
 //!
-//! Per ADR-021, this answers "which layer digests are referenced by some
+//! Per ADR-022, this answers "which layer digests are referenced by some
 //! currently-deployed service right now?" without introducing a new table —
 //! the artifact_dir already stores one bundle per (image) digest, and each
 //! bundle has a sidecar listing its layer digests.
@@ -18,7 +18,7 @@ use crate::repo::sqlite::{SqliteDeploymentRepo, SqliteServiceRepo};
 ///
 /// The mapping path is: services -> promoted deployment -> artifact ->
 /// bundle_dir -> layers.json. Bundles without a layers.json sidecar (e.g.
-/// pre-ADR-021 bundles) are ignored — those layers won't be tracked but
+/// pre-ADR-022 bundles) are ignored — those layers won't be tracked but
 /// the retention + reservation guards still apply.
 pub struct SqliteDeployedDigests {
     pub services: SqliteServiceRepo,

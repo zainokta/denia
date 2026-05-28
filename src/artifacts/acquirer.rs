@@ -79,7 +79,7 @@ pub struct ArtifactAcquirer {
 impl ArtifactAcquirer {
     pub fn new(config: AppConfig) -> Self {
         let staging_dir = config.artifact_dir.clone();
-        // Prefer the persistent layer cache (ADR-021). Cache init failure is
+        // Prefer the persistent layer cache (ADR-022). Cache init failure is
         // not fatal — fall back to the per-pull TempDir staging path.
         let puller: Arc<dyn OciImagePuller> = match crate::oci::cache::LayerCache::new(
             config.oci_cache_dir.clone(),
@@ -275,7 +275,7 @@ impl ArtifactAcquirer {
         }
         // Persist the layer-digest list as a sidecar so the OCI cache GC can
         // tell which cached blobs are still referenced by promoted deployments
-        // (ADR-021). Atomic write: tmp + rename.
+        // (ADR-022). Atomic write: tmp + rename.
         let layer_digests: Vec<String> = layers.iter().map(|l| l.digest.clone()).collect();
         let layers_json = bundle_dir.join("layers.json");
         let layers_tmp = bundle_dir.join("layers.json.tmp");

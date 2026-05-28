@@ -12,7 +12,7 @@ use crate::config::OciCacheVerifyMode;
 
 use super::error::CacheError;
 
-/// Filename suffix for the per-blob "last-reference time" sidecar (ADR-021).
+/// Filename suffix for the per-blob "last-reference time" sidecar (ADR-022).
 /// Its mtime is used as the blob's atime even when the underlying fs is
 /// mounted `noatime`/`relatime`.
 pub const LASTREF_SUFFIX: &str = ".lastref";
