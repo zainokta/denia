@@ -96,6 +96,31 @@ pub(super) fn update_deployment_status_q(
     Ok(())
 }
 
+pub(super) fn fail_orphan_deployments_q(conn: &Connection) -> Result<Vec<Uuid>, RepoError> {
+    let pending = serde_json::to_string(&DeploymentStatus::Pending)?;
+    let building = serde_json::to_string(&DeploymentStatus::Building)?;
+    let starting = serde_json::to_string(&DeploymentStatus::Starting)?;
+    let failed = serde_json::to_string(&DeploymentStatus::Failed)?;
+
+    let mut stmt =
+        conn.prepare("SELECT id FROM deployments WHERE status IN (?1, ?2, ?3)")?;
+    let id_strings: Vec<String> = stmt
+        .query_map(params![&pending, &building, &starting], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let ids: Vec<Uuid> = id_strings
+        .iter()
+        .map(|s| Uuid::parse_str(s))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    conn.execute(
+        "UPDATE deployments SET status = ?1 WHERE status IN (?2, ?3, ?4)",
+        params![&failed, &pending, &building, &starting],
+    )?;
+    Ok(ids)
+}
+
 pub(super) fn promote_deployment_q(
     conn: &Connection,
     service_id: Uuid,
@@ -224,6 +249,11 @@ impl SqliteStore {
     ) -> Result<(), StateError> {
         let connection = self.connection()?;
         update_deployment_status_q(&connection, deployment_id, status).map_err(StateError::from)
+    }
+
+    pub fn fail_orphan_deployments(&self) -> Result<Vec<Uuid>, StateError> {
+        let connection = self.connection()?;
+        fail_orphan_deployments_q(&connection).map_err(StateError::from)
     }
 
     pub fn promote_deployment(
@@ -402,5 +432,39 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn fail_orphan_deployments_marks_in_flight_failed() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+
+        let svc = Uuid::now_v7();
+        let d_pending = store
+            .create_deployment(DeploymentRequest::external_image(svc, "img"))
+            .unwrap();
+        let d_starting = store
+            .create_deployment(DeploymentRequest::external_image(svc, "img"))
+            .unwrap();
+        store
+            .update_deployment_status(d_starting.id, DeploymentStatus::Starting)
+            .unwrap();
+        let d_healthy = store
+            .create_deployment(DeploymentRequest::external_image(svc, "img"))
+            .unwrap();
+        store
+            .update_deployment_status(d_healthy.id, DeploymentStatus::Healthy)
+            .unwrap();
+
+        let ids = store.fail_orphan_deployments().unwrap();
+        assert_eq!(ids.len(), 2, "two in-flight rows must be marked failed");
+        assert!(ids.contains(&d_pending.id));
+        assert!(ids.contains(&d_starting.id));
+
+        let all = store.list_deployments(svc).unwrap();
+        let by_id = |id: Uuid| all.iter().find(|d| d.id == id).unwrap().status.clone();
+        assert_eq!(by_id(d_pending.id), DeploymentStatus::Failed);
+        assert_eq!(by_id(d_starting.id), DeploymentStatus::Failed);
+        assert_eq!(by_id(d_healthy.id), DeploymentStatus::Healthy);
     }
 }
