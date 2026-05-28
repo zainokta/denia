@@ -5,8 +5,9 @@
 # out /var/lib/denia, creates the `denia` system user, writes a hardened
 # systemd unit, and brings the service up on :80 / :443 / :7180.
 #
-# Env vars surfaced in /etc/denia/denia.env mirror src/config.rs defaults.
-# Do not invent vars; if you add a new DENIA_* in config.rs, add it here too.
+# Config tunables surfaced in ~/.config/denia/config.toml mirror src/config.rs
+# defaults. Do not invent fields; if you add a new tunable to FileConfig in
+# config.rs, add it to write_config_file() too.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -19,11 +20,20 @@ readonly DENIA_USER="denia"
 readonly DENIA_GROUP="denia"
 readonly DENIA_HOME="/var/lib/denia"
 readonly DENIA_BIN="/usr/local/bin/denia"
-readonly DENIA_ETC="/etc/denia"
-readonly DENIA_ENV_FILE="${DENIA_ETC}/denia.env"
-readonly DENIA_TOKEN_FILE="${DENIA_ETC}/admin.token"
 readonly DENIA_SYSTEMD_UNIT="/etc/systemd/system/denia.service"
 readonly DENIA_BUILD_HOME="/usr/local/src/denia-build"
+
+# Resolved at runtime by detect_install_user() from ${SUDO_USER}. The operator's
+# config + admin token + age key live under their $HOME/.config/denia so they
+# can edit without sudo. The daemon (running as the `denia` system user) reads
+# them through a systemd BindReadOnlyPaths= bind mount, with files chmod'd to
+# 0640 ${SUDO_USER}:denia so the daemon's group has read access.
+DENIA_INSTALL_USER=""
+DENIA_INSTALL_HOME=""
+DENIA_USER_CONFIG_DIR=""
+DENIA_CONFIG_FILE=""
+DENIA_TOKEN_FILE=""
+DENIA_AGE_KEY_FILE=""
 
 # rustup-init official URL. Trust boundary: it is the upstream Rust project's
 # canonical bootstrap; we still verify against an embedded SHA256 when one is
@@ -50,9 +60,11 @@ Usage: install.sh [--dry-run] [--skip-build] [--uninstall [--purge]]
 Options:
   --dry-run      Print every command that would run, change nothing.
   --skip-build   Don't run cargo/pnpm. Expects ./target/release/denia present.
-  --uninstall    Stop+disable the service, remove the binary, systemd unit,
-                 and /etc/denia (with prompt). Leaves /var/lib/denia alone.
-  --purge        With --uninstall, also wipe /var/lib/denia (data + secrets).
+  --uninstall    Stop+disable the service, remove the binary and systemd unit.
+                 Leaves /var/lib/denia and ~/.config/denia (operator config +
+                 admin token + age key) alone.
+  --purge        With --uninstall, also wipe /var/lib/denia and the operator's
+                 ~/.config/denia directory.
   -h, --help     Show this help.
 EOF
 }
@@ -153,9 +165,37 @@ step_preflight_os() {
     ok "Linux glibc host confirmed"
 
     if [[ "${EUID}" -ne 0 ]]; then
-        fail "Must run as root (need /etc, /usr/local/bin, systemd, :80/:443). Try: sudo $0"
+        fail "Must run as root (need /usr/local/bin, systemd, :80/:443). Try: sudo $0"
     fi
     ok "running as root"
+}
+
+detect_install_user() {
+    step "Detect installing operator account"
+
+    if [[ -z "${SUDO_USER:-}" ]] || [[ "${SUDO_USER:-}" == "root" ]]; then
+        fail "install.sh must be invoked via sudo from a non-root account.
+  Denia's config lives under that user's \$HOME/.config/denia/ so they can
+  edit without sudo. Re-run as a regular user with: sudo ./install.sh"
+    fi
+
+    if ! /usr/bin/getent passwd "${SUDO_USER}" >/dev/null; then
+        fail "SUDO_USER='${SUDO_USER}' has no /etc/passwd entry."
+    fi
+
+    DENIA_INSTALL_USER="${SUDO_USER}"
+    DENIA_INSTALL_HOME="$(/usr/bin/getent passwd "${SUDO_USER}" | /usr/bin/cut -d: -f6)"
+    if [[ -z "${DENIA_INSTALL_HOME}" ]] || [[ ! -d "${DENIA_INSTALL_HOME}" ]]; then
+        fail "Cannot resolve a valid HOME for ${SUDO_USER} (got '${DENIA_INSTALL_HOME}')."
+    fi
+
+    DENIA_USER_CONFIG_DIR="${DENIA_INSTALL_HOME}/.config/denia"
+    DENIA_CONFIG_FILE="${DENIA_USER_CONFIG_DIR}/config.toml"
+    DENIA_TOKEN_FILE="${DENIA_USER_CONFIG_DIR}/admin.token"
+    DENIA_AGE_KEY_FILE="${DENIA_USER_CONFIG_DIR}/age.key"
+
+    ok "installer: ${DENIA_INSTALL_USER} (home: ${DENIA_INSTALL_HOME})"
+    ok "config dir: ${DENIA_USER_CONFIG_DIR} (0750 ${DENIA_INSTALL_USER}:${DENIA_GROUP})"
 }
 
 step_preflight_kernel() {
@@ -502,8 +542,15 @@ step_create_layout() {
     run_cmd install -d -m 0755 -o "${DENIA_USER}" -g "${DENIA_GROUP}" /sys/fs/cgroup/denia
     ok "cgroup root /sys/fs/cgroup/denia delegated"
 
-    # /etc/denia for config + token.
-    run_cmd install -d -m 0755 "${DENIA_ETC}"
+    # Operator config dir under their $HOME. Owned by the installer + the denia
+    # group so the human edits without sudo and the daemon (in `denia` group)
+    # reads via group bits. Parent ~/.config gets created with installer-only
+    # perms; the denia subdir is 0750 installer:denia.
+    run_cmd install -d -m 0700 -o "${DENIA_INSTALL_USER}" -g "${DENIA_INSTALL_USER}" \
+        "${DENIA_INSTALL_HOME}/.config"
+    run_cmd install -d -m 0750 -o "${DENIA_INSTALL_USER}" -g "${DENIA_GROUP}" \
+        "${DENIA_USER_CONFIG_DIR}"
+    ok "user config dir ${DENIA_USER_CONFIG_DIR} ready"
 }
 
 # ----------------------------------------------------------------------------
@@ -512,7 +559,7 @@ step_create_layout() {
 
 step_age_key() {
     step "Generate age identity for SOPS (if absent)"
-    local key="${DENIA_HOME}/secrets/age.key"
+    local key="${DENIA_AGE_KEY_FILE}"
 
     if [[ -s "${key}" ]]; then
         ok "age key already present at ${key} (keeping)"
@@ -525,16 +572,17 @@ step_age_key() {
     if [[ "${DRY_RUN}" -eq 1 ]]; then
         printf '  %s[dry-run]%s age-keygen -o %s\n' "${C_YELLOW}" "${C_RESET}" "${key}"
     else
-        # `install` then write: create an empty 0600 file owned by denia, then
-        # write into it. Avoids a window where the key sits 0644 on disk.
-        install -m 0600 -o "${DENIA_USER}" -g "${DENIA_GROUP}" /dev/null "${key}"
+        # `install` then write: create an empty 0640 file owned by the operator
+        # with denia group read; then have age-keygen write the body. Avoids a
+        # window where the key sits world-readable.
+        install -m 0640 -o "${DENIA_INSTALL_USER}" -g "${DENIA_GROUP}" /dev/null "${key}"
         # age-keygen writes both the private key and a "# public key:" comment
-        # to the file; we want the whole thing.
+        # to the file; the whole thing is what we keep.
         age-keygen -o "${key}" >/dev/null 2>&1
-        chmod 0600 "${key}"
-        chown "${DENIA_USER}:${DENIA_GROUP}" "${key}"
+        chmod 0640 "${key}"
+        chown "${DENIA_INSTALL_USER}:${DENIA_GROUP}" "${key}"
     fi
-    ok "age key written to ${key} (0600 ${DENIA_USER}:${DENIA_GROUP})"
+    ok "age key written to ${key} (0640 ${DENIA_INSTALL_USER}:${DENIA_GROUP})"
 }
 
 step_admin_token() {
@@ -551,11 +599,12 @@ step_admin_token() {
     # 32 bytes -> 64 hex chars, meeting AppConfig::from_env's >=64 floor.
     local hex
     hex="$(/usr/bin/head -c 32 /dev/urandom | /usr/bin/od -An -vtx1 | /usr/bin/tr -d ' \n')"
-    install -m 0600 -o root -g root /dev/null "${DENIA_TOKEN_FILE}"
+    install -m 0640 -o "${DENIA_INSTALL_USER}" -g "${DENIA_GROUP}" /dev/null "${DENIA_TOKEN_FILE}"
     # Systemd EnvironmentFile= parses KEY=VALUE lines, so write it in that form.
     /usr/bin/printf 'DENIA_ADMIN_TOKEN=%s\n' "${hex}" > "${DENIA_TOKEN_FILE}"
-    chmod 0600 "${DENIA_TOKEN_FILE}"
-    ok "admin token written to ${DENIA_TOKEN_FILE} (0600 root:root)"
+    chmod 0640 "${DENIA_TOKEN_FILE}"
+    chown "${DENIA_INSTALL_USER}:${DENIA_GROUP}" "${DENIA_TOKEN_FILE}"
+    ok "admin token written to ${DENIA_TOKEN_FILE} (0640 ${DENIA_INSTALL_USER}:${DENIA_GROUP})"
 }
 
 # ----------------------------------------------------------------------------
@@ -575,86 +624,89 @@ step_install_binary() {
 }
 
 # ----------------------------------------------------------------------------
-# Environment file
+# Config file (TOML)
 # ----------------------------------------------------------------------------
 
-write_env_file() {
-    # Every var here is read by src/config.rs (AppConfig::from_env).
-    # Vars NOT included (admin token) live in /etc/denia/admin.token so root
-    # owns them separately and they don't show up in a less-restrictive file.
-    cat > "${DENIA_ENV_FILE}" <<'EOF'
-# /etc/denia/denia.env
-# Mirrors defaults in src/config.rs. The systemd unit also includes
-# /etc/denia/admin.token which provides DENIA_ADMIN_TOKEN (root:root 0600).
+write_config_file() {
+    # TOML config consumed by src/config.rs::FileConfig. The systemd unit pins
+    # DENIA_CONFIG_FILE to this path and BindReadOnlyPaths= bind-mounts the
+    # whole config dir into the daemon's view. The operator owns the file
+    # (denia group has read), so editing requires no sudo. The admin token
+    # lives in admin.token in the same dir, loaded as EnvironmentFile so the
+    # daemon never has to read it via the TOML.
+    cat > "${DENIA_CONFIG_FILE}" <<EOF
+# ${DENIA_CONFIG_FILE}
+# Denia control-plane configuration (TOML; mirrors src/config.rs::FileConfig).
+# Read by the daemon at boot. DENIA_* environment variables in the systemd unit
+# override per-field (see docs/adr/023). The admin token lives in
+# ${DENIA_TOKEN_FILE}; keep it out of this file.
 
 # --- Control plane bind ---
-# DENIA_BIND_ADDR: management API socket. Pingora handles :80/:443; this is
-# only the operator-facing /v1 + /healthz + SPA.
-DENIA_BIND_ADDR=0.0.0.0:7180
+# Management API socket. Pingora handles :80/:443; this is only the
+# operator-facing /v1 + /healthz + SPA.
+bind_addr = "0.0.0.0:7180"
 
 # --- On-disk layout ---
-# DENIA_DATA_DIR: root for sqlite, artifacts, runtime, logs, tls.
-DENIA_DATA_DIR=/var/lib/denia
-# DENIA_DATABASE_PATH: SQLite control-plane file (defaults to <data>/denia.sqlite3).
-DENIA_DATABASE_PATH=/var/lib/denia/sqlite/denia.sqlite3
-# DENIA_TLS_DIR: ACME account key + per-domain fullchain.pem/key.pem.
-DENIA_TLS_DIR=/var/lib/denia/tls
-# DENIA_NODE_DISK_PATH: path whose statvfs() is used for "node disk" metrics.
-DENIA_NODE_DISK_PATH=/var/lib/denia
+data_dir = "${DENIA_HOME}"
+database_path = "${DENIA_HOME}/sqlite/denia.sqlite3"
+tls_dir = "${DENIA_HOME}/tls"
+node_disk_path = "${DENIA_HOME}"
 
 # --- Workload runtime ---
-# DENIA_CGROUP_ROOT: per-workload cgroup parent (under cgroup v2).
-DENIA_CGROUP_ROOT=/sys/fs/cgroup/denia
-# DENIA_USERNS_BASE / DENIA_USERNS_SIZE: subuid/subgid mapping for workloads
-# (see ADR-005). Default 100000 / 65536; raise SIZE if you run many tenants.
-DENIA_USERNS_BASE=100000
-DENIA_USERNS_SIZE=65536
+cgroup_root = "/sys/fs/cgroup/denia"
+# Subuid/subgid mapping for workloads (see ADR-005). Default 100000 / 65536;
+# raise userns_size if you run many workloads.
+userns_base = 100000
+userns_size = 65536
 
-# --- External tool paths (PATH lookup if unset) ---
-# DENIA_BUILDKIT_BINARY=/usr/local/bin/buildctl
-# DENIA_GIT_BINARY=/usr/bin/git
-# DENIA_SOPS_BINARY=/usr/local/bin/sops
-# DENIA_SOCKET_PROXY_BINARY: defaults to the current denia binary (multi-call).
+# --- External tool paths (PATH lookup if commented) ---
+# buildkit_binary = "/usr/local/bin/buildctl"
+# git_binary = "/usr/bin/git"
+# sops_binary = "/usr/local/bin/sops"
 
 # --- Ingress (Pingora) ---
-# DENIA_HTTP_PORT / DENIA_HTTPS_PORT: Pingora L7 listeners. ACME HTTP-01 lives
-# on :80 so keep it 80 unless you front it (don't — Denia owns these).
-DENIA_HTTP_PORT=80
-DENIA_HTTPS_PORT=443
-# DENIA_ACME_DIRECTORY_URL: Let's Encrypt production. For staging/dev use
-# https://acme-staging-v02.api.letsencrypt.org/directory
-DENIA_ACME_DIRECTORY_URL=https://acme-v02.api.letsencrypt.org/directory
-# DENIA_ACME_EMAIL: required if any service has tls_enabled=true.
-# DENIA_ACME_EMAIL=ops@example.com
+# ACME HTTP-01 lives on :80; keep it 80 unless you front it (don't -- Denia
+# owns these).
+http_port = 80
+https_port = 443
+# Let's Encrypt production. Use the staging URL on non-prod nodes:
+# acme_directory_url = "https://acme-staging-v02.api.letsencrypt.org/directory"
+acme_directory_url = "https://acme-v02.api.letsencrypt.org/directory"
+# Required if any service has tls_enabled = true:
+# acme_email = "ops@example.com"
 
 # --- Control-plane TLS gating ---
-# DENIA_CONTROL_DOMAIN: hostname under which /v1 is exposed via Pingora.
-# DENIA_CONTROL_TLS: 1/true to require TLS for the control plane.
-# DENIA_CONTROL_DOMAIN=
-# DENIA_CONTROL_TLS=0
+# control_domain = "denia.example.com"
+# control_tls = false
 
 # --- Autoscaler ---
-DENIA_AUTOSCALE_INTERVAL_S=15
-DENIA_AUTOSCALE_HEADROOM_CPU_MILLIS=1000
-DENIA_AUTOSCALE_HEADROOM_MEM_BYTES=536870912
+autoscale_interval_s = 15
+autoscale_headroom_cpu_millis = 1000
+autoscale_headroom_mem_bytes = 536870912
+
+# --- Control-plane secret encryption (ADR-021) ---
+# Age private key file. The public recipient is auto-derived from the
+# "# public key:" comment unless age_recipient is set explicitly.
+age_key_file = "${DENIA_AGE_KEY_FILE}"
 EOF
-    chmod 0640 "${DENIA_ENV_FILE}"
-    chown root:"${DENIA_GROUP}" "${DENIA_ENV_FILE}"
+    chmod 0640 "${DENIA_CONFIG_FILE}"
+    chown "${DENIA_INSTALL_USER}:${DENIA_GROUP}" "${DENIA_CONFIG_FILE}"
 }
 
-step_env_file() {
-    step "Write ${DENIA_ENV_FILE}"
-    if [[ -f "${DENIA_ENV_FILE}" ]]; then
-        ok "env file already present (keeping; edit by hand to change defaults)"
+step_config_file() {
+    step "Write ${DENIA_CONFIG_FILE}"
+    if [[ -f "${DENIA_CONFIG_FILE}" ]]; then
+        ok "config file already present (keeping; edit by hand to change defaults)"
         return 0
     fi
     if [[ "${DRY_RUN}" -eq 1 ]]; then
-        printf '  %s[dry-run]%s write %s (0640 root:%s)\n' \
-            "${C_YELLOW}" "${C_RESET}" "${DENIA_ENV_FILE}" "${DENIA_GROUP}"
+        printf '  %s[dry-run]%s write %s (0640 %s:%s)\n' \
+            "${C_YELLOW}" "${C_RESET}" "${DENIA_CONFIG_FILE}" \
+            "${DENIA_INSTALL_USER}" "${DENIA_GROUP}"
         return 0
     fi
-    write_env_file
-    ok "${DENIA_ENV_FILE} written"
+    write_config_file
+    ok "${DENIA_CONFIG_FILE} written"
 }
 
 # ----------------------------------------------------------------------------
@@ -677,8 +729,14 @@ User=${DENIA_USER}
 Group=${DENIA_GROUP}
 WorkingDirectory=${DENIA_HOME}
 
-# Env: defaults file + secret token file (token last so it wins on key clash).
-EnvironmentFile=${DENIA_ENV_FILE}
+# Config file is the source of truth (TOML); admin token is supplied via env
+# from a separate file for credential hygiene. Env wins per-field, so the
+# token EnvironmentFile is loaded after the config-file pin.
+# SOPS_AGE_KEY_FILE is read by the external sops binary the daemon shells out
+# to at deploy time (see ADR-021); pinning it here keeps that path consistent
+# with config.toml's age_key_file.
+Environment=DENIA_CONFIG_FILE=${DENIA_CONFIG_FILE}
+Environment=SOPS_AGE_KEY_FILE=${DENIA_AGE_KEY_FILE}
 EnvironmentFile=${DENIA_TOKEN_FILE}
 
 ExecStart=${DENIA_BIN}
@@ -703,13 +761,18 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID
 # applying it post-fork.
 NoNewPrivileges=false
 ProtectSystem=strict
+# ProtectHome=true would hide /home entirely; we keep it true and punch a
+# narrow read-only bind mount through to the operator's denia config dir so
+# the daemon can read config.toml + admin.token + age.key without seeing the
+# rest of the user's home.
 ProtectHome=true
+BindReadOnlyPaths=${DENIA_USER_CONFIG_DIR}
 PrivateTmp=true
 ProtectKernelLogs=true
 ProtectKernelModules=true
 ProtectClock=true
 ProtectControlGroups=false
-ReadWritePaths=${DENIA_HOME} /sys/fs/cgroup /etc/denia
+ReadWritePaths=${DENIA_HOME} /sys/fs/cgroup
 # Denia must be able to mount/unmount inside child namespaces.
 MountFlags=shared
 
@@ -782,15 +845,18 @@ step_summary() {
   Files:
     binary:          ${DENIA_BIN}
     systemd unit:    ${DENIA_SYSTEMD_UNIT}
-    env (defaults):  ${DENIA_ENV_FILE}
-    admin token:     ${DENIA_TOKEN_FILE}    (0600 root:root)
-    age identity:    ${DENIA_HOME}/secrets/age.key
-    data root:       ${DENIA_HOME}
-    cgroup root:     /sys/fs/cgroup/denia
+    config:          ${DENIA_CONFIG_FILE}        (0640 ${DENIA_INSTALL_USER}:${DENIA_GROUP})
+    admin token:     ${DENIA_TOKEN_FILE}         (0640 ${DENIA_INSTALL_USER}:${DENIA_GROUP})
+    age identity:    ${DENIA_AGE_KEY_FILE}       (0640 ${DENIA_INSTALL_USER}:${DENIA_GROUP})
+    data root:       ${DENIA_HOME}               (denia:denia)
+    cgroup root:     /sys/fs/cgroup/denia        (denia:denia)
+
+  Edit config without sudo: \$EDITOR ${DENIA_CONFIG_FILE}
+  Restart after edits:      sudo systemctl restart denia
 
   Next step -- bootstrap the first admin account (one-time):
 
-    TOKEN="\$(sudo cat ${DENIA_TOKEN_FILE} | sed 's/^DENIA_ADMIN_TOKEN=//')"
+    TOKEN="\$(sed -n 's/^DENIA_ADMIN_TOKEN=//p' ${DENIA_TOKEN_FILE})"
     curl -fsS -X POST \\
       -H "Authorization: Bearer \$TOKEN" \\
       -H 'Content-Type: application/json' \\
@@ -822,27 +888,17 @@ do_uninstall() {
     fi
     run_cmd rm -f "${DENIA_BIN}"
 
-    if [[ -d "${DENIA_ETC}" ]]; then
-        if [[ "${DRY_RUN}" -eq 0 ]]; then
-            /bin/echo
-            /usr/bin/printf "Remove %s (contains the admin token and env file)? [y/N] " "${DENIA_ETC}"
-            local ans=""
-            read -r ans || true
-            if [[ "${ans}" =~ ^[Yy]$ ]]; then
-                rm -rf "${DENIA_ETC}"
-                ok "removed ${DENIA_ETC}"
-            else
-                ok "kept ${DENIA_ETC}"
-            fi
-        else
-            printf '  %s[dry-run]%s prompt to remove %s\n' "${C_YELLOW}" "${C_RESET}" "${DENIA_ETC}"
-        fi
-    fi
+    # Operator-owned config (~/.config/denia) is intentionally left in place;
+    # it contains the admin token and age key the user may want to back up or
+    # reuse on reinstall. --purge removes it below.
 
     if [[ "${PURGE}" -eq 1 ]]; then
-        step "--purge: wiping ${DENIA_HOME} and /sys/fs/cgroup/denia"
+        step "--purge: wiping ${DENIA_HOME}, /sys/fs/cgroup/denia, and ${DENIA_USER_CONFIG_DIR}"
         run_cmd rm -rf "${DENIA_HOME}"
         run_cmd rmdir /sys/fs/cgroup/denia 2>/dev/null || true
+        if [[ -n "${DENIA_USER_CONFIG_DIR}" ]] && [[ -d "${DENIA_USER_CONFIG_DIR}" ]]; then
+            run_cmd rm -rf "${DENIA_USER_CONFIG_DIR}"
+        fi
         if /usr/bin/getent passwd "${DENIA_USER}" >/dev/null; then
             run_cmd /usr/sbin/userdel "${DENIA_USER}" || true
         fi
@@ -851,7 +907,7 @@ do_uninstall() {
         fi
         ok "purge complete"
     else
-        ok "data (${DENIA_HOME}) and user '${DENIA_USER}' preserved. Use --purge to remove."
+        ok "data (${DENIA_HOME}), config (${DENIA_USER_CONFIG_DIR}), and user '${DENIA_USER}' preserved. Use --purge to remove."
     fi
 }
 
@@ -864,11 +920,15 @@ main() {
         if [[ "${EUID}" -ne 0 ]]; then
             fail "uninstall requires root"
         fi
+        # Resolve the operator's config-dir path so --purge can wipe it; the
+        # detector also enforces SUDO_USER, matching the install entry path.
+        detect_install_user
         do_uninstall
         exit 0
     fi
 
     step_preflight_os
+    detect_install_user
     step_preflight_kernel
     step_preflight_ports
     step_install_prereqs
@@ -881,7 +941,7 @@ main() {
     step_age_key
     step_admin_token
     step_install_binary
-    step_env_file
+    step_config_file
     step_systemd_unit
     step_start_service
     step_summary

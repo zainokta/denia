@@ -189,48 +189,166 @@ cargo run --release
 The server binds `127.0.0.1:7180` by default and serves the API under `/v1`,
 with the dashboard as a fallback for non-API routes.
 
+## Installation
+
+`install.sh` is the recommended production install path. It must be invoked
+via **sudo from a regular user account** (not directly as root). That user
+becomes the operator: their `~/.config/denia/` holds the config, admin token,
+and age key, edited without sudo. The daemon itself runs unprivileged as a
+dedicated `denia` system user with a narrow capability set.
+
+```bash
+sudo ./install.sh
+```
+
+`--dry-run` previews every command without changing anything. `--skip-build`
+reuses an existing `target/release/denia`. `--uninstall [--purge]` removes
+the service (and, with `--purge`, wipes `/var/lib/denia` and
+`~/.config/denia`).
+
+### What it sets up
+
+| Path | Purpose | Owner / Mode |
+|------|---------|--------------|
+| `/usr/local/bin/denia` | Release binary (multi-call: also the in-namespace socket proxy) | `root:root 0755` |
+| `/etc/systemd/system/denia.service` | Hardened systemd unit | `root:root 0644` |
+| `~/.config/denia/config.toml` | TOML config (operator-editable) | `<user>:denia 0640` |
+| `~/.config/denia/admin.token` | Bootstrap bearer (`DENIA_ADMIN_TOKEN=…`) | `<user>:denia 0640` |
+| `~/.config/denia/age.key` | Age identity for SOPS encryption (ADR-021) | `<user>:denia 0640` |
+| `/var/lib/denia/` | Data dir: SQLite, artifacts, runtime, logs, TLS, OCI cache | `denia:denia 0700` |
+| `/sys/fs/cgroup/denia/` | cgroup v2 parent for workloads (delegated) | `denia:denia 0755` |
+
+The three files under `~/.config/denia/` are mode `0640` owned `<user>:denia`
+so the human reads + writes without sudo and the daemon (running as the
+`denia` user, in the `denia` group) reads via the group bits. The daemon
+never writes to the config directory.
+
+### Privilege model
+
+`denia.service` does **not** run as root. It runs as the unprivileged
+`denia` system user with a tightly-scoped capability set granted via
+`AmbientCapabilities=`:
+
+- `CAP_NET_BIND_SERVICE` — bind Pingora to `:80` / `:443`
+- `CAP_SYS_ADMIN` — create user / mount / pid / uts / ipc namespaces, write
+  cgroup v2 controllers, perform bind mounts and `pivot_root`
+- `CAP_SETUID` / `CAP_SETGID` — write the child's `uid_map` / `gid_map` and
+  drop into the mapped user before exec (see `src/syscall/ns.rs`)
+
+`CapabilityBoundingSet=` is locked to the same set, so a setuid child cannot
+pick up additional caps. cgroup v2 controllers are explicitly delegated to
+denia's slice via `Delegate=yes`. `NoNewPrivileges=` is intentionally `false`
+at the unit level — the workload launcher applies `no_new_privs` and the
+bounding-set drop **per spawned workload** via `rustix`
+(`src/syscall/caps.rs`); doing it at the unit level would block the parent
+from configuring children.
+
+`ProtectHome=true` hides the operator's home directory from the daemon's
+mount namespace; `BindReadOnlyPaths=~/.config/denia` then bind-mounts only
+that subdirectory back in read-only. The daemon sees its config and nothing
+else under `/home`.
+
+> **Treat `CAP_SYS_ADMIN` as root-equivalent for threat modeling.** A process
+> holding it can mount, unmount, manipulate namespaces, and write cgroup
+> controllers — enough to take over the host if the daemon is compromised.
+> See the **Security** section below for residual risk and mitigations.
+
+### Editing config
+
+```bash
+$EDITOR ~/.config/denia/config.toml      # no sudo needed
+sudo systemctl restart denia              # restart picks up the changes
+journalctl -u denia -f                    # tail the log
+```
+
+The systemd unit pins `DENIA_CONFIG_FILE` and `SOPS_AGE_KEY_FILE`; everything
+else flows from `config.toml`. Per-field `DENIA_*` environment variables in
+the unit still override the file (env wins; see ADR-023).
+
+### Bootstrap admin user
+
+The token in `~/.config/denia/admin.token` is a super-admin bearer. Exchange
+it once for a real admin account:
+
+```bash
+TOKEN="$(sed -n 's/^DENIA_ADMIN_TOKEN=//p' ~/.config/denia/admin.token)"
+curl -fsS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"<strong-password>"}' \
+  http://127.0.0.1:7180/v1/bootstrap
+```
+
+Or open the dashboard's `/setup` page and paste the token there.
+
+### Manual install
+
+If you prefer not to run `install.sh`, replicate it by hand. The
+authoritative reference is the script itself; the steps are:
+
+1. Build the binary (with the embedded SPA): `cd web && pnpm install && pnpm build && cd .. && cargo build --release`.
+2. `sudo install -Dm0755 target/release/denia /usr/local/bin/denia`.
+3. Create the system user + group + data layout under `/var/lib/denia` and
+   delegate `/sys/fs/cgroup/denia` (see `install.sh::step_create_user` and
+   `step_create_layout`).
+4. Generate `~/.config/denia/age.key` with `age-keygen` and a 64-hex
+   `~/.config/denia/admin.token` (`DENIA_ADMIN_TOKEN=...` line). Chown both
+   `<user>:denia`, chmod `0640`.
+5. Write `~/.config/denia/config.toml` mirroring
+   `install.sh::write_config_file`.
+6. Drop the unit from `install.sh::write_systemd_unit` into
+   `/etc/systemd/system/denia.service`, substituting your paths.
+7. `sudo systemctl daemon-reload && sudo systemctl enable --now denia`.
+
 ## Configuration
 
-All configuration is environment-driven (`src/config.rs`).
+Configuration is read from a TOML file (`FileConfig` in `src/config.rs`).
+The daemon writes a fully-populated default template on first boot if the
+file is missing; the embedded `admin_token` is freshly generated. Every
+field can be overridden per-field by a `DENIA_*` environment variable — env
+wins. The systemd unit produced by `install.sh` pins `DENIA_CONFIG_FILE` to
+`~/.config/denia/config.toml` for the installing operator. See
+[ADR-023](docs/adr/023-toml-config-file.md).
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `DENIA_ADMIN_TOKEN` | — (**required**) | Bootstrap bearer token for `/v1`; minimum 32 chars |
-| `DENIA_BIND_ADDR` | `127.0.0.1:7180` | Listen address |
-| `DENIA_DATA_DIR` | `/var/lib/denia` | Root for state, artifacts, runtime, logs |
-| `DENIA_DATABASE_PATH` | `<data_dir>/denia.sqlite3` | SQLite path |
-| `DENIA_BUILDKIT_BINARY` | `buildctl` | BuildKit client binary |
-| `DENIA_SOPS_BINARY` | `sops` | SOPS binary |
-| `DENIA_SOCKET_PROXY_BINARY` | current executable | Binary injected into workload rootfs as the socket proxy |
-| `DENIA_CGROUP_ROOT` | `/sys/fs/cgroup/denia` | Root for Denia-owned workload cgroups |
-| `DENIA_ACME_EMAIL` | — (required when any service uses TLS) | ACME account email; omit on nodes with no TLS service |
-| `DENIA_HTTP_PORT` | `80` | Pingora `:80` (HTTP + ACME/denia challenge + HTTP→HTTPS redirect) |
-| `DENIA_HTTPS_PORT` | `443` | Pingora `:443` (TLS, per-SNI certs) |
-| `DENIA_ACME_DIRECTORY_URL` | Let's Encrypt prod | ACME directory; set the LE **staging** URL for non-prod to avoid rate-limit burns |
-| `DENIA_TLS_DIR` | `<data_dir>/tls` | ACME account key + per-domain certs (`0600` in `0700` dirs) |
-| `DENIA_CONTROL_DOMAIN` | — | Optional ingress router for the control plane itself |
-| `DENIA_CONTROL_TLS` | `false` | TLS on the control-plane router |
-| `DENIA_USERNS_BASE` | `100000` | uid/gid base for the workload user namespace |
-| `DENIA_USERNS_SIZE` | `65536` | uid/gid range size for the workload user namespace |
-| `DENIA_NODE_DISK_PATH` | `<data_dir>` | Path used for `statvfs` disk metrics |
-| `DENIA_AUTOSCALE_INTERVAL_S` | `15` | Autoscale control-loop tick interval (seconds) |
-| `DENIA_AUTOSCALE_HEADROOM_CPU_MILLIS` | `1000` | CPU (millicores) held back from the autoscale resource ledger |
-| `DENIA_AUTOSCALE_HEADROOM_MEM_BYTES` | `536870912` | Memory (bytes) held back from the autoscale resource ledger |
-| `DENIA_AGE_RECIPIENT` | — | Age public key used by the control plane to SOPS-encrypt registry credentials. Optional when `DENIA_AGE_KEY_FILE` resolves to a parseable age key file. Required to create or update non-anonymous registries via `/v1/projects/{pid}/registries`. See ADR-021. |
-| `DENIA_AGE_KEY_FILE` | `~/.config/denia/age.key` | Age private key file. When `DENIA_AGE_RECIPIENT` is unset, the control plane reads the `# public key:` comment from this file to auto-derive the recipient. Same format `age-keygen` writes. |
+Path resolution (first match wins): `$DENIA_CONFIG_FILE` → `$XDG_CONFIG_HOME/denia/config.toml`
+→ `$HOME/.config/denia/config.toml` → `/root/.config/denia/config.toml`.
+
+| Env override | TOML key | Default | Purpose |
+|--------------|----------|---------|---------|
+| `DENIA_ADMIN_TOKEN` | `admin_token` | auto-generated 64 hex on first run | Bootstrap bearer for `/v1`; minimum 64 chars |
+| `DENIA_BIND_ADDR` | `bind_addr` | `127.0.0.1:7180` | Listen address |
+| `DENIA_DATA_DIR` | `data_dir` | `/var/lib/denia` | Root for state, artifacts, runtime, logs |
+| `DENIA_DATABASE_PATH` | `database_path` | `<data_dir>/denia.sqlite3` | SQLite path |
+| `DENIA_BUILDKIT_BINARY` | `buildkit_binary` | `buildctl` | BuildKit client binary |
+| `DENIA_SOPS_BINARY` | `sops_binary` | `sops` | SOPS binary |
+| `DENIA_SOCKET_PROXY_BINARY` | `socket_proxy_binary` | current executable | Binary injected into workload rootfs as the socket proxy |
+| `DENIA_CGROUP_ROOT` | `cgroup_root` | `/sys/fs/cgroup/denia` | Root for Denia-owned workload cgroups |
+| `DENIA_ACME_EMAIL` | `acme_email` | — (required when any service uses TLS) | ACME account email; omit on nodes with no TLS service |
+| `DENIA_HTTP_PORT` | `http_port` | `80` | Pingora `:80` (HTTP + ACME/denia challenge + HTTP→HTTPS redirect) |
+| `DENIA_HTTPS_PORT` | `https_port` | `443` | Pingora `:443` (TLS, per-SNI certs) |
+| `DENIA_ACME_DIRECTORY_URL` | `acme_directory_url` | Let's Encrypt prod | ACME directory; set the LE **staging** URL for non-prod to avoid rate-limit burns |
+| `DENIA_TLS_DIR` | `tls_dir` | `<data_dir>/tls` | ACME account key + per-domain certs (`0600` in `0700` dirs) |
+| `DENIA_CONTROL_DOMAIN` | `control_domain` | — | Optional ingress router for the control plane itself |
+| `DENIA_CONTROL_TLS` | `control_tls` | `false` | TLS on the control-plane router |
+| `DENIA_USERNS_BASE` | `userns_base` | `100000` | uid/gid base for the workload user namespace |
+| `DENIA_USERNS_SIZE` | `userns_size` | `65536` | uid/gid range size for the workload user namespace |
+| `DENIA_NODE_DISK_PATH` | `node_disk_path` | `<data_dir>` | Path used for `statvfs` disk metrics |
+| `DENIA_AUTOSCALE_INTERVAL_S` | `autoscale_interval_s` | `15` | Autoscale control-loop tick interval (seconds) |
+| `DENIA_AUTOSCALE_HEADROOM_CPU_MILLIS` | `autoscale_headroom_cpu_millis` | `1000` | CPU (millicores) held back from the autoscale resource ledger |
+| `DENIA_AUTOSCALE_HEADROOM_MEM_BYTES` | `autoscale_headroom_mem_bytes` | `536870912` | Memory (bytes) held back from the autoscale resource ledger |
+| `DENIA_AGE_RECIPIENT` | `age_recipient` | auto-derived from `age_key_file` | Age public key used to SOPS-encrypt registry credentials. Required to create non-anonymous registries via `/v1/projects/{pid}/registries`. See ADR-021. |
+| `DENIA_AGE_KEY_FILE` | `age_key_file` | `~/.config/denia/age.key` | Age private key file. When `age_recipient` is unset, the daemon reads the `# public key:` comment from this file to derive it. Same format `age-keygen` writes. |
 
 Derived paths: `runtime/`, `artifacts/`, `logs/`, and SOPS files under
-`secrets/<project_id>/*.sops.yaml` below `DENIA_DATA_DIR`. Registry credentials
-are configured by POSTing the raw payload (`username`/`password` or `token`) to
-`/v1/projects/{project_id}/registries`; the control plane SOPS-encrypts it under
-the project's secrets directory and stores a generated `credential_ref` on the
-registry row. See ADR-021. Either set `DENIA_AGE_RECIPIENT` explicitly or
-run `age-keygen -o ~/.config/denia/age.key` once (the public key is
-auto-derived from the file's `# public key:` comment, the path is overridable
-via `DENIA_AGE_KEY_FILE`). `SOPS_AGE_KEY_FILE` is still required for
-decryption at deploy time and may point at the same file. Denia no longer
-has `ecr`/`gar` Cargo features or `DENIA_ECR_*` / `DENIA_GAR_*` process-wide
-registry auth variables.
+`secrets/<project_id>/*.sops.yaml` below `data_dir`. Registry credentials are
+configured by POSTing the raw payload (`username`/`password` or `token`) to
+`/v1/projects/{project_id}/registries`; the control plane SOPS-encrypts it
+under the project's secrets directory and stores a generated `credential_ref`
+on the registry row. See ADR-021. `SOPS_AGE_KEY_FILE` is required for
+SOPS decryption at deploy time and is set by the systemd unit; it may point
+at the same file as `age_key_file`. Denia no longer has `ecr`/`gar` Cargo
+features or `DENIA_ECR_*` / `DENIA_GAR_*` process-wide registry auth
+variables.
 
 ## In-Process Ingress
 
@@ -367,12 +485,66 @@ per-aggregate SQLite repositories.
 
 ## Security
 
-- Host root is the explicit trust boundary; the agent runs rootful by design.
+### Trust model
+
+- The Denia daemon is the trust boundary. It runs as the unprivileged `denia`
+  system user but holds `CAP_SYS_ADMIN` plus `CAP_NET_BIND_SERVICE`,
+  `CAP_SETUID`, `CAP_SETGID`. For threat-modeling purposes treat this as
+  **host-root-equivalent**: any RCE in the daemon escalates to host root.
+  This is the same class as `dockerd`, `containerd`, `kubelet`, and
+  `podman` in rootful mode.
+- Workloads run inside unprivileged user namespaces with their `uid 0`
+  mapped to `userns_base` on the host (default `100000`), plus
+  `no_new_privs` and a dropped capability bounding set. They cannot see
+  host `uid 0` or escalate inside their namespace.
+- The single-node design assumes the operator and the workloads belong to
+  the same trust domain. Denia v1 is **not** a multi-tenant adversarial
+  sandbox; if you need to run untrusted code on shared infrastructure, run
+  each tenant on its own host or VM.
+
+### Daemon hardening
+
+The systemd unit shipped by `install.sh` confines the daemon beyond the
+capability scope:
+
+- `ProtectSystem=strict` — `/`, `/usr`, `/boot` read-only.
+- `ProtectHome=true` + `BindReadOnlyPaths=~/.config/denia` — the operator's
+  home is hidden; only the denia config dir is bind-mounted in read-only.
+- `PrivateTmp=true` — private `/tmp`.
+- `ProtectKernelLogs=true`, `ProtectKernelModules=true`, `ProtectClock=true`.
+- `ReadWritePaths=/var/lib/denia /sys/fs/cgroup` — the only writable
+  filesystem surfaces.
+- `CapabilityBoundingSet=` locked to the four caps in `AmbientCapabilities`.
+
+These are intentionally compatible with the operations the daemon must
+perform. Do not enable `NoNewPrivileges=` at the unit level (breaks per-child
+cap-drop), `PrivateUsers=` (breaks the userns workload model),
+`RestrictNamespaces=` (breaks namespace creation), or
+`ProtectControlGroups=` (breaks cgroup v2 writes).
+
+### Operational hygiene
+
+- **Bind the management API to loopback by default.** `bind_addr` defaults
+  to `127.0.0.1:7180`; `install.sh` sets it to `0.0.0.0:7180` for
+  local-network access. Narrow back to `127.0.0.1` or front with a reverse
+  proxy + mTLS / VPN when exposing remotely.
+- **Rotate the admin token.** `~/.config/denia/admin.token` is the
+  super-admin bearer; treat it like a host-root credential. Use
+  `/v1/auth/login` and per-user API tokens for day-to-day callers and
+  reserve the bootstrap token for break-glass.
+- **Patch the host kernel aggressively.** The realistic workload-escape
+  vector is a user-namespace or cgroup CVE, not a Denia bug.
+- **`cargo audit` on every release** for transitive RCE / advisory hits.
+- **Never log secrets.** Tokens, SSH private keys, registry credentials, and
+  decrypted SOPS payloads must never enter logs, traces, or error messages.
+- **Validate external input** at the API and runtime boundary — service
+  names, secret refs, domain strings, process manifests, registry URLs.
+
+### Repo hygiene
+
 - Never commit secrets, local keys, or generated private config.
 - Never log passwords, tokens, SSH private keys, registry credentials, or
   decrypted SOPS payloads.
-- External input is validated at API and runtime boundaries (service names,
-  secret refs, process manifests).
 
 ## References
 
