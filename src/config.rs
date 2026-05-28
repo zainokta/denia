@@ -106,6 +106,7 @@ impl OciCacheVerifyMode {
             _ => None,
         }
     }
+}
 
 /// Default ACME directory: Let's Encrypt production.
 pub const DEFAULT_ACME_DIRECTORY_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
