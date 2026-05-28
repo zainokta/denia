@@ -49,6 +49,13 @@ impl SecretRef {
             })
             .collect()
     }
+
+    /// Generate a fresh SOPS-friendly ref name. Used by the API when the
+    /// caller supplies an inline payload instead of a ref name.
+    pub fn generate(prefix: &str) -> Self {
+        let id = uuid::Uuid::now_v7();
+        Self(format!("{}-{}", prefix, id.simple()))
+    }
 }
 
 impl<'de> Deserialize<'de> for SecretRef {
@@ -82,6 +89,8 @@ pub enum SecretError {
     Json(#[from] serde_json::Error),
     #[error("secret path traversal detected")]
     PathTraversal,
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,5 +149,186 @@ impl SopsSecretStore {
             .await?;
 
         Ok(serde_json::from_str(&output.stdout)?)
+    }
+
+    /// Encrypt `payload` and write the SOPS YAML to
+    /// `<data_dir>/secrets/<project_id>/<ref>.sops.yaml` with mode `0600`.
+    ///
+    /// Plaintext lives only:
+    /// - in memory inside this function,
+    /// - briefly in a `0600` temp file in the same directory (deleted before
+    ///   return, including on encrypt failure).
+    pub async fn encrypt(
+        &self,
+        runner: &dyn CommandRunner,
+        sops_binary: &std::path::Path,
+        age_recipient: &str,
+        project_id: uuid::Uuid,
+        secret_ref: &SecretRef,
+        payload: &SecretPayload,
+    ) -> Result<(), SecretError> {
+        let target = self.secret_path(project_id, secret_ref);
+        let parent = target.parent().expect("secret_path always has parent");
+        tokio::fs::create_dir_all(parent).await?;
+        set_dir_permissions_700(parent)?;
+
+        let plaintext = serde_json::to_vec(payload)?;
+        let plain_name = format!(".{}.{}.json", secret_ref.file_stem(), std::process::id());
+        let plain_path = parent.join(plain_name);
+
+        write_file_mode(&plain_path, &plaintext, 0o600).await?;
+
+        let result = async {
+            let sops_s = sops_binary.to_string_lossy();
+            let plain_s = plain_path.to_string_lossy();
+            let out = runner
+                .run(
+                    &sops_s,
+                    &[
+                        "--encrypt",
+                        "--age",
+                        age_recipient,
+                        "--input-type",
+                        "json",
+                        "--output-type",
+                        "yaml",
+                        plain_s.as_ref(),
+                    ],
+                )
+                .await?;
+            write_file_mode(&target, out.stdout.as_bytes(), 0o600).await?;
+            Ok::<_, SecretError>(())
+        }
+        .await;
+
+        // Always remove plaintext, even on failure.
+        let _ = tokio::fs::remove_file(&plain_path).await;
+        result
+    }
+}
+
+#[cfg(unix)]
+async fn write_file_mode(
+    path: &std::path::Path,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<(), SecretError> {
+    use tokio::io::AsyncWriteExt;
+    let mut f = tokio::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(mode)
+        .open(path)
+        .await?;
+    f.write_all(bytes).await?;
+    f.flush().await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_dir_permissions_700(path: &std::path::Path) -> Result<(), SecretError> {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(0o700);
+    std::fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod encrypt_tests {
+    use super::*;
+    use crate::command::{CommandOutput, FakeCommandRunner};
+    use tempfile::tempdir;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn encrypt_writes_sops_yaml_with_age_recipient() {
+        let dir = tempdir().unwrap();
+        let store = SopsSecretStore::new(dir.path());
+        let pid = Uuid::now_v7();
+        let secret_ref = SecretRef::parse("test-ref").unwrap();
+
+        let fake_yaml = "data: ENC[AES256_GCM,...]\nsops:\n  age: []\n";
+        let runner = FakeCommandRunner::new(vec![CommandOutput {
+            status: 0,
+            stdout: fake_yaml.to_string(),
+            stderr: String::new(),
+        }]);
+
+        store
+            .encrypt(
+                &runner,
+                std::path::Path::new("sops"),
+                "age1qy0testrecipient",
+                pid,
+                &secret_ref,
+                &SecretPayload::new("alice:s3cret"),
+            )
+            .await
+            .expect("encrypt ok");
+
+        let target = store.secret_path(pid, &secret_ref);
+        let written = std::fs::read_to_string(&target).expect("encrypted file written");
+        assert_eq!(written, fake_yaml);
+
+        let leftovers: Vec<_> = std::fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+            .collect();
+        assert!(leftovers.is_empty(), "plaintext temp not cleaned");
+
+        let cmd = runner.commands();
+        assert_eq!(cmd.len(), 1);
+        assert!(
+            cmd[0].starts_with(
+                "sops --encrypt --age age1qy0testrecipient --input-type json --output-type yaml "
+            ),
+            "got: {}",
+            cmd[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn encrypt_propagates_command_failure_and_cleans_plaintext() {
+        let dir = tempdir().unwrap();
+        let store = SopsSecretStore::new(dir.path());
+        let pid = Uuid::now_v7();
+        let secret_ref = SecretRef::parse("fail-ref").unwrap();
+
+        let runner = FakeCommandRunner::new(vec![]); // no outputs -> NoFakeOutput
+
+        let err = store
+            .encrypt(
+                &runner,
+                std::path::Path::new("sops"),
+                "age1qy0recipient",
+                pid,
+                &secret_ref,
+                &SecretPayload::new("x"),
+            )
+            .await
+            .expect_err("expected encrypt failure");
+        assert!(matches!(err, SecretError::Command(_)));
+
+        let target = store.secret_path(pid, &secret_ref);
+        let parent = target.parent().unwrap();
+        assert!(parent.exists(), "parent dir was created");
+        let leftovers: Vec<_> = std::fs::read_dir(parent).unwrap().collect();
+        assert!(
+            leftovers.iter().all(|e| {
+                let p = e.as_ref().unwrap().path();
+                p.extension().and_then(|s| s.to_str()) != Some("json")
+            }),
+            "plaintext .json left behind on encrypt failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn secret_ref_generate_produces_parseable_ref() {
+        let r = SecretRef::generate("registry");
+        assert!(r.as_str().starts_with("registry-"));
+        let reparsed = SecretRef::parse(r.as_str().to_string()).expect("parse generated ref");
+        assert_eq!(reparsed.as_str(), r.as_str());
     }
 }
