@@ -83,6 +83,7 @@ pub fn read_oci_layout(layout_dir: &Path) -> Result<PulledImage, OciError> {
         config,
         layers,
         _staging: None,
+        _cache_reservations: Vec::new(),
     })
 }
 
