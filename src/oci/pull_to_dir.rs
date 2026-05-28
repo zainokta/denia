@@ -79,6 +79,7 @@ mod tests {
                     path: PathBuf::from("/dev/null"),
                 }],
                 _staging: None,
+                _cache_reservations: Vec::new(),
             })
         }
         async fn read_layout(&self, _d: &Path) -> Result<PulledImage, OciError> {
