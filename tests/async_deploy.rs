@@ -156,3 +156,74 @@ async fn get_deployment_returns_row() {
     assert_eq!(fetched.id, deployment.id);
     assert_eq!(fetched.service_id, service.id);
 }
+
+#[tokio::test]
+async fn deployment_log_stream_returns_text_event_stream() {
+    let store = SqliteStore::open_in_memory().expect("open sqlite");
+    store.migrate().expect("migrate");
+    let state = AppState::new(AppConfig::for_test(ADMIN_TOKEN), &store);
+
+    let project = Project::new("team-sse", None).expect("project");
+    state
+        .projects
+        .put_project(project.clone())
+        .expect("project stored");
+    let svc = ServiceConfig::new(
+        project.id,
+        "web",
+        vec!["sse.example.test".into()],
+        ServiceSource::ExternalImage(ExternalImageSource {
+            image: "alpine:3".into(),
+            credential: None,
+            registry_id: None,
+            image_ref: None,
+        }),
+        3000,
+        HealthCheck::new("/ready", 5),
+        Some(ResourceLimits::default()),
+        vec![],
+    )
+    .expect("valid service");
+    let service = state.services.put_service(svc).expect("service stored");
+
+    let deployment = state
+        .deployments
+        .create_deployment(DeploymentRequest::external_image(service.id, "alpine:3"))
+        .expect("create deployment row");
+
+    // Pre-create the per-deployment log file with at least one line so the
+    // tailer has backlog to flush at stream open. The handler still returns
+    // 200 + text/event-stream regardless, but seeding the file matches what
+    // the operator console sees in production.
+    let log = denia::deploy::log::DeploymentLogWriter::create(&state.config.log_dir, deployment.id)
+        .expect("open deployment log");
+    log.write("START", "hello").expect("seed backlog line");
+
+    let app = build_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/deployments/{}/logs", deployment.id))
+                .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("request completed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let ct = response
+        .headers()
+        .get("content-type")
+        .expect("content-type header present")
+        .to_str()
+        .expect("content-type is ASCII");
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "expected SSE content-type, got {ct:?}",
+    );
+    // Do not consume the body — the stream is infinite until the deployment
+    // reaches a terminal status. Dropping the response closes the channel.
+    drop(response);
+}

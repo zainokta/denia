@@ -2,8 +2,12 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
+use std::convert::Infallible;
+use std::time::Duration;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::ApiError;
 use crate::app::AppState;
@@ -11,11 +15,22 @@ use crate::artifacts::acquirer::ArtifactAcquirer;
 use crate::auth::{Principal, ensure_role};
 use crate::deploy::DeploymentCoordinator;
 use crate::domain::{DeploymentRequest, Role};
+use crate::logs::LogTailer;
+
+/// Process-wide cap on concurrent SSE deployment-log streams. Each stream
+/// holds a long-lived task polling a file; an unbounded number of clients
+/// could exhaust tasks/file descriptors (mirrors F-8 mitigation in services).
+static DEPLOYMENT_LOG_STREAM_LIMIT: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(64)));
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/deployments", post(create_deployment))
         .route("/deployments/{deployment_id}", get(get_deployment))
+        .route(
+            "/deployments/{deployment_id}/logs",
+            get(deployment_log_stream),
+        )
         .route(
             "/services/{service_id}/deployments",
             get(list_service_deployments),
@@ -125,4 +140,90 @@ async fn get_deployment(
     };
     ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
     Ok(Json(deployment))
+}
+
+/// `GET /v1/deployments/{deployment_id}/logs` — SSE tail of the per-deployment
+/// log file written by the deploy task (ADR-024).
+///
+/// Mirrors the service-log SSE pattern: bounded by a process-wide semaphore,
+/// emits the whole backlog up-front (deploy logs are short and operators want
+/// the full story), then polls every 300ms. The stream terminates with a
+/// `done` event once the deployment status is terminal (`Healthy`, `Failed`,
+/// or `Stopped`) AND the latest poll returned zero new lines — guaranteeing
+/// we don't truncate trailing output that landed in the same tick as the
+/// status flip.
+async fn deployment_log_stream(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(deployment_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<impl axum::response::IntoResponse, ApiError> {
+    let Some(deployment) = state.deployments.get_deployment(deployment_id)? else {
+        return Err(ApiError::NotFound("deployment not found".to_string()));
+    };
+    let Some(service) = state.services.get_service(deployment.service_id)? else {
+        return Err(ApiError::NotFound("service not found".to_string()));
+    };
+    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
+
+    let permit = DEPLOYMENT_LOG_STREAM_LIMIT
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            ApiError::TooManyRequests("too many concurrent deployment log streams".to_string())
+        })?;
+
+    let log_path = crate::deploy::log::deployment_log_path(&state.config.log_dir, deployment_id);
+    let store = state.deployments.clone();
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(256);
+
+    tokio::spawn(async move {
+        let _permit = permit;
+        let mut tailer = LogTailer::new(&log_path);
+
+        // Emit the entire backlog up-front. Deploy logs are short and the
+        // operator wants the whole story; use a large bound rather than the
+        // 200-line cap used for service logs.
+        if let Ok(lines) = tokio::task::block_in_place(|| tailer.backlog(10_000)) {
+            for line in lines {
+                if tx.send(Ok(Event::default().data(line))).await.is_err() {
+                    return;
+                }
+            }
+        }
+
+        let mut interval = tokio::time::interval(Duration::from_millis(300));
+        loop {
+            interval.tick().await;
+            let lines = tokio::task::block_in_place(|| tailer.poll()).unwrap_or_default();
+            let polled = lines.len();
+            for line in lines {
+                if tx.send(Ok(Event::default().data(line))).await.is_err() {
+                    return;
+                }
+            }
+            // Close the stream once the deployment has reached a terminal
+            // state AND the tailer caught up to EOF (no new lines this tick).
+            // Polling for a status row that disappeared (deleted service /
+            // store error) is treated as non-terminal so we don't truncate a
+            // healthy in-progress stream on a transient repo blip.
+            if polled == 0
+                && let Ok(Some(d)) = store.get_deployment(deployment_id)
+            {
+                let terminal = matches!(
+                    d.status,
+                    crate::domain::DeploymentStatus::Healthy
+                        | crate::domain::DeploymentStatus::Failed
+                        | crate::domain::DeploymentStatus::Stopped
+                );
+                if terminal {
+                    let _ = tx.send(Ok(Event::default().event("done").data(""))).await;
+                    return;
+                }
+            }
+        }
+    });
+
+    Ok(Sse::new(ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
