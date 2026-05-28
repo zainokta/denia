@@ -86,6 +86,9 @@ export function ProjectDetail() {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [newUserId, setNewUserId] = useState<string>('')
   const [newRole, setNewRole] = useState<Role>('viewer')
+  const [addMemberError, setAddMemberError] = useState('')
+  const [removeMemberError, setRemoveMemberError] = useState('')
+  const [memberRemoveConfirm, setMemberRemoveConfirm] = useState<string | null>(null)
 
   const { data: project, isFetching } = useQuery({
     queryKey: ['projects', projectId],
@@ -106,9 +109,15 @@ export function ProjectDetail() {
       runQuery(addMember(projectId, input.userId, input.role)),
     onSuccess: () => {
       setNewUserId('')
+      setAddMemberError('')
       queryClient.invalidateQueries({
         queryKey: ['projects', projectId, 'members'],
       })
+    },
+    onError: (error: unknown) => {
+      setAddMemberError(
+        error instanceof Error ? error.message : 'Failed to add member',
+      )
     },
   })
 
@@ -116,9 +125,17 @@ export function ProjectDetail() {
     mutationFn: (userId: string) =>
       runQuery(removeMember(projectId, userId)),
     onSuccess: () => {
+      setMemberRemoveConfirm(null)
+      setRemoveMemberError('')
       queryClient.invalidateQueries({
         queryKey: ['projects', projectId, 'members'],
       })
+    },
+    onError: (error: unknown) => {
+      setRemoveMemberError(
+        error instanceof Error ? error.message : 'Failed to remove member',
+      )
+      setMemberRemoveConfirm(null)
     },
   })
 
@@ -210,33 +227,39 @@ export function ProjectDetail() {
     setEditCredRef(r.credential_ref ?? '')
   }
 
+  const [regDeleteErrorFor, setRegDeleteErrorFor] = useState<string | null>(null)
+
   const deleteRegMutation = useMutation({
     mutationFn: (registryId: string) =>
       runQuery(deleteRegistry(projectId, registryId)),
     onSuccess: () => {
       setRegDeleteConfirm(null)
       setRegDeleteError('')
+      setRegDeleteErrorFor(null)
       queryClient.invalidateQueries({
         queryKey: ['projects', projectId, 'registries'],
       })
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, registryId: string) => {
       const msg =
         error instanceof Error ? error.message : ''
       setRegDeleteError(
         msg.toLowerCase().includes('in use')
           ? 'Registry is in use by one or more services.'
-          : msg,
+          : msg || 'Failed to delete registry.',
       )
+      setRegDeleteErrorFor(registryId)
       setRegDeleteConfirm(null)
     },
   })
 
   if (isFetching && !project) {
     return (
-      <main className="page-wrap px-4 pb-12 pt-12">
+      <main className="page-wrap px-4 pb-12 pt-12" aria-busy="true">
         <p className="kicker mb-3">projects</p>
-        <p className="text-[var(--fg-muted)]">loading...</p>
+        <p className="text-[var(--fg-muted)]" aria-live="polite">
+          loading...
+        </p>
       </main>
     )
   }
@@ -252,12 +275,17 @@ export function ProjectDetail() {
 
   return (
     <main className="page-wrap px-4 pb-12 pt-12">
-      <p className="kicker mb-3">
-        <Link to="/projects" className="no-underline hover:underline">
-          projects
-        </Link>{' '}
-        / {project.name}
-      </p>
+      <nav aria-label="Breadcrumb" className="mb-3">
+        <ol className="kicker m-0 flex list-none flex-wrap items-center gap-x-2 p-0">
+          <li>
+            <Link to="/projects" className="no-underline hover:underline">
+              projects
+            </Link>
+          </li>
+          <li aria-hidden="true">/</li>
+          <li aria-current="page">{project.name}</li>
+        </ol>
+      </nav>
       <h1 className="mb-6 text-2xl font-semibold tracking-tight text-[var(--fg)]">
         {project.name}
       </h1>
@@ -328,6 +356,17 @@ export function ProjectDetail() {
         <h2 className="kicker border-b border-[var(--border)] px-4 py-2.5">
           members
         </h2>
+
+        {removeMemberError ? (
+          <div
+            role="alert"
+            className="border-b border-[var(--border)] px-4 py-2 text-xs text-[var(--violet)]"
+          >
+            <span className="signal signal-fault mr-2 inline-block align-middle" />
+            {removeMemberError}
+          </div>
+        ) : null}
+
         {members.length === 0 ? (
           <p className="px-4 py-3 text-sm text-[var(--fg-muted)]">
             No members yet.
@@ -346,61 +385,95 @@ export function ProjectDetail() {
                 </span>
                 <span className="kicker">{m.role}</span>
                 {canManage ? (
-                  <button
-                    type="button"
-                    className="btn text-xs ml-auto"
-                    onClick={() => removeMemberMutation.mutate(m.user_id)}
-                    disabled={removeMemberMutation.isPending}
-                  >
-                    remove
-                  </button>
+                  memberRemoveConfirm === m.user_id ? (
+                    <span className="inline-flex items-center gap-1 text-xs ml-auto">
+                      <span className="text-[var(--violet)]">remove?</span>
+                      <button
+                        type="button"
+                        className="btn btn-danger text-xs"
+                        onClick={() => removeMemberMutation.mutate(m.user_id)}
+                        disabled={removeMemberMutation.isPending}
+                      >
+                        yes
+                      </button>
+                      <button
+                        type="button"
+                        className="btn text-xs"
+                        onClick={() => setMemberRemoveConfirm(null)}
+                      >
+                        no
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn text-xs ml-auto"
+                      onClick={() => {
+                        setRemoveMemberError('')
+                        setMemberRemoveConfirm(m.user_id)
+                      }}
+                      disabled={removeMemberMutation.isPending}
+                    >
+                      remove
+                    </button>
+                  )
                 ) : null}
               </li>
             ))}
           </ul>
         )}
         {canManage ? (
-          <form
-            className="flex flex-wrap items-end gap-2 border-t border-[var(--border)] px-4 py-3"
-            onSubmit={(e) => {
-              e.preventDefault()
-              const userId = newUserId.trim()
-              if (!userId) return
-              addMemberMutation.mutate({ userId, role: newRole })
-            }}
-          >
-            <label htmlFor="add-member-user" className="sr-only">
-              User id (uuid)
-            </label>
-            <input
-              id="add-member-user"
-              type="text"
-              placeholder="user id (uuid)"
-              value={newUserId}
-              onChange={(e) => setNewUserId(e.target.value)}
-              className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono"
-            />
-            <label htmlFor="add-member-role" className="sr-only">
-              Member role
-            </label>
-            <select
-              id="add-member-role"
-              value={newRole}
-              onChange={(e) => setNewRole(e.target.value as Role)}
-              className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm"
+          <>
+            {addMemberError ? (
+              <div
+                role="alert"
+                className="border-t border-[var(--border)] px-4 py-2 text-xs text-[var(--violet)]"
+              >
+                {addMemberError}
+              </div>
+            ) : null}
+            <form
+              className="flex flex-wrap items-end gap-2 border-t border-[var(--border)] px-4 py-3"
+              onSubmit={(e) => {
+                e.preventDefault()
+                const userId = newUserId.trim()
+                if (!userId) return
+                addMemberMutation.mutate({ userId, role: newRole })
+              }}
             >
-              <option value="viewer">viewer</option>
-              <option value="operator">operator</option>
-              <option value="admin">admin</option>
-            </select>
-            <button
-              type="submit"
-              className="btn btn-primary text-xs"
-              disabled={addMemberMutation.isPending}
-            >
-              {addMemberMutation.isPending ? 'adding…' : 'add member'}
-            </button>
-          </form>
+              <label htmlFor="add-member-user" className="sr-only">
+                User id (uuid)
+              </label>
+              <input
+                id="add-member-user"
+                type="text"
+                placeholder="user id (uuid)"
+                value={newUserId}
+                onChange={(e) => setNewUserId(e.target.value)}
+                className="field-input"
+              />
+              <label htmlFor="add-member-role" className="sr-only">
+                Member role
+              </label>
+              <select
+                id="add-member-role"
+                value={newRole}
+                onChange={(e) => setNewRole(e.target.value as Role)}
+                className="field-input"
+              >
+                <option value="viewer">viewer</option>
+                <option value="operator">operator</option>
+                <option value="admin">admin</option>
+              </select>
+              <button
+                type="submit"
+                className="btn btn-primary text-xs"
+                disabled={addMemberMutation.isPending}
+              >
+                {addMemberMutation.isPending ? 'adding...' : 'add member'}
+              </button>
+            </form>
+          </>
         ) : null}
       </section>
 
@@ -409,13 +482,6 @@ export function ProjectDetail() {
           <h2 className="kicker border-b border-[var(--border)] px-4 py-2.5">
             registries
           </h2>
-
-          {regDeleteError ? (
-            <div role="alert" className="px-4 py-2 text-xs text-[var(--violet)]">
-              <span className="signal signal-fault mr-2 inline-block align-middle" />
-              {regDeleteError}
-            </div>
-          ) : null}
 
           {registries.length === 0 ? (
             <p className="px-4 py-3 text-sm text-[var(--fg-muted)]">
@@ -458,7 +524,7 @@ export function ProjectDetail() {
                         placeholder="name"
                         value={editName}
                         onChange={(e) => setEditName(e.target.value)}
-                        className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono text-[var(--fg)]"
+                        className="field-input"
                       />
                       <input
                         type="text"
@@ -466,7 +532,7 @@ export function ProjectDetail() {
                         placeholder="endpoint"
                         value={editEndpoint}
                         onChange={(e) => setEditEndpoint(e.target.value)}
-                        className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono text-[var(--fg)]"
+                        className="field-input"
                       />
                       <select
                         aria-label="edit registry auth kind"
@@ -476,7 +542,7 @@ export function ProjectDetail() {
                             e.target.value as RegistryInput['auth_kind'],
                           )
                         }
-                        className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm text-[var(--fg)]"
+                        className="field-input"
                       >
                         {AUTH_KINDS.map(([value, label]) => (
                           <option key={value} value={value}>
@@ -490,7 +556,7 @@ export function ProjectDetail() {
                         placeholder="credential ref (optional)"
                         value={editCredRef}
                         onChange={(e) => setEditCredRef(e.target.value)}
-                        className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono text-[var(--fg)]"
+                        className="field-input"
                       />
                       <button
                         type="submit"
@@ -539,7 +605,7 @@ export function ProjectDetail() {
                           <span className="text-[var(--violet)]">remove?</span>
                           <button
                             type="button"
-                            className="btn text-xs"
+                            className="btn btn-danger text-xs"
                             onClick={() => {
                               deleteRegMutation.mutate(r.id)
                             }}
@@ -567,7 +633,11 @@ export function ProjectDetail() {
                           <button
                             type="button"
                             className="btn text-xs"
-                            onClick={() => setRegDeleteConfirm(r.id)}
+                            onClick={() => {
+                              setRegDeleteError('')
+                              setRegDeleteErrorFor(null)
+                              setRegDeleteConfirm(r.id)
+                            }}
                           >
                             delete
                           </button>
@@ -575,6 +645,15 @@ export function ProjectDetail() {
                       )}
                     </div>
                   )}
+                  {regDeleteErrorFor === r.id && regDeleteError ? (
+                    <div
+                      role="alert"
+                      className="mt-2 text-xs text-[var(--violet)]"
+                    >
+                      <span className="signal signal-fault mr-2 inline-block align-middle" />
+                      {regDeleteError}
+                    </div>
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -613,7 +692,7 @@ export function ProjectDetail() {
               placeholder="name"
               value={regName}
               onChange={(e) => setRegName(e.target.value)}
-              className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono text-[var(--fg)]"
+              className="field-input"
             />
             <label htmlFor="reg-endpoint" className="sr-only">
               Registry endpoint
@@ -624,7 +703,7 @@ export function ProjectDetail() {
               placeholder="endpoint"
               value={regEndpoint}
               onChange={(e) => setRegEndpoint(e.target.value)}
-              className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono text-[var(--fg)]"
+              className="field-input"
             />
             <label htmlFor="reg-auth-kind" className="sr-only">
               Auth kind
@@ -635,7 +714,7 @@ export function ProjectDetail() {
               onChange={(e) =>
                 setRegAuthKind(e.target.value as RegistryInput['auth_kind'])
               }
-              className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm text-[var(--fg)]"
+              className="field-input"
             >
               {AUTH_KINDS.map(([value, label]) => (
                 <option key={value} value={value}>
@@ -652,7 +731,7 @@ export function ProjectDetail() {
               placeholder="credential ref (optional)"
               value={regCredRef}
               onChange={(e) => setRegCredRef(e.target.value)}
-              className="border border-[var(--border)] bg-transparent px-2 py-2 text-sm font-mono text-[var(--fg)]"
+              className="field-input"
             />
             <button
               type="submit"
@@ -685,7 +764,7 @@ export function ProjectDetail() {
             </span>
             <button
               type="button"
-              className="btn text-xs"
+              className="btn btn-danger text-xs"
               onClick={() => {
                 setDeleteError('')
                 setConfirmDelete(false)

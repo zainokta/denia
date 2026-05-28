@@ -204,7 +204,7 @@ export function JobsIndex() {
                     type="text"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
+                    className="field-input w-full"
                     required
                   />
                 </div>
@@ -215,7 +215,7 @@ export function JobsIndex() {
                         aria-label="registry"
                         value={registryId}
                         onChange={(e) => setRegistryId(e.target.value)}
-                        className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
+                        className="field-input w-full"
                       >
                         <option value="">select registry</option>
                         {registries.map((r) => (
@@ -232,7 +232,7 @@ export function JobsIndex() {
                         type="text"
                         value={imageRef}
                         onChange={(e) => setImageRef(e.target.value)}
-                        className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
+                        className="field-input w-full"
                       />
                     </div>
                   </>
@@ -244,7 +244,7 @@ export function JobsIndex() {
                       type="text"
                       value={image}
                       onChange={(e) => setImage(e.target.value)}
-                      className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
+                      className="field-input w-full"
                     />
                   </div>
                 )}
@@ -285,7 +285,7 @@ export function JobsIndex() {
                     type="text"
                     value={command}
                     onChange={(e) => setCommand(e.target.value)}
-                    className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
+                    className="field-input w-full"
                   />
                 </div>
                 <div className="flex-1 min-w-0">
@@ -294,7 +294,7 @@ export function JobsIndex() {
                     type="text"
                     value={schedule}
                     onChange={(e) => setSchedule(e.target.value)}
-                    className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
+                    className="field-input w-full"
                   />
                 </div>
                 <div className="w-20">
@@ -303,7 +303,7 @@ export function JobsIndex() {
                     type="number"
                     value={maxRetries}
                     onChange={(e) => setMaxRetries(parseInt(e.target.value) || 0)}
-                    className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
+                    className="field-input w-full"
                   />
                 </div>
               </div>
@@ -313,7 +313,7 @@ export function JobsIndex() {
                   value={envStr}
                   onChange={(e) => setEnvStr(e.target.value)}
                   rows={3}
-                  className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] font-mono focus:outline-none focus:border-[var(--pink)]"
+                  className="field-input w-full"
                 />
               </div>
               {createError && (

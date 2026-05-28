@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import type { Service, ServiceInput } from '#/effect/schema'
+import { DomainTagInput } from '#/components/DomainTagInput'
+import { FieldHint } from '#/components/FieldHint'
 
 type ServiceSourceValue = Service['source']
 type SourceType = ServiceSourceValue['type']
@@ -30,18 +32,10 @@ interface EnvRow {
   value: string
 }
 
-const inputClass =
-  'field-input border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]'
+const inputClass = 'field-input'
 
 function envFromInitial(env: ReadonlyArray<readonly [string, string]>): EnvRow[] {
   return env.map(([key, value]) => ({ id: crypto.randomUUID(), key, value }))
-}
-
-function parseDomains(raw: string): string[] {
-  return raw
-    .split(/[\s,]+/)
-    .map((d) => d.trim())
-    .filter((d) => d.length > 0)
 }
 
 export function ServiceForm({
@@ -62,7 +56,9 @@ export function ServiceForm({
     initial?.project_id ?? projects[0]?.id ?? '',
   )
   const [name, setName] = useState(initial?.name ?? '')
-  const [domains, setDomains] = useState(initial?.domains.join(', ') ?? '')
+  const [domains, setDomains] = useState<string[]>(
+    initial?.domains ? [...initial.domains] : [],
+  )
   const [internalPort, setInternalPort] = useState(
     initial ? String(initial.internal_port) : '',
   )
@@ -169,7 +165,7 @@ export function ServiceForm({
     }
   }
 
-  const parsedDomains = parseDomains(domains)
+  const parsedDomains = domains
   const port = Number.parseInt(internalPort, 10)
   const portValid = Number.isInteger(port) && port > 0
   const source = buildSource()
@@ -200,7 +196,7 @@ export function ServiceForm({
   const labelClass = (field: RequiredField, bad: boolean) =>
     `kicker req${err(field, bad) ? ' err' : ''}`
 
-  const handleSubmit: React.FormEventHandler<HTMLFormElement> = (e) => {
+  const handleSubmit = (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault()
     if (!valid || source === undefined) return
 
@@ -283,11 +279,19 @@ export function ServiceForm({
           type="text"
           aria-required="true"
           aria-invalid={err('name', nameEmpty)}
+          aria-describedby={
+            err('name', nameEmpty) ? 'sf-name-error' : undefined
+          }
           className={fieldClass('name', nameEmpty)}
           value={name}
           onChange={(e) => setName(e.target.value)}
           onBlur={() => markTouched('name')}
         />
+        {err('name', nameEmpty) ? (
+          <p id="sf-name-error" className="field-error" role="alert">
+            name is required
+          </p>
+        ) : null}
       </div>
 
       <div className="mb-4 flex flex-col gap-1">
@@ -295,14 +299,15 @@ export function ServiceForm({
           domains{' '}
           <span className="text-xs text-[var(--fg-muted)]">(optional)</span>
         </label>
-        <input
+        <DomainTagInput
           id="sf-domains"
-          type="text"
-          placeholder="comma or space separated"
-          className={inputClass}
           value={domains}
-          onChange={(e) => setDomains(e.target.value)}
+          onChange={setDomains}
+          ariaDescribedBy="sf-domains-help"
         />
+        <p id="sf-domains-help" className="field-help">
+          press space, comma, or enter to add
+        </p>
       </div>
 
       <div className="mb-5 flex flex-col gap-1">
@@ -316,18 +321,27 @@ export function ServiceForm({
           min={1}
           aria-required="true"
           aria-invalid={err('port', !portValid)}
+          aria-describedby={
+            err('port', !portValid) ? 'sf-port-error' : undefined
+          }
           className={`${fieldClass('port', !portValid)} w-32 tnum`}
           value={internalPort}
           onChange={(e) => setInternalPort(e.target.value)}
           onBlur={() => markTouched('port')}
         />
+        {err('port', !portValid) ? (
+          <p id="sf-port-error" className="field-error" role="alert">
+            port must be a positive integer
+          </p>
+        ) : null}
       </div>
 
       <fieldset className="mb-4 flex flex-wrap items-center gap-4 text-sm">
         <legend className="kicker mb-1">source type</legend>
-        <label className="inline-flex items-center gap-1.5 text-[var(--fg)]">
+        <label className="inline-flex items-center gap-2 text-[var(--fg)]">
           <input
             type="radio"
+            className="field-check"
             aria-label="source type git"
             name="sf-sourceType"
             value="git"
@@ -336,9 +350,10 @@ export function ServiceForm({
           />
           Git
         </label>
-        <label className="inline-flex items-center gap-1.5 text-[var(--fg)]">
+        <label className="inline-flex items-center gap-2 text-[var(--fg)]">
           <input
             type="radio"
+            className="field-check"
             aria-label="source type external image"
             name="sf-sourceType"
             value="external_image"
@@ -350,85 +365,132 @@ export function ServiceForm({
       </fieldset>
 
       {sourceType === 'git' ? (
-        <div className="mb-5 flex flex-wrap items-end gap-2">
-          <div className="flex flex-col gap-1">
-            <label className="kicker req" htmlFor="sf-git-repo">
-              repo url
-            </label>
-            <input
-              id="sf-git-repo"
-              type="text"
-              aria-required="true"
-              placeholder="https://github.com/org/repo"
-              value={gitRepoUrl}
-              onChange={(e) => setGitRepoUrl(e.target.value)}
-              className={`${inputClass} w-full sm:w-72`}
-            />
+        <div className="mb-5">
+          <div className="form-section">
+            <div className="form-grid">
+              <div className="flex flex-col gap-1 col-span-12 sm:col-span-8">
+                <label className="kicker req" htmlFor="sf-git-repo">
+                  repo url
+                </label>
+                <input
+                  id="sf-git-repo"
+                  type="text"
+                  aria-required="true"
+                  placeholder="https://github.com/org/repo"
+                  value={gitRepoUrl}
+                  onChange={(e) => setGitRepoUrl(e.target.value)}
+                  className={`${inputClass} w-full`}
+                />
+              </div>
+              <div className="flex flex-col gap-1 col-span-12 sm:col-span-4">
+                <label className="kicker" htmlFor="sf-git-ref">
+                  branch/tag
+                </label>
+                <input
+                  id="sf-git-ref"
+                  type="text"
+                  placeholder="main"
+                  value={gitRef}
+                  onChange={(e) => setGitRef(e.target.value)}
+                  className={`${inputClass} w-full`}
+                />
+              </div>
+            </div>
           </div>
-          <div className="flex flex-col gap-1">
-            <label className="kicker" htmlFor="sf-git-ref">
-              branch/tag
-            </label>
-            <input
-              id="sf-git-ref"
-              type="text"
-              placeholder="main"
-              value={gitRef}
-              onChange={(e) => setGitRef(e.target.value)}
-              className={inputClass}
-            />
+
+          <div className="form-section">
+            <div className="form-section-head">
+              <p className="kicker">build</p>
+              <span className="text-xs text-[var(--fg-muted)]">
+                relative to repo root
+              </span>
+            </div>
+            <div className="form-grid">
+              <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                <label className="kicker" htmlFor="sf-git-dockerfile">
+                  dockerfile path
+                </label>
+                <input
+                  id="sf-git-dockerfile"
+                  type="text"
+                  placeholder="Dockerfile"
+                  value={gitDockerfilePath}
+                  onChange={(e) => setGitDockerfilePath(e.target.value)}
+                  className={`${inputClass} w-full`}
+                />
+              </div>
+              <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                <label className="kicker" htmlFor="sf-git-context">
+                  context path
+                </label>
+                <input
+                  id="sf-git-context"
+                  type="text"
+                  placeholder="."
+                  value={gitContextPath}
+                  onChange={(e) => setGitContextPath(e.target.value)}
+                  className={`${inputClass} w-full`}
+                />
+              </div>
+            </div>
           </div>
-          <div className="flex flex-col gap-1">
-            <label className="kicker" htmlFor="sf-git-dockerfile">
-              dockerfile path
-            </label>
-            <input
-              id="sf-git-dockerfile"
-              type="text"
-              placeholder="Dockerfile"
-              value={gitDockerfilePath}
-              onChange={(e) => setGitDockerfilePath(e.target.value)}
-              className={inputClass}
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="kicker" htmlFor="sf-git-context">
-              context path
-            </label>
-            <input
-              id="sf-git-context"
-              type="text"
-              placeholder="."
-              value={gitContextPath}
-              onChange={(e) => setGitContextPath(e.target.value)}
-              className={inputClass}
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="kicker" htmlFor="sf-git-cred-name">
-              credential name
-            </label>
-            <input
-              id="sf-git-cred-name"
-              type="text"
-              placeholder="deploy-key"
-              value={gitCredName}
-              onChange={(e) => setGitCredName(e.target.value)}
-              className={inputClass}
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="kicker" htmlFor="sf-git-cred-key">
-              credential key
-            </label>
-            <input
-              id="sf-git-cred-key"
-              type="text"
-              placeholder="ssh_key"
-              value={gitCredKey}
-              onChange={(e) => setGitCredKey(e.target.value)}
-              className={inputClass}
-            />
+
+          <div className="form-section">
+            <div className="form-section-head">
+              <p className="kicker">auth</p>
+              <span className="text-xs text-[var(--fg-muted)]">
+                private repos only
+              </span>
+            </div>
+            <div className="form-grid">
+              <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                <div className="flex items-center gap-1.5">
+                  <label className="kicker" htmlFor="sf-git-cred-name">
+                    credential name
+                  </label>
+                  <FieldHint
+                    id="hint-git-cred-name"
+                    label="about credential name"
+                  >
+                    Name of the credential registered via{' '}
+                    <code>POST /v1/credentials/git</code>. Points to the SOPS
+                    file holding the SSH deploy key Denia uses to clone the
+                    repo.
+                  </FieldHint>
+                </div>
+                <input
+                  id="sf-git-cred-name"
+                  type="text"
+                  placeholder="deploy-key"
+                  value={gitCredName}
+                  onChange={(e) => setGitCredName(e.target.value)}
+                  className={`${inputClass} w-full`}
+                />
+              </div>
+              <div className="flex flex-col gap-1 col-span-12 sm:col-span-6">
+                <div className="flex items-center gap-1.5">
+                  <label className="kicker" htmlFor="sf-git-cred-key">
+                    credential key
+                  </label>
+                  <FieldHint
+                    id="hint-git-cred-key"
+                    label="about credential key"
+                  >
+                    Field inside the SOPS payload to read. Denia stores the
+                    private SSH key here; the matching public key lives on the
+                    Git host as a deploy key.
+                  </FieldHint>
+                </div>
+                <input
+                  id="sf-git-cred-key"
+                  type="text"
+                  placeholder="ssh_key"
+                  value={gitCredKey}
+                  onChange={(e) => setGitCredKey(e.target.value)}
+                  className={`${inputClass} w-full`}
+                />
+              </div>
+            </div>
           </div>
         </div>
       ) : (
@@ -542,45 +604,54 @@ export function ServiceForm({
               </div>
               <div className="flex flex-col gap-1">
                 <label className="kicker" htmlFor="sf-health-timeout">
-                  health timeout (s)
+                  health timeout
                 </label>
-                <input
-                  id="sf-health-timeout"
-                  type="number"
-                  aria-label="health timeout in seconds"
-                  className={`${inputClass} w-28 tnum`}
-                  value={healthTimeout}
-                  onChange={(e) => setHealthTimeout(e.target.value)}
-                />
+                <span className="field-input-group">
+                  <input
+                    id="sf-health-timeout"
+                    type="number"
+                    aria-label="health timeout in seconds"
+                    className={`${inputClass} w-24 tnum`}
+                    value={healthTimeout}
+                    onChange={(e) => setHealthTimeout(e.target.value)}
+                  />
+                  <span className="field-suffix">s</span>
+                </span>
               </div>
             </div>
 
             <div className="mb-4 flex flex-wrap items-end gap-2">
               <div className="flex flex-col gap-1">
                 <label className="kicker" htmlFor="sf-cpu">
-                  cpu millis (optional)
+                  cpu (optional)
                 </label>
-                <input
-                  id="sf-cpu"
-                  type="number"
-                  aria-label="cpu millis"
-                  className={`${inputClass} w-32 tnum`}
-                  value={cpuMillis}
-                  onChange={(e) => setCpuMillis(e.target.value)}
-                />
+                <span className="field-input-group">
+                  <input
+                    id="sf-cpu"
+                    type="number"
+                    aria-label="cpu millis"
+                    className={`${inputClass} w-28 tnum`}
+                    value={cpuMillis}
+                    onChange={(e) => setCpuMillis(e.target.value)}
+                  />
+                  <span className="field-suffix">millis</span>
+                </span>
               </div>
               <div className="flex flex-col gap-1">
                 <label className="kicker" htmlFor="sf-mem">
-                  memory bytes (optional)
+                  memory (optional)
                 </label>
-                <input
-                  id="sf-mem"
-                  type="number"
-                  aria-label="memory bytes"
-                  className={`${inputClass} w-40 tnum`}
-                  value={memoryBytes}
-                  onChange={(e) => setMemoryBytes(e.target.value)}
-                />
+                <span className="field-input-group">
+                  <input
+                    id="sf-mem"
+                    type="number"
+                    aria-label="memory bytes"
+                    className={`${inputClass} w-36 tnum`}
+                    value={memoryBytes}
+                    onChange={(e) => setMemoryBytes(e.target.value)}
+                  />
+                  <span className="field-suffix">bytes</span>
+                </span>
               </div>
             </div>
 
@@ -633,9 +704,10 @@ export function ServiceForm({
       </div>
 
       <div className="mb-5 flex flex-col gap-1">
-        <label className="inline-flex items-center gap-1.5 text-sm text-[var(--fg)]">
+        <label className="inline-flex items-center gap-2 text-sm text-[var(--fg)]">
           <input
             type="checkbox"
+            className="field-check"
             aria-label="TLS enabled"
             checked={tlsEnabled && parsedDomains.length > 0}
             disabled={parsedDomains.length === 0}
@@ -644,9 +716,7 @@ export function ServiceForm({
           TLS enabled
         </label>
         {parsedDomains.length === 0 ? (
-          <p className="text-xs text-[var(--fg-muted)]">
-            add a domain to enable TLS
-          </p>
+          <p className="field-help">add a domain to enable TLS</p>
         ) : null}
       </div>
 
@@ -659,7 +729,7 @@ export function ServiceForm({
           {pending ? 'saving...' : submitLabel}
         </button>
         {!valid && missing.length > 0 ? (
-          <p className="text-xs text-[var(--fg-muted)]" aria-live="polite">
+          <p className="field-help" aria-live="polite">
             needs: {missing.join(', ')}
           </p>
         ) : null}

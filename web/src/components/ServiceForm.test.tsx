@@ -13,6 +13,12 @@ function fill(label: string | RegExp, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } })
 }
 
+function addDomain(text: string) {
+  const input = screen.getByLabelText(/^domains/i) as HTMLInputElement
+  fireEvent.change(input, { target: { value: text } })
+  fireEvent.keyDown(input, { key: 'Enter' })
+}
+
 afterEach(() => {
   cleanup()
 })
@@ -24,7 +30,7 @@ describe('ServiceForm', () => {
 
     // external_image is the default source type
     fill('name', 'web')
-    fill(/^domains/i, 'example.com')
+    addDomain('example.com')
     fill('internal port', '8080')
     fill('image', 'nginx:latest')
 
@@ -100,7 +106,7 @@ describe('ServiceForm', () => {
     const tls = screen.getByLabelText('TLS enabled') as HTMLInputElement
     expect(tls.disabled).toBe(true)
 
-    fill(/^domains/i, 'example.com')
+    addDomain('example.com')
 
     expect(tls.disabled).toBe(false)
   })

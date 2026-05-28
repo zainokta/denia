@@ -92,7 +92,7 @@ export function ProjectsIndex() {
               value={name}
               onChange={(e) => setName(e.target.value)}
               aria-describedby={createError ? 'new-project-error' : undefined}
-              className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:border-[var(--pink)]"
+              className="field-input w-full"
               required
             />
           </div>
@@ -106,7 +106,7 @@ export function ProjectsIndex() {
               type="text"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              className="w-full bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:border-[var(--pink)]"
+              className="field-input w-full"
             />
           </div>
           <button
