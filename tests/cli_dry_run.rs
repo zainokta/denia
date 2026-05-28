@@ -31,3 +31,29 @@ fn setup_dry_run_lists_expected_steps() {
         "expected dry-run plan or 'must run as root' error; got stdout={stdout:?} stderr={stderr:?}"
     );
 }
+
+#[test]
+fn uninstall_dry_run_purge_lists_expected_steps() {
+    let output = Command::cargo_bin("denia")
+        .unwrap()
+        .env("SUDO_USER", "rakei")
+        .args(["uninstall", "--dry-run", "--purge"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
+    let has_plan = [
+        "systemctl disable",
+        "/etc/systemd/system/denia.service",
+        "userdel denia",
+        "/var/lib/denia",
+    ]
+    .iter()
+    .all(|n| stdout.contains(n));
+    let has_root_error = combined.contains("must run as root");
+    assert!(
+        has_plan || has_root_error,
+        "expected uninstall dry-run plan or 'must run as root' error; got stdout={stdout:?} stderr={stderr:?}"
+    );
+}
