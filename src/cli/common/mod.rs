@@ -1,6 +1,7 @@
 pub mod config_writer;
 pub mod paths;
 pub mod privilege;
+pub mod provision;
 pub mod secrets;
 pub mod systemd;
 
