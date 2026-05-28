@@ -1,7 +1,7 @@
 /target
 .repos/effect
 codedb.snapshot
-.worktree/
+.worktrees/
 
 # Secrets and local state — never commit
 *.sops.yaml
