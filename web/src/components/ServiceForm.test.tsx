@@ -9,7 +9,7 @@ const projects = [
   { id: 'proj-2', name: 'beta' },
 ]
 
-function fill(label: string, value: string) {
+function fill(label: string | RegExp, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } })
 }
 
@@ -24,7 +24,7 @@ describe('ServiceForm', () => {
 
     // external_image is the default source type
     fill('name', 'web')
-    fill('domains', 'example.com')
+    fill(/^domains/i, 'example.com')
     fill('internal port', '8080')
     fill('image', 'nginx:latest')
 
@@ -51,7 +51,7 @@ describe('ServiceForm', () => {
     }
   })
 
-  it('disables submit until name, a domain, port and source are valid', () => {
+  it('disables submit until name, port and source are valid (domain is optional)', () => {
     const onSubmit = vi.fn<(value: ServiceInput | Service) => void>()
     render(<ServiceForm projects={projects} onSubmit={onSubmit} />)
 
@@ -61,24 +61,63 @@ describe('ServiceForm', () => {
     // nothing filled -> disabled
     expect(isDisabled()).toBe(true)
 
-    // name only -> still disabled
+    // name only -> still disabled (port invalid, no source)
     fill('name', 'web')
-    expect(isDisabled()).toBe(true)
-
-    // + domain -> still disabled (port is 0, no source)
-    fill('domains', 'example.com')
     expect(isDisabled()).toBe(true)
 
     // + port -> still disabled (no source image)
     fill('internal port', '8080')
     expect(isDisabled()).toBe(true)
 
-    // + image -> now valid
+    // + image -> now valid without a domain
     fill('image', 'nginx:latest')
     expect(isDisabled()).toBe(false)
 
     // clearing name re-disables
     fill('name', '')
     expect(isDisabled()).toBe(true)
+  })
+
+  it('submit is enabled without a domain, TLS checkbox is disabled when no domain', () => {
+    const onSubmit = vi.fn<(value: ServiceInput | Service) => void>()
+    render(<ServiceForm projects={projects} onSubmit={onSubmit} />)
+
+    fill('name', 'api')
+    fill('internal port', '3000')
+    fill('image', 'nginx:latest')
+
+    const submit = screen.getByRole('button', { name: /create service/i })
+    expect(submit.hasAttribute('disabled')).toBe(false)
+
+    const tls = screen.getByLabelText('TLS enabled') as HTMLInputElement
+    expect(tls.disabled).toBe(true)
+    expect(tls.checked).toBe(false)
+  })
+
+  it('TLS checkbox becomes enabled when a domain is typed', () => {
+    render(<ServiceForm projects={projects} onSubmit={vi.fn()} />)
+
+    const tls = screen.getByLabelText('TLS enabled') as HTMLInputElement
+    expect(tls.disabled).toBe(true)
+
+    fill(/^domains/i, 'example.com')
+
+    expect(tls.disabled).toBe(false)
+  })
+
+  it('submits with empty domains and tls_enabled=false when no domain is given', () => {
+    const onSubmit = vi.fn<(value: ServiceInput | Service) => void>()
+    render(<ServiceForm projects={projects} onSubmit={onSubmit} />)
+
+    fill('name', 'svc')
+    fill('internal port', '8080')
+    fill('image', 'nginx:latest')
+
+    fireEvent.click(screen.getByRole('button', { name: /create service/i }))
+
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    const value = onSubmit.mock.calls[0]![0]
+    expect(value.domains).toEqual([])
+    expect(value.tls_enabled).toBe(false)
   })
 })
