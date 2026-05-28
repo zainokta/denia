@@ -1,4 +1,4 @@
-# ADR-024: CLI-Driven Host Provisioning
+# ADR-025: CLI-Driven Host Provisioning
 
 - Status: Accepted
 - Date: 2026-05-28

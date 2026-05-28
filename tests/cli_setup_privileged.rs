@@ -4,7 +4,7 @@
 //!
 //! The body is TODO: implementing this safely requires either chroot-style
 //! redirection of `/var/lib/denia` and `/etc/systemd/system/denia.service`
-//! or a containerized harness. Tracked as a follow-up to ADR-024.
+//! or a containerized harness. Tracked as a follow-up to ADR-025.
 
 #[test]
 #[ignore]
