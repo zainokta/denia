@@ -361,7 +361,7 @@ async fn sops_secret_store_decrypts_payload_with_runner() {
     assert_eq!(
         runner.commands(),
         vec![format!(
-            "sops --decrypt /var/lib/denia/secrets/{project_id}/registry-main.sops.yaml"
+            "sops --decrypt --output-type json /var/lib/denia/secrets/{project_id}/registry-main.sops.yaml"
         )]
     );
 }

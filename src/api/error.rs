@@ -73,6 +73,7 @@ impl From<NodeMetricsError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let detail = format!("{self:?}");
         let (status, message) = match self {
             Self::State(error) => match &error {
                 crate::state::StateError::ProjectNotEmpty => {
@@ -151,6 +152,9 @@ impl IntoResponse for ApiError {
                 "internal server error".to_string(),
             ),
         };
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!(error = %detail, "ApiError mapped to 500");
+        }
         (status, Json(serde_json::json!({ "error": message }))).into_response()
     }
 }

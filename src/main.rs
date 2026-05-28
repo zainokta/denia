@@ -36,6 +36,14 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(code);
     }
 
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,denia=debug,tower_http=info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(true)
+        .with_writer(std::io::stderr)
+        .init();
+
     let config = AppConfig::from_env()?;
     let store = SqliteStore::open(&config.database_path)?;
     store.migrate()?;

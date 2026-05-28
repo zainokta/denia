@@ -41,6 +41,7 @@ Each ADR should include:
 | [021](021-control-plane-secret-encryption.md) | Control-Plane SOPS Secret Encryption | Accepted | 2026-05-28 |
 | [022](022-oci-layer-cache.md) | Persistent OCI Layer Cache With Weekly GC | Accepted | 2026-05-28 |
 | [023](023-toml-config-file.md) | TOML Config File With Env Override | Accepted | 2026-05-28 |
+| [024](024-async-deployments.md) | Async Deployments With Per-Deployment Log Stream | Accepted | 2026-05-28 |
 
 ## Contributing
 

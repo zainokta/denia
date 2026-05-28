@@ -366,6 +366,27 @@ pub fn build_router(state: AppState) -> Router {
             rate_limit_admin,
         ));
 
+    let trace_layer = tower_http::trace::TraceLayer::new_for_http()
+        .make_span_with(|req: &Request| {
+            tracing::info_span!(
+                "http",
+                method = %req.method(),
+                path = %req.uri().path(),
+            )
+        })
+        .on_response(
+            |resp: &Response, latency: std::time::Duration, _span: &tracing::Span| {
+                let status = resp.status().as_u16();
+                if status >= 500 {
+                    tracing::error!(status, latency_ms = latency.as_millis() as u64, "response");
+                } else if status >= 400 {
+                    tracing::warn!(status, latency_ms = latency.as_millis() as u64, "response");
+                } else {
+                    tracing::info!(status, latency_ms = latency.as_millis() as u64, "response");
+                }
+            },
+        );
+
     Router::new()
         .route("/healthz", get(api::health::healthz))
         // ACME HTTP-01 and denia domain-verification challenge routes are served
@@ -387,6 +408,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/v1", auth_public.merge(authed))
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(security_headers))
+        .layer(trace_layer)
         .fallback(crate::web::static_handler)
         .with_state(state)
 }
