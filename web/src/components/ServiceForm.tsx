@@ -5,7 +5,7 @@ import type { Service, ServiceInput } from '#/effect/schema'
 type ServiceSourceValue = Service['source']
 type SourceType = ServiceSourceValue['type']
 type ImageMode = 'direct' | 'registry'
-type RequiredField = 'name' | 'domains' | 'port'
+type RequiredField = 'name' | 'port'
 
 interface RegistryOption {
   id: string
@@ -123,7 +123,6 @@ export function ServiceForm({
   // form stays quiet while the operator is still typing.
   const [touched, setTouched] = useState<Record<RequiredField, boolean>>({
     name: false,
-    domains: false,
     port: false,
   })
   const markTouched = (field: RequiredField) =>
@@ -176,11 +175,9 @@ export function ServiceForm({
   const source = buildSource()
 
   const nameEmpty = name.trim().length === 0
-  const domainsEmpty = parsedDomains.length === 0
 
   const valid =
     !nameEmpty &&
-    !domainsEmpty &&
     portValid &&
     source !== undefined &&
     projectId.length > 0
@@ -188,7 +185,6 @@ export function ServiceForm({
   const missing: string[] = []
   if (projectId.length === 0) missing.push('project')
   if (nameEmpty) missing.push('name')
-  if (domainsEmpty) missing.push('domains')
   if (!portValid) missing.push('valid port')
   if (source === undefined) {
     if (sourceType === 'git') missing.push('repo url')
@@ -233,7 +229,7 @@ export function ServiceForm({
       env: envRows
         .filter((row) => row.key.trim().length > 0)
         .map((row) => [row.key.trim(), row.value] as [string, string]),
-      tls_enabled: tlsEnabled,
+      tls_enabled: parsedDomains.length > 0 && tlsEnabled,
     }
 
     if (isEdit && initial) {
@@ -295,22 +291,17 @@ export function ServiceForm({
       </div>
 
       <div className="mb-4 flex flex-col gap-1">
-        <label
-          className={labelClass('domains', domainsEmpty)}
-          htmlFor="sf-domains"
-        >
-          domains
+        <label className="kicker" htmlFor="sf-domains">
+          domains{' '}
+          <span className="text-xs text-[var(--fg-muted)]">(optional)</span>
         </label>
         <input
           id="sf-domains"
           type="text"
-          aria-required="true"
-          aria-invalid={err('domains', domainsEmpty)}
           placeholder="comma or space separated"
-          className={fieldClass('domains', domainsEmpty)}
+          className={inputClass}
           value={domains}
           onChange={(e) => setDomains(e.target.value)}
-          onBlur={() => markTouched('domains')}
         />
       </div>
 
@@ -641,15 +632,23 @@ export function ServiceForm({
         ) : null}
       </div>
 
-      <label className="mb-5 inline-flex items-center gap-1.5 text-sm text-[var(--fg)]">
-        <input
-          type="checkbox"
-          aria-label="TLS enabled"
-          checked={tlsEnabled}
-          onChange={(e) => setTlsEnabled(e.target.checked)}
-        />
-        TLS enabled
-      </label>
+      <div className="mb-5 flex flex-col gap-1">
+        <label className="inline-flex items-center gap-1.5 text-sm text-[var(--fg)]">
+          <input
+            type="checkbox"
+            aria-label="TLS enabled"
+            checked={tlsEnabled && parsedDomains.length > 0}
+            disabled={parsedDomains.length === 0}
+            onChange={(e) => setTlsEnabled(e.target.checked)}
+          />
+          TLS enabled
+        </label>
+        {parsedDomains.length === 0 ? (
+          <p className="text-xs text-[var(--fg-muted)]">
+            add a domain to enable TLS
+          </p>
+        ) : null}
+      </div>
 
       <div className="flex flex-wrap items-center gap-3">
         <button
