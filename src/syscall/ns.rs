@@ -1,6 +1,5 @@
 use std::{
     ffi::CString,
-    io::Write,
     os::fd::RawFd,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
@@ -621,6 +620,7 @@ fn abort_launch(pid: u32, pipes: SyncPipes, error: SyscallError) -> Result<u32, 
 }
 
 fn attach_pid_to_cgroup(pid: u32, cgroup_procs_path: &Path) -> Result<(), SyscallError> {
+    use std::io::Write as _;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .open(cgroup_procs_path)
@@ -632,17 +632,53 @@ fn attach_pid_to_cgroup(pid: u32, cgroup_procs_path: &Path) -> Result<(), Syscal
         .unwrap_or_else(|e| format!("<read err: {e}>"));
     let parent_cg = std::fs::read_to_string("/proc/self/cgroup")
         .unwrap_or_else(|e| format!("<read err: {e}>"));
+    let leaf_dir = cgroup_procs_path.parent().unwrap_or(cgroup_procs_path);
+    let leaf_type = std::fs::read_to_string(leaf_dir.join("cgroup.type"))
+        .unwrap_or_else(|e| format!("<read err: {e}>"));
+    let leaf_controllers = std::fs::read_to_string(leaf_dir.join("cgroup.controllers"))
+        .unwrap_or_else(|e| format!("<read err: {e}>"));
+    let leaf_subtree = std::fs::read_to_string(leaf_dir.join("cgroup.subtree_control"))
+        .unwrap_or_else(|e| format!("<read err: {e}>"));
+    let leaf_events = std::fs::read_to_string(leaf_dir.join("cgroup.events"))
+        .unwrap_or_else(|e| format!("<read err: {e}>"));
+    let pid_status_state = std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .map(|s| {
+            s.lines()
+                .filter(|l| {
+                    l.starts_with("State:")
+                        || l.starts_with("Tgid:")
+                        || l.starts_with("Pid:")
+                        || l.starts_with("PPid:")
+                        || l.starts_with("Threads:")
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        })
+        .unwrap_or_default();
     tracing::info!(
         pid,
         target = %cgroup_procs_path.display(),
         src_cgroup = %src_cg.trim(),
         parent_cgroup = %parent_cg.trim(),
+        leaf_type = %leaf_type.trim(),
+        leaf_controllers = %leaf_controllers.trim(),
+        leaf_subtree = %leaf_subtree.trim(),
+        leaf_events = %leaf_events.trim().replace('\n', " | "),
+        pid_state = %pid_status_state.trim(),
         "cgroup attach attempt"
     );
-    writeln!(file, "{pid}").map_err(|error| SyscallError::NamespaceSetup {
-        path: cgroup_procs_path.to_path_buf(),
-        reason: format!("write pid={pid}: {error}"),
-    })
+    // Must be a SINGLE write(2) — `writeln!`/`write_fmt` can emit the digits
+    // and the newline as two separate writes, which the kernel's
+    // `cgroup.procs` handler parses as two writes: the first migrates the
+    // pid; the second sees an empty payload and returns EINVAL. Build the
+    // payload first, then issue one write_all of the complete bytes.
+    let payload = format!("{pid}\n");
+    file.write_all(payload.as_bytes())
+        .map_err(|error| SyscallError::NamespaceSetup {
+            path: cgroup_procs_path.to_path_buf(),
+            reason: format!("write pid={pid}: {error}"),
+        })
 }
 
 struct SyncPipes {
