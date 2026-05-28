@@ -215,6 +215,19 @@ input[type="radio"] {
   height: 0.95rem;
 }
 
+/* Native select popup ignores color-scheme when an explicit color is set on
+   the control, so the open <option> list lands on a light menu base in dark
+   mode (light fg on light bg). Pin both to surface tokens. */
+select.field-input {
+  background-color: var(--surface);
+  color: var(--fg);
+}
+
+select.field-input option {
+  background-color: var(--surface);
+  color: var(--fg);
+}
+
 /* Segmented toggle for one-of-N choices (e.g. image source mode). Flat,
    1px neutral dividers, reserved pink tint marks the active segment. */
 .segmented {
