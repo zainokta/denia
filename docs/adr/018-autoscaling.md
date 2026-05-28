@@ -20,6 +20,7 @@ account for remaining host resources, and scale back down — including to zero.
 | Replica budget | Per-replica fixed — each replica receives the full `ResourceLimits` | Predictable resource accounting; matches k8s HPA semantics |
 | Capacity exhaustion | Reject scale-up; emit event; keep running at current replica count | Single-node: never overcommit or OOM the host or control plane; reserved host headroom enforced by a resource ledger |
 | Load balancing | Denia bridge fan-out behind one stable port per service | The bridge already proxies and logs every request; keeps Traefik config static; required for the scale-to-zero activator — Traefik config does NOT change on scale events |
+<!-- ADR-020 update: load balancing is in-process Pingora fan-out (Unix-socket upstreams via HttpPeer::new_uds), replacing the original Denia bridge fan-out; no external Traefik involved. -->
 | Anti-flap | k8s-style cooldown: scale-up fast, scale-down only after a stabilization window | Prevents oscillation under bursty load |
 | Policy location | Optional field on `ServiceConfig` (`None` = current 1:1 behavior) | Backward-compatible; existing services are unaffected |
 | Replica persistence | Hybrid — `desired_replicas` persisted in SQLite, live replica handles held in memory | Survives control-plane restarts; avoids serializing OS handles |
