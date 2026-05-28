@@ -217,7 +217,7 @@ sudo denia setup
 `/var/lib/denia`, generates `~/.config/denia/{config.toml,admin.token,age.key}`
 owned `<operator>:denia 0640`, writes and enables the systemd unit, and starts
 the service. That user becomes the operator: their `~/.config/denia/` is
-editable without sudo. See [ADR-024](docs/adr/024-cli-driven-host-provisioning.md).
+editable without sudo. See [ADR-025](docs/adr/025-cli-driven-host-provisioning.md).
 
 ### Subcommands
 

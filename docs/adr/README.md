@@ -41,7 +41,7 @@ Each ADR should include:
 | [021](021-control-plane-secret-encryption.md) | Control-Plane SOPS Secret Encryption | Accepted | 2026-05-28 |
 | [022](022-oci-layer-cache.md) | Persistent OCI Layer Cache With Weekly GC | Accepted | 2026-05-28 |
 | [023](023-toml-config-file.md) | TOML Config File With Env Override | Accepted | 2026-05-28 |
-| [024](024-cli-driven-host-provisioning.md) | CLI-Driven Host Provisioning | Accepted | 2026-05-28 |
+| [025](025-cli-driven-host-provisioning.md) | CLI-Driven Host Provisioning | Accepted | 2026-05-28 |
 
 ## Contributing
 
