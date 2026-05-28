@@ -147,12 +147,7 @@ impl SopsSecretStore {
         let output = runner
             .run(
                 &sops_binary,
-                &[
-                    "--decrypt",
-                    "--output-type",
-                    "json",
-                    secret_path.as_ref(),
-                ],
+                &["--decrypt", "--output-type", "json", secret_path.as_ref()],
             )
             .await?;
 
