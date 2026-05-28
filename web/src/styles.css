@@ -215,17 +215,265 @@ input[type="radio"] {
   height: 0.95rem;
 }
 
-/* Native select popup ignores color-scheme when an explicit color is set on
-   the control, so the open <option> list lands on a light menu base in dark
-   mode (light fg on light bg). Pin both to surface tokens. */
+/* Form controls v2.
+   Baseline .field-input bakes border/padding/bg/font so consumers only need
+   the class. .field-help and .field-error are helper-text and inline-error
+   slots that pair with aria-describedby. Native chrome on checkbox/radio/select
+   is replaced via .field-check + select.field-input chevron, kept flat and
+   terminal-native per DESIGN.md. */
+
+.field-input {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+  caret-color: var(--pink);
+  transition: border-color 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 150ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.field-input::selection {
+  background: color-mix(in oklab, var(--pink) 35%, transparent);
+}
+
+.field-input:hover:not(:disabled):not([aria-disabled="true"]) {
+  border-color: color-mix(in oklab, var(--fg-muted) 55%, var(--border));
+}
+
+.field-input:disabled,
+.field-input[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.field-input.is-invalid:hover {
+  border-color: var(--violet);
+}
+
+/* Strip native number-input spinners. Mono terminal feel; no chrome arrows. */
+.field-input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.field-input[type="number"]::-webkit-inner-spin-button,
+.field-input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* Helper text slot — pair with input via aria-describedby. */
+.field-help {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--fg-muted);
+  margin-top: 0.3rem;
+  line-height: 1.5;
+}
+
+/* Inline error slot. The signal-fault dot is baked in via ::before so callers
+   don't need to remember it; pair with aria-describedby + aria-invalid. */
+.field-error {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--violet);
+  margin-top: 0.3rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.field-error::before {
+  content: "";
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: var(--violet);
+  flex-shrink: 0;
+}
+
+/* Input + unit suffix: visually fused, single rounded outline. */
+.field-input-group {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.field-input-group .field-input {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right-width: 0;
+}
+
+.field-input-group .field-suffix {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-top-right-radius: 6px;
+  border-bottom-right-radius: 6px;
+}
+
+/* Custom checkbox + radio. Opt-in via .field-check class so existing native
+   controls keep their fallback (accent-color pink). */
+input[type="checkbox"].field-check,
+input[type="radio"].field-check {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+  transition: border-color 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 150ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+input[type="checkbox"].field-check {
+  border-radius: 3px;
+}
+
+input[type="radio"].field-check {
+  border-radius: 9999px;
+}
+
+input[type="checkbox"].field-check:hover:not(:disabled),
+input[type="radio"].field-check:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--fg-muted) 55%, var(--border));
+}
+
+input[type="checkbox"].field-check:checked,
+input[type="radio"].field-check:checked {
+  border-color: color-mix(in oklab, var(--pink) 55%, var(--border));
+  background: color-mix(in oklab, var(--pink) 22%, var(--surface));
+}
+
+input[type="checkbox"].field-check:checked::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  background: var(--fg);
+  -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2 6.5l2.5 2.5L10 3.5' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='square'/></svg>")
+    center / contain no-repeat;
+  mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2 6.5l2.5 2.5L10 3.5' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='square'/></svg>")
+    center / contain no-repeat;
+}
+
+input[type="radio"].field-check:checked::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--fg);
+  transform: translate(-50%, -50%);
+}
+
+input[type="checkbox"].field-check:disabled,
+input[type="radio"].field-check:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Native select chevron varies per platform. Replace with a consistent mono
+   caret. Open <option> list still needs the explicit surface fix below. */
 select.field-input {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 1.75rem;
   background-color: var(--surface);
   color: var(--fg);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path d='M1.5 1.5L6 6L10.5 1.5' fill='none' stroke='%239a9098' stroke-width='1.3' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+  background-size: 0.7rem auto;
 }
 
 select.field-input option {
   background-color: var(--surface);
   color: var(--fg);
+}
+
+/* Chip-tag input wrapper: shares the .field-input skin but renders a flex row
+   of chips plus an inline input. Pair with .field-input on the wrapper. */
+.field-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.4rem;
+  cursor: text;
+}
+
+.field-chips:focus-within {
+  border-color: color-mix(in oklab, var(--pink) 55%, var(--border));
+  outline: 2px solid var(--pink);
+  outline-offset: 2px;
+}
+
+.field-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+.field-chip.is-invalid {
+  border-color: var(--violet);
+  color: var(--violet);
+}
+
+.field-chip button {
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+}
+
+.field-chip button:hover {
+  color: var(--fg);
+}
+
+.field-chip-input {
+  flex: 1;
+  min-width: 8ch;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--fg);
+  caret-color: var(--pink);
+  outline: none;
+}
+
+.field-chip-input::placeholder {
+  color: var(--fg-muted);
 }
 
 /* Segmented toggle for one-of-N choices (e.g. image source mode). Flat,
@@ -345,6 +593,23 @@ select.field-input option {
 
 .btn-primary:disabled:hover {
   background: color-mix(in oklab, var(--pink) 14%, var(--surface));
+}
+
+/* Destructive action: Breakdown violet signals fault-state intent.
+   Distinguishes irreversible buttons from neutral ones so the operator
+   can't confuse confirm-delete with cancel. */
+.btn-danger {
+  border-color: color-mix(in oklab, var(--violet) 55%, var(--border));
+  background: color-mix(in oklab, var(--violet) 14%, var(--surface));
+  color: var(--fg);
+}
+
+.btn-danger:hover {
+  background: color-mix(in oklab, var(--violet) 22%, var(--surface));
+}
+
+.btn-danger:disabled:hover {
+  background: color-mix(in oklab, var(--violet) 14%, var(--surface));
 }
 
 /* Nav link with state underline. */
@@ -581,6 +846,99 @@ select.field-input option {
     justify-content: flex-start;
     padding-inline: 0.7rem;
   }
+}
+
+/* Field hint: small info trigger + floating tooltip. Shadow is allowed on
+   transient overlays per the Flat-By-Default Rule. */
+.hint {
+  position: relative;
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.hint-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  cursor: help;
+  border-radius: 9999px;
+}
+
+.hint-trigger:hover,
+.hint-trigger:focus-visible {
+  color: var(--fg);
+}
+
+.hint-popup {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  z-index: 60;
+  width: max-content;
+  max-width: 17rem;
+  padding: 0.55rem 0.7rem;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 400;
+  line-height: 1.55;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px -12px oklch(0% 0 0 / 0.55);
+  opacity: 0;
+  transform: translate(-50%, 4px);
+  pointer-events: none;
+  transition: opacity 140ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 140ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.hint-popup code {
+  font-size: 0.95em;
+  padding: 0 4px;
+}
+
+.hint:hover .hint-popup,
+.hint:focus-within .hint-popup {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* Form section grouping: tight kicker header above its grid of fields. */
+.form-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.form-section + .form-section {
+  margin-top: 1.1rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--border);
+}
+
+.form-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.form-section-head .hint {
+  align-self: center;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 0.75rem;
 }
 
 /* Restrained, state-only motion. */

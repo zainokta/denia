@@ -105,7 +105,7 @@ function SettingsTokens() {
             placeholder="token name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="bg-[var(--bg)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--fg)] focus:outline-none focus:border-[var(--pink)]"
+            className="field-input"
             required
           />
           <button

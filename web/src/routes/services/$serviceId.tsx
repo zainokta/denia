@@ -961,7 +961,7 @@ function DomainsSection({
           placeholder="hostname"
           value={hostname}
           onChange={(e) => onHostnameChange(e.target.value)}
-          className="border border-[var(--border)] bg-transparent px-2 py-1 text-sm font-mono text-[var(--fg)]"
+          className="field-input"
         />
         <button
           type="submit"
