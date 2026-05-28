@@ -26,6 +26,20 @@ pub fn try_drop_bounding_caps() -> bool {
         .all(|cap| thread::remove_capability_from_bounding_set(cap).is_ok())
 }
 
+/// True if the current thread holds `CAP_CHOWN` in its effective set.
+///
+/// The runtime uses this to decide whether it can chown the per-replica
+/// overlay layers to the userns base uid. Root has it; the daemon has it via
+/// the systemd unit's `AmbientCapabilities` (see `denia.service.in`);
+/// unprivileged dev/test runs do not, so the ownership step is skipped there
+/// (the privileged overlay launch is not exercised without it). A `capget`
+/// failure is treated as "no capability".
+pub fn has_effective_cap_chown() -> bool {
+    thread::capabilities(None)
+        .map(|sets| sets.effective.contains(thread::CapabilitySet::CHOWN))
+        .unwrap_or(false)
+}
+
 const ALL_CAPABILITIES: [thread::CapabilitySet; 41] = [
     thread::CapabilitySet::CHOWN,
     thread::CapabilitySet::DAC_OVERRIDE,

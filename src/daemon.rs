@@ -51,9 +51,11 @@ pub async fn run() -> anyhow::Result<()> {
     // skips the cross-subtree migration EINVAL we hit when started from
     // user/system slices). Best-effort; failure is logged but non-fatal.
     if let Err(error) = relocate_daemon_cgroup(&config.cgroup_root) {
-        tracing::warn!(?error, "daemon cgroup self-relocation failed (workload deploys may fail with EINVAL on cgroup.procs)");
+        tracing::warn!(
+            ?error,
+            "daemon cgroup self-relocation failed (workload deploys may fail with EINVAL on cgroup.procs)"
+        );
     }
-
 
     let state = AppState::new(config.clone(), &store);
     let tls_in_use = state

@@ -26,6 +26,7 @@ use crate::runtime::runtime_trait::Runtime;
 use crate::runtime::validation::{
     validate_process_spec, validate_resource_limits, validate_service_name,
 };
+use crate::syscall::caps;
 use crate::syscall::chown;
 use crate::syscall::ns::{NamespaceConfig, OverlaySpec, RoBind, spawn_namespaced_process};
 use crate::syscall::signal;
@@ -196,6 +197,8 @@ impl LinuxRuntime {
             upper,
             work,
             merged,
+            artifact_dir: self.artifact_dir.clone(),
+            runtime_dir: self.runtime_dir.clone(),
         })
     }
 
@@ -207,10 +210,56 @@ impl LinuxRuntime {
         validate_resource_limits(request)?;
         // The artifact rootfs is the read-only overlay lower; never write into it.
         // The writable layer and overlay mountpoint are per-replica.
+
+        // Unmount any stale overlay from previous failed deployments
+        let _ = rustix::mount::unmount(&plan.merged, rustix::mount::UnmountFlags::DETACH);
+
+        // Clean up overlay-specific state (the work/work directory that overlayfs creates)
+        // This must be empty for a fresh overlay mount
+        let overlay_work = plan.work.join("work");
+        if overlay_work.exists() {
+            std::fs::remove_dir_all(&overlay_work).map_err(path_io(
+                "remove stale overlay work directory",
+                &overlay_work,
+            ))?;
+        }
+
         create_dir_all("create replica upper directory", &plan.upper)?;
         create_dir_all("create replica work directory", &plan.work)?;
         create_dir_all("create replica merged directory", &plan.merged)?;
+
+        // Persistent ancestor dirs: traverse-only (mode 0755), ownership left
+        // with the daemon so it can keep creating future deployment/replica
+        // subdirs. Only the ephemeral overlay layers below are chowned to the
+        // userns base uid.
+        self.set_traverse_mode(&plan.service_dir)?;
+        self.set_traverse_mode(&plan.deployment_dir)?;
+        self.set_traverse_mode(&plan.replica_dir)?;
+        // Ephemeral, guest-writable overlay layers: must be owned by the
+        // namespace-root (userns_base) or the unprivileged-userns overlay mount
+        // fails EACCES. `merged` is the mountpoint; `upper`/`work` are written
+        // by overlayfs itself.
+        self.chown_overlay_dir(&plan.upper)?;
+        self.chown_overlay_dir(&plan.work)?;
+        self.chown_overlay_dir(&plan.merged)?;
+        // The child needs traverse permission (mode 0755 `other` x bit) to reach
+        // the read-only lowerdir (artifact rootfs); it never writes there, so
+        // ownership stays put and we avoid chowning thousands of artifact files.
+        // The data dir (e.g. /var/lib/denia) is typically mode 0700, so it too
+        // needs the traverse bit widened.
+        if let Some(data_dir) = plan.artifact_dir.parent() {
+            self.set_traverse_mode(data_dir)?;
+        }
+        self.set_traverse_mode(&plan.runtime_dir)?;
+        self.set_traverse_mode(&plan.artifact_dir)?;
+        if let Some(bundle_dir) = plan.rootfs_path.parent() {
+            self.set_traverse_mode(bundle_dir)?;
+            self.set_traverse_mode(&plan.rootfs_path)?;
+        }
         self.prepare_socket_directory(plan)?;
+        let denia_dir = plan.upper.join(".denia");
+        create_runtime_directory(&denia_dir)?;
+        self.chown_overlay_dir(&denia_dir)?;
         prepare_cgroup_directory(&self.cgroup_root, &plan.cgroup_path, CGROUP_CONTROLLERS)?;
         std::fs::write(
             plan.cgroup_path.join("cpu.max"),
@@ -251,6 +300,7 @@ impl LinuxRuntime {
 
     pub fn cleanup(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
         remove_cgroup_dir_if_exists(&plan.cgroup_path)?;
+        let _ = rustix::mount::unmount(&plan.merged, rustix::mount::UnmountFlags::DETACH);
         // The upper layer is ephemeral: wiping the replica dir removes
         // upper/work/merged so a relaunch starts from a clean writable layer.
         remove_dir_if_exists(&plan.replica_dir)?;
@@ -289,17 +339,44 @@ impl LinuxRuntime {
         let socket_dir = plan.upper.join("run/denia");
         create_runtime_directory(&run_dir)?;
         create_runtime_directory(&socket_dir)?;
-        self.chown_socket_directory(&run_dir)?;
-        self.chown_socket_directory(&socket_dir)?;
+        self.chown_overlay_dir(&run_dir)?;
+        self.chown_overlay_dir(&socket_dir)?;
         remove_existing_runtime_file(&plan.socket_path)?;
         Ok(())
     }
 
-    fn chown_socket_directory(&self, path: &Path) -> Result<(), RuntimeError> {
-        if !rustix::process::geteuid().is_root() {
-            return Ok(());
+    /// Set a directory to mode 0755 so the workload's namespace-root (the host
+    /// `userns_base` uid mapped to uid 0 inside the userns) can traverse it.
+    /// Ownership is left unchanged: these are persistent ancestor dirs the
+    /// daemon must keep writing into to create future deployments/replicas, and
+    /// traversal only needs the `other` execute bit.
+    fn set_traverse_mode(&self, path: &Path) -> Result<(), RuntimeError> {
+        let mut perms = std::fs::metadata(path)
+            .map_err(path_io("stat directory for permissions", path))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms)
+            .map_err(path_io("set directory permissions to 0755", path))
+    }
+
+    /// Prepare an ephemeral overlay / guest-writable directory: set mode 0755
+    /// and, when the process holds `CAP_CHOWN`, recursively chown it to
+    /// `userns_base`.
+    ///
+    /// The overlay `upper`/`work` layers and the guest socket dirs must be
+    /// owned by the workload's namespace-root (host `userns_base`, which maps
+    /// to uid 0 inside the userns) so the unprivileged-userns overlay mount can
+    /// create `work/work` and write the upper layer. Without that ownership the
+    /// dir appears owned by an unmapped uid (overflow `nobody`) inside the
+    /// namespace and the `mount("overlay", ...)` syscall fails with EACCES.
+    /// The chown is skipped when `CAP_CHOWN` is absent (unprivileged dev/test,
+    /// where the privileged overlay launch is not exercised); root and the
+    /// daemon (ambient `CAP_CHOWN`, see `denia.service.in`) both have it.
+    fn chown_overlay_dir(&self, path: &Path) -> Result<(), RuntimeError> {
+        self.set_traverse_mode(path)?;
+        if caps::has_effective_cap_chown() {
+            chown::recursive_lchown(path, self.userns_base, self.userns_base)?;
         }
-        chown::recursive_lchown(path, self.userns_base, self.userns_base)?;
         Ok(())
     }
 }
@@ -806,6 +883,10 @@ mod tests {
             plan.upper.join("run/denia").is_dir(),
             "prepare must create the socket directory in the per-replica upper layer"
         );
+        assert!(
+            plan.upper.join(".denia").is_dir(),
+            "prepare must create the .denia directory in the per-replica upper layer"
+        );
     }
 
     #[test]
@@ -1010,6 +1091,8 @@ mod tests {
                 upper: tmp.path().join("runtime/test-svc/deployment/0/upper"),
                 work: tmp.path().join("runtime/test-svc/deployment/0/work"),
                 merged: tmp.path().join("runtime/test-svc/deployment/0/merged"),
+                artifact_dir: tmp.path().join("artifacts"),
+                runtime_dir: tmp.path().join("runtime"),
             },
         };
 

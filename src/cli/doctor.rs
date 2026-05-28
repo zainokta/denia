@@ -4,7 +4,7 @@
 use std::process::Command;
 use std::time::Duration;
 
-use crate::config::{config_file_path, FileConfig};
+use crate::config::{FileConfig, config_file_path};
 
 use super::common::paths::InstallContext;
 use super::common::systemd;
@@ -22,12 +22,20 @@ pub fn run() -> anyhow::Result<()> {
         .filter(|u| !u.is_empty() && u != "root")
         .and_then(|user| {
             // Try getent passwd <user> | cut -d: -f6.
-            let out = Command::new("getent").args(["passwd", &user]).output().ok()?;
+            let out = Command::new("getent")
+                .args(["passwd", &user])
+                .output()
+                .ok()?;
             if !out.status.success() {
                 return None;
             }
             let line = String::from_utf8(out.stdout).ok()?;
-            let home = line.trim_end_matches('\n').split(':').nth(5)?.trim().to_string();
+            let home = line
+                .trim_end_matches('\n')
+                .split(':')
+                .nth(5)?
+                .trim()
+                .to_string();
             if home.is_empty() {
                 return None;
             }
@@ -241,8 +249,7 @@ fn check_unit_drift(ctx: Option<&InstallContext>) -> CheckResult {
         Ok(Some(s)) => s,
         Ok(None) => {
             return CheckResult::Fail(
-                "/etc/systemd/system/denia.service is not installed; run `sudo denia setup`"
-                    .into(),
+                "/etc/systemd/system/denia.service is not installed; run `sudo denia setup`".into(),
             );
         }
         Err(e) => return CheckResult::Fail(format!("read denia.service failed: {e}")),
