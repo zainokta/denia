@@ -1,3 +1,4 @@
+pub mod config_writer;
 pub mod paths;
 pub mod privilege;
 pub mod secrets;
