@@ -2,7 +2,7 @@
 .gitnexus
 .repos/effect
 codedb.snapshot
-.worktree/
+.worktrees/
 TODO.md
 
 # Secrets and local state — never commit
