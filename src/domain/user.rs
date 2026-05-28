@@ -60,10 +60,27 @@ pub struct Session {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeUser {
+    pub id: Uuid,
+    pub username: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<User> for MeUser {
+    fn from(u: User) -> Self {
+        Self {
+            id: u.id,
+            username: u.username,
+            created_at: u.created_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrincipalView {
-    User { user: User },
+    User { user: MeUser },
     Bootstrap,
 }
 

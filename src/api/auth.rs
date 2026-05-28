@@ -91,7 +91,7 @@ async fn me_handler(
         .ok_or_else(|| ApiError::NotFound("user not found".to_string()))?;
     let memberships = state.users.list_memberships_for_user(user_id)?;
     Ok(Json(Me {
-        principal: PrincipalView::User { user },
+        principal: PrincipalView::User { user: user.into() },
         is_super_admin: principal.is_super_admin,
         admin_initialized,
         memberships,
