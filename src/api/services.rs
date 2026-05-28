@@ -82,6 +82,12 @@ async fn put_service(
     Json(mut service): Json<ServiceConfig>,
 ) -> Result<Json<ServiceConfig>, ApiError> {
     ensure_role(&state, &principal, service.project_id, Role::Operator)?;
+    // A service with no domain cannot have ACME-issued TLS (ACME is gated to
+    // verified domains), so TLS is meaningless here — coerce it off rather than
+    // tripping the ACME-email requirement below.
+    if service.domains.is_empty() {
+        service.tls_enabled = false;
+    }
     // The body is deserialized straight into ServiceConfig, bypassing the
     // `ServiceConfig::new` constructor, so re-validate every invariant here:
     // safe service name (F-6), git build-path confinement (F-1), domains, port.
@@ -689,6 +695,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn put_service_no_domain_coerces_tls_off() {
+        let state = test_state(); // acme_email is None in for_test
+        let project = Project::new("team-nodomain", None).unwrap();
+        state.projects.put_project(project.clone()).unwrap();
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "project_id": project.id,
+            "name": "nodomain",
+            "domains": [],
+            "source": { "type": "external_image", "image": "nginx", "credential": null },
+            "internal_port": 80,
+            "health_check": { "path": "/health", "timeout_seconds": 5 },
+            "tls_enabled": true,
+        }))
+        .unwrap();
+
+        let resp = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "no-domain service must be accepted"
+        );
+        let cfg: ServiceConfig = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert!(cfg.domains.is_empty());
+        assert!(!cfg.tls_enabled, "tls must be coerced off when no domain");
     }
 
     #[tokio::test]
