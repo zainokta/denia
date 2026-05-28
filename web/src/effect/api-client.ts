@@ -279,15 +279,19 @@ function parseResponse<A>(
     if (response.status < 200 || response.status >= 300)
       return yield* Effect.fail(
         new ApiError({
-          message:
-            typeof (body as Record<string, unknown>).message === 'string'
-              ? String((body as Record<string, unknown>).message)
-              : `HTTP ${response.status}`,
+          message: extractApiMessage(body, response.status),
           status: response.status,
         }),
       )
     return yield* decode(schema)(body)
   }) as Effect.Effect<A, ApiError | DecodeError>
+}
+
+function extractApiMessage(body: unknown, status: number): string {
+  const obj = body as Record<string, unknown>
+  if (typeof obj?.error === 'string') return obj.error
+  if (typeof obj?.message === 'string') return obj.message
+  return `HTTP ${status}`
 }
 
 function parseDeleteResponse(
@@ -304,10 +308,7 @@ function parseDeleteResponse(
       )
       return yield* Effect.fail(
         new ApiError({
-          message:
-            typeof (body as Record<string, unknown>).message === 'string'
-              ? String((body as Record<string, unknown>).message)
-              : `HTTP ${response.status}`,
+          message: extractApiMessage(body, response.status),
           status: response.status,
         }),
       )
