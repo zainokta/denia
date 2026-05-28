@@ -457,6 +457,13 @@ fn overlay_data_cstring(lower: &Path, upper: &Path, work: &Path) -> Result<CStri
     data.extend_from_slice(upper.as_os_str().as_bytes());
     data.extend_from_slice(b",workdir=");
     data.extend_from_slice(work.as_os_str().as_bytes());
+    // `userxattr` lets the overlay use the `user.overlay.*` xattr namespace
+    // instead of `trusted.overlay.*`, which is the only namespace
+    // unprivileged user-namespace mounters can set. Required on Linux 5.11+
+    // when the mount happens inside an unprivileged userns (CAP_SYS_ADMIN in
+    // the userns but not in the initial namespace). Without it the mount
+    // syscall fails with EACCES.
+    data.extend_from_slice(b",userxattr");
     CString::new(data).map_err(|_| {
         SyscallError::Capability("overlay mount data contains an interior NUL byte".to_string())
     })
@@ -744,15 +751,69 @@ impl SyncPipes {
 
     fn read_child_setup_status(&self) -> Result<(), SyscallError> {
         match read_optional_byte_timeout(self.child_error_read, CHILD_SETUP_TIMEOUT) {
-            TimedByte::Byte(stage) => Err(SyscallError::ChildSetup {
-                stage: child_setup_stage(stage),
-            }),
+            TimedByte::Byte(stage) => {
+                // Best-effort drain of the errno follow-up bytes child_setup_fail
+                // also writes. Failures here just leave errno unknown.
+                let mut errno_bytes = [0u8; 4];
+                let mut filled = 0;
+                while filled < 4 {
+                    let n = unsafe {
+                        libc::read(
+                            self.child_error_read,
+                            errno_bytes.as_mut_ptr().add(filled).cast(),
+                            4 - filled,
+                        )
+                    };
+                    if n <= 0 {
+                        break;
+                    }
+                    filled += n as usize;
+                }
+                let errno = if filled == 4 {
+                    Some(i32::from_le_bytes(errno_bytes))
+                } else {
+                    None
+                };
+                let stage_str = child_setup_stage(stage);
+                let stage_with_errno = match errno {
+                    Some(e) => Box::leak(
+                        format!("{stage_str} errno={e} ({})", errno_str(e)).into_boxed_str(),
+                    ),
+                    None => stage_str,
+                };
+                Err(SyscallError::ChildSetup {
+                    stage: stage_with_errno,
+                })
+            }
             TimedByte::Eof => Ok(()),
             TimedByte::Timeout => Err(SyscallError::ChildSetupTimeout {
                 stage: "child setup status",
             }),
             TimedByte::Error(error) => Err(SyscallError::Io(error)),
         }
+    }
+}
+
+fn errno_str(e: i32) -> &'static str {
+    match e {
+        libc::EPERM => "EPERM",
+        libc::ENOENT => "ENOENT",
+        libc::EIO => "EIO",
+        libc::ENOEXEC => "ENOEXEC",
+        libc::EBADF => "EBADF",
+        libc::EACCES => "EACCES",
+        libc::EFAULT => "EFAULT",
+        libc::EBUSY => "EBUSY",
+        libc::EEXIST => "EEXIST",
+        libc::ENODEV => "ENODEV",
+        libc::ENOTDIR => "ENOTDIR",
+        libc::EISDIR => "EISDIR",
+        libc::EINVAL => "EINVAL",
+        libc::ENOSPC => "ENOSPC",
+        libc::EROFS => "EROFS",
+        libc::ELOOP => "ELOOP",
+        libc::ENOTSUP => "ENOTSUP",
+        _ => "?",
     }
 }
 
@@ -864,6 +925,11 @@ fn child_setup_stage(stage: u8) -> &'static str {
         b'P' => "make mount propagation private",
         b'O' => "open stdio",
         b'R' => "chroot",
+        b'a' => "chroot: overlay mount",
+        b'r' => "chroot: rootfs self-bind mount",
+        b'o' => "chroot: create /.old_root",
+        b'v' => "chroot: pivot_root",
+        b'u' => "chroot: unmount /.old_root",
         b'b' => "read-only bind mount",
         b'W' => "chdir workdir",
         b'p' => "mount proc",
@@ -879,7 +945,20 @@ fn child_setup_stage(stage: u8) -> &'static str {
 }
 
 unsafe fn child_setup_fail(pipes: &SyncPipes, stage: u8) -> ! {
-    let _ = write_byte(pipes.child_error_write, stage);
+    // Capture errno BEFORE any further syscall (write_byte uses libc::write).
+    let errno = unsafe { *libc::__errno_location() };
+    // Pre-format a single 5-byte payload [stage, e0, e1, e2, e3] so the
+    // parent can read errno alongside the stage tag without changing the
+    // single-byte-then-EOF protocol elsewhere. This is async-signal-safe.
+    let bytes = errno.to_le_bytes();
+    let payload = [stage, bytes[0], bytes[1], bytes[2], bytes[3]];
+    let _ = unsafe {
+        libc::write(
+            pipes.child_error_write,
+            payload.as_ptr().cast(),
+            payload.len(),
+        )
+    };
     unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
 }
 
@@ -987,7 +1066,7 @@ unsafe fn child_exec(
             )
         } < 0
         {
-            unsafe { child_setup_fail(pipes, b'R') };
+            unsafe { child_setup_fail(pipes, b'a') }; // overlay mount
         }
         overlay.merged.as_c_str()
     } else {
@@ -1001,7 +1080,7 @@ unsafe fn child_exec(
             )
         } < 0
         {
-            unsafe { child_setup_fail(pipes, b'R') };
+            unsafe { child_setup_fail(pipes, b'r') }; // rootfs self-bind mount
         }
         plan.rootfs.as_c_str()
     };
@@ -1014,7 +1093,7 @@ unsafe fn child_exec(
     if std::fs::create_dir(old_root_target.to_string_lossy().as_ref()).is_err() {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() != Some(libc::EEXIST) {
-            unsafe { child_setup_fail(pipes, b'R') };
+            unsafe { child_setup_fail(pipes, b'o') }; // create /.old_root
         }
     }
 
@@ -1026,7 +1105,7 @@ unsafe fn child_exec(
         )
     } < 0
     {
-        unsafe { child_setup_fail(pipes, b'R') };
+        unsafe { child_setup_fail(pipes, b'v') }; // pivot_root
     }
 
     if rustix::process::chdir(c"/").is_err() {
@@ -1034,7 +1113,7 @@ unsafe fn child_exec(
     }
 
     if rustix::mount::unmount(c"/.old_root", rustix::mount::UnmountFlags::DETACH).is_err() {
-        unsafe { child_setup_fail(pipes, b'R') };
+        unsafe { child_setup_fail(pipes, b'u') }; // unmount old_root
     }
     let _ = unsafe { libc::rmdir(c"/.old_root".as_ptr()) };
 
@@ -1569,7 +1648,7 @@ mod tests {
         );
         assert_eq!(
             overlay.data.to_str().expect("data"),
-            "lowerdir=/lower,upperdir=/upper,workdir=/work"
+            "lowerdir=/lower,upperdir=/upper,workdir=/work,userxattr"
         );
 
         assert_eq!(plan.ro_binds.len(), 1);
