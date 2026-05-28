@@ -1,4 +1,4 @@
-# ADR-021: Persistent OCI Layer Cache With Weekly GC
+# ADR-022: Persistent OCI Layer Cache With Weekly GC
 
 - **Status**: Accepted
 - **Date**: 2026-05-28

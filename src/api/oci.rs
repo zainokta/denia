@@ -1,4 +1,4 @@
-//! OCI layer cache observability + manual GC (ADR-021). Super-admin gated.
+//! OCI layer cache observability + manual GC (ADR-022). Super-admin gated.
 
 use axum::{Json, Router, extract::State, routing::get, routing::post};
 use chrono::{DateTime, Utc};

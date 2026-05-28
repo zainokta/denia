@@ -1,6 +1,6 @@
 //! Persistent content-addressed OCI layer cache.
 //!
-//! See ADR-021. The cache lives under `<oci_cache_dir>/blobs/<algorithm>/<digest_hex>`
+//! See ADR-022. The cache lives under `<oci_cache_dir>/blobs/<algorithm>/<digest_hex>`
 //! with a sibling `<digest_hex>.lastref` mtime sidecar tracking the most recent
 //! cache reference. The garbage collector ([`gc::LayerCacheGc`]) deletes blobs
 //! whose `.lastref` is older than the configured retention threshold AND that
