@@ -107,7 +107,11 @@ where
 }
 
 pub async fn run(config: SocketProxyConfig) -> Result<(), SocketProxyError> {
-    bring_loopback_up()?;
+    // The launcher (child_exec) brings `lo` up privileged before execve, since
+    // this process is capless post-execve. Best-effort here so a leftover
+    // SIOCSIFFLAGS EPERM on the already-up `lo` is not fatal; still works when
+    // socket-proxy is run standalone with capabilities.
+    let _ = bring_loopback_up();
     if let Some(parent) = config.listen_socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -143,8 +147,14 @@ pub async fn run(config: SocketProxyConfig) -> Result<(), SocketProxyError> {
                 let connect_host = config.connect_host.clone();
                 let connect_port = config.connect_port;
                 tokio::spawn(async move {
-                    if let Ok(mut tcp) = TcpStream::connect((connect_host.as_str(), connect_port)).await {
-                        let _ = io::copy_bidirectional(&mut unix, &mut tcp).await;
+                    match TcpStream::connect((connect_host.as_str(), connect_port)).await {
+                        Ok(mut tcp) => {
+                            let _ = io::copy_bidirectional(&mut unix, &mut tcp).await;
+                        }
+                        Err(e) => eprintln!(
+                            "socket-proxy: upstream connect {connect_host}:{connect_port} failed: {e} \
+                             (is the workload listening on that port?)"
+                        ),
                     }
                 });
             }

@@ -44,6 +44,40 @@ pub struct LinuxRuntime {
 }
 
 pub(crate) const SOCKET_PROXY_TARGET: &str = "/.denia/socket-proxy";
+/// Guest directory where socket-proxy's host shared libs + dynamic loader are
+/// bound read-only, so socket-proxy runs regardless of the workload image's libc.
+pub(crate) const SOCKET_PROXY_LIB_DIR: &str = "/.denia/lib";
+
+/// Shared objects + dynamic loader the socket-proxy binary needs at runtime,
+/// taken from the daemon's own `/proc/self/maps` (socket-proxy IS the daemon
+/// binary). Each is bound read-only into the guest under `SOCKET_PROXY_LIB_DIR`
+/// and socket-proxy is launched through the bound loader with `--library-path`,
+/// so it works in any workload image. Empty for a fully static binary (then
+/// socket-proxy is exec'd directly). See ADR-026.
+fn socket_proxy_runtime_libs() -> Vec<PathBuf> {
+    let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut libs = Vec::new();
+    for line in maps.lines() {
+        // Fields: addr perms offset dev inode pathname
+        let Some(path) = line.split_whitespace().nth(5) else {
+            continue;
+        };
+        if path.starts_with('/') && path.contains(".so") && seen.insert(path.to_string()) {
+            libs.push(PathBuf::from(path));
+        }
+    }
+    libs
+}
+
+/// True if `path` is a dynamic loader (`ld-linux-*`, `ld-musl-*`).
+fn is_dynamic_loader(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("ld-"))
+}
 pub(crate) const WORKLOAD_LAUNCHER_TARGET: &str = "/.denia/workload-launcher";
 pub(crate) const GUEST_SERVICE_SOCKET: &str = "/run/denia/service.sock";
 pub(crate) const GUEST_SERVICE_SOCKET_ENV: &str = "DENIA_SERVICE_SOCKET";
@@ -144,50 +178,111 @@ impl LinuxRuntime {
         // socket path used by readiness waits, status, and the bridge must therefore
         // be the upper-side path, not rootfs/ nor merged/.
         let socket_path = upper.join(GUEST_SERVICE_SOCKET.trim_start_matches('/'));
+        // The per-replica socket lives at a deep path (~127 bytes) that exceeds
+        // the sockaddr_un 108-byte limit, so the ingress (and any client) cannot
+        // connect() to it directly. Expose a short hashed alias under the data
+        // dir, symlinked to the real socket in prepare_socket_directory; the
+        // daemon/ingress connect via the alias. See ADR-020/026.
+        let socket_connect_path = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            format!(
+                "{}:{}:{}",
+                request.service_id, request.deployment_id, request.replica_index
+            )
+            .hash(&mut hasher);
+            self.runtime_dir
+                .parent()
+                .unwrap_or(self.runtime_dir.as_path())
+                .join("sock")
+                .join(format!("{:016x}.sock", hasher.finish()))
+        };
         let cgroup_path = self
             .cgroup_root
             .join(request.service_id.to_string())
             .join(request.deployment_id.to_string())
             .join(request.replica_index.to_string());
-        let mut child_argv = vec![
-            SOCKET_PROXY_TARGET.to_string(),
-            "--listen".to_string(),
-            GUEST_SERVICE_SOCKET.to_string(),
-            "--connect".to_string(),
-            format!("127.0.0.1:{}", request.internal_port),
-            "--".to_string(),
-        ];
+        let socket_proxy_src = resolve_host_binary(&self.socket_proxy_source).ok_or_else(|| {
+            RuntimeError::SocketProxyUnavailable {
+                path: self.socket_proxy_source.clone(),
+            }
+        })?;
+        // socket-proxy is the daemon binary, dynamically linked against the host
+        // libc/loader. Bind those host libs (resolved from the daemon's own
+        // /proc/self/maps) into the guest and run socket-proxy through the host
+        // loader with `--library-path`, so it works in ANY workload image
+        // regardless of the image's libc/version. The loader options are
+        // consumed at socket-proxy startup and never reach the workload it
+        // spawns. A static socket-proxy yields no libs and is exec'd directly.
+        // See ADR-026.
+        let host_libs = if std::env::current_exe().ok().as_deref()
+            == Some(self.socket_proxy_source.as_path())
+        {
+            socket_proxy_runtime_libs()
+        } else {
+            Vec::new()
+        };
+        let loader_guest = host_libs
+            .iter()
+            .find(|p| is_dynamic_loader(p))
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|name| format!("{SOCKET_PROXY_LIB_DIR}/{name}"));
+
+        let mut child_argv = Vec::new();
+        if let Some(loader) = &loader_guest {
+            child_argv.push(loader.clone());
+            child_argv.push("--library-path".to_string());
+            child_argv.push(SOCKET_PROXY_LIB_DIR.to_string());
+        }
+        child_argv.push(SOCKET_PROXY_TARGET.to_string());
+        child_argv.push("--listen".to_string());
+        child_argv.push(GUEST_SERVICE_SOCKET.to_string());
+        child_argv.push("--connect".to_string());
+        child_argv.push(format!("127.0.0.1:{}", request.internal_port));
+        child_argv.push("--".to_string());
         child_argv.extend(process.argv);
+
         let overlay = OverlaySpec {
             lower: rootfs_path.clone(),
             upper: upper.clone(),
             work: work.clone(),
             merged: merged.clone(),
         };
-        let socket_proxy_src = resolve_host_binary(&self.socket_proxy_source).ok_or_else(|| {
-            RuntimeError::SocketProxyUnavailable {
-                path: self.socket_proxy_source.clone(),
-            }
-        })?;
-        let ro_bind = RoBind {
+
+        // Read-only binds: the socket-proxy binary, plus its host shared libs +
+        // loader under SOCKET_PROXY_LIB_DIR.
+        let mut ro_binds = vec![RoBind {
             src: socket_proxy_src,
             dest: PathBuf::from(SOCKET_PROXY_TARGET),
-        };
-        // The overlay's `merged` mountpoint becomes the new root (8a pivots into it
+        }];
+        for lib in &host_libs {
+            if let Some(name) = lib.file_name().and_then(|n| n.to_str()) {
+                ro_binds.push(RoBind {
+                    src: lib.clone(),
+                    dest: PathBuf::from(format!("{SOCKET_PROXY_LIB_DIR}/{name}")),
+                });
+            }
+        }
+
+        // The overlay's `merged` mountpoint becomes the new root (pivots into it
         // when an overlay is set), so the namespace root must be `merged`.
-        let namespace = NamespaceConfig::new(merged.clone(), child_argv.clone())
+        let mut namespace = NamespaceConfig::new(merged.clone(), child_argv.clone())
             .with_overlay(overlay)
-            .with_ro_bind(ro_bind)
             .with_uid_map(self.userns_base, self.userns_size)
             .with_cgroup_path(cgroup_path.clone())
             .with_workdir(process.workdir.clone())
             .with_env(env.clone())
             .with_deferred_hardening();
+        for bind in ro_binds {
+            namespace = namespace.with_ro_bind(bind);
+        }
 
         Ok(LinuxRuntimePlan {
             namespace,
             rootfs_path,
             socket_path,
+            socket_connect_path,
             guest_socket_path: GUEST_SERVICE_SOCKET.to_string(),
             cgroup_path,
             deployment_id: request.deployment_id,
@@ -235,10 +330,12 @@ impl LinuxRuntime {
         self.set_traverse_mode(&plan.service_dir)?;
         self.set_traverse_mode(&plan.deployment_dir)?;
         self.set_traverse_mode(&plan.replica_dir)?;
-        // Ephemeral, guest-writable overlay layers: must be owned by the
-        // namespace-root (userns_base) or the unprivileged-userns overlay mount
-        // fails EACCES. `merged` is the mountpoint; `upper`/`work` are written
-        // by overlayfs itself.
+        // Ephemeral, guest-writable overlay layers chowned to the namespace-root
+        // (userns_base, = uid 0 inside the workload userns) so the workload owns
+        // its writable upper layer. The overlay is mounted privileged in the
+        // initial user namespace now (see syscall::ns / ADR-026), so this is no
+        // longer required for the mount to succeed — it keeps guest writes and
+        // copy-ups owned by the workload. `merged` is the mountpoint.
         self.chown_overlay_dir(&plan.upper)?;
         self.chown_overlay_dir(&plan.work)?;
         self.chown_overlay_dir(&plan.merged)?;
@@ -301,6 +398,9 @@ impl LinuxRuntime {
     pub fn cleanup(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
         remove_cgroup_dir_if_exists(&plan.cgroup_path)?;
         let _ = rustix::mount::unmount(&plan.merged, rustix::mount::UnmountFlags::DETACH);
+        // Remove the short connect alias (symlink); it lives outside replica_dir
+        // so the wipe below won't catch it.
+        let _ = std::fs::remove_file(&plan.socket_connect_path);
         // The upper layer is ephemeral: wiping the replica dir removes
         // upper/work/merged so a relaunch starts from a clean writable layer.
         remove_dir_if_exists(&plan.replica_dir)?;
@@ -342,6 +442,17 @@ impl LinuxRuntime {
         self.chown_overlay_dir(&run_dir)?;
         self.chown_overlay_dir(&socket_dir)?;
         remove_existing_runtime_file(&plan.socket_path)?;
+        // Short connect alias → the deep upper-side socket. The alias path stays
+        // under the sockaddr_un 108-byte limit so the ingress/clients can
+        // connect(); the symlink may dangle until socket-proxy binds, after which
+        // connect() follows it to the real socket.
+        if let Some(parent) = plan.socket_connect_path.parent() {
+            create_runtime_directory(parent)?;
+        }
+        let _ = std::fs::remove_file(&plan.socket_connect_path);
+        std::os::unix::fs::symlink(&plan.socket_path, &plan.socket_connect_path).map_err(
+            path_io("create socket connect alias", &plan.socket_connect_path),
+        )?;
         Ok(())
     }
 
@@ -363,15 +474,16 @@ impl LinuxRuntime {
     /// and, when the process holds `CAP_CHOWN`, recursively chown it to
     /// `userns_base`.
     ///
-    /// The overlay `upper`/`work` layers and the guest socket dirs must be
-    /// owned by the workload's namespace-root (host `userns_base`, which maps
-    /// to uid 0 inside the userns) so the unprivileged-userns overlay mount can
-    /// create `work/work` and write the upper layer. Without that ownership the
-    /// dir appears owned by an unmapped uid (overflow `nobody`) inside the
-    /// namespace and the `mount("overlay", ...)` syscall fails with EACCES.
-    /// The chown is skipped when `CAP_CHOWN` is absent (unprivileged dev/test,
-    /// where the privileged overlay launch is not exercised); root and the
-    /// daemon (ambient `CAP_CHOWN`, see `denia.service.in`) both have it.
+    /// The overlay `upper` layer and the guest socket dirs are owned by the
+    /// workload's namespace-root (host `userns_base`, which maps to uid 0 inside
+    /// the userns) so the workload owns its writable layer and its runtime
+    /// writes / copy-ups land with the guest's uid. (The overlay mount itself is
+    /// now performed privileged in the initial user namespace — see
+    /// `syscall::ns::child_prepare_root` / ADR-026 — so ownership is no longer
+    /// required for the mount to succeed.) The chown is skipped when `CAP_CHOWN`
+    /// is absent (unprivileged dev/test, where the privileged launch is not
+    /// exercised); root and the daemon (ambient `CAP_CHOWN`, see
+    /// `denia.service.in`) both have it.
     fn chown_overlay_dir(&self, path: &Path) -> Result<(), RuntimeError> {
         self.set_traverse_mode(path)?;
         if caps::has_effective_cap_chown() {
@@ -388,6 +500,7 @@ impl Runtime for LinuxRuntime {
         let plan = self.plan(&request)?;
         self.prepare(&plan, &request)?;
         let status_socket_path = plan.socket_path.clone();
+        let connect_socket_path = plan.socket_connect_path.clone();
         let log_path = match self.service_log_path(request.service_id) {
             Ok(path) => path,
             Err(error) => {
@@ -444,7 +557,7 @@ impl Runtime for LinuxRuntime {
             state: "running".to_string(),
             pid,
             cgroup_path: status_cgroup_path,
-            socket_path: status_socket_path,
+            socket_path: connect_socket_path,
             replica_index: request.replica_index,
         })
     }
@@ -601,7 +714,7 @@ impl Runtime for LinuxRuntime {
                     state: "running".to_string(),
                     pid: Some(pid),
                     cgroup_path: tracked.plan.cgroup_path.clone(),
-                    socket_path: tracked.plan.socket_path.clone(),
+                    socket_path: tracked.plan.socket_connect_path.clone(),
                     replica_index: instance.replica_index,
                 }
             })
@@ -812,19 +925,42 @@ mod tests {
             })
         );
         assert_eq!(plan.namespace.uid_map, plan.namespace.gid_map);
-        assert_eq!(
-            plan.namespace.argv,
-            vec![
-                "/.denia/socket-proxy".to_string(),
-                "--listen".to_string(),
-                "/run/denia/service.sock".to_string(),
-                "--connect".to_string(),
-                "127.0.0.1:8080".to_string(),
-                "--".to_string(),
-                "/bin/echo".to_string(),
-                "hello".to_string(),
-            ]
-        );
+        // argv is the socket-proxy invocation, optionally prefixed by the host
+        // dynamic loader (`<loader> --library-path /.denia/lib`) when the
+        // socket-proxy binary is dynamically linked (it is, in tests).
+        let argv = &plan.namespace.argv;
+        let i = argv
+            .iter()
+            .position(|a| a == "/.denia/socket-proxy")
+            .expect("socket-proxy present in argv");
+        let expected_tail = vec![
+            "/.denia/socket-proxy".to_string(),
+            "--listen".to_string(),
+            "/run/denia/service.sock".to_string(),
+            "--connect".to_string(),
+            "127.0.0.1:8080".to_string(),
+            "--".to_string(),
+            "/bin/echo".to_string(),
+            "hello".to_string(),
+        ];
+        assert_eq!(&argv[i..], expected_tail.as_slice());
+        if i > 0 {
+            assert_eq!(argv[1], "--library-path");
+            assert_eq!(argv[2], "/.denia/lib");
+            assert!(
+                argv[0].starts_with("/.denia/lib/ld-"),
+                "expected a bound host loader as argv[0], got {:?}",
+                argv[0]
+            );
+            // The loader + libs named in --library-path must have matching binds.
+            let lib_binds = plan
+                .namespace
+                .ro_binds
+                .iter()
+                .filter(|b| b.dest.starts_with("/.denia/lib"))
+                .count();
+            assert!(lib_binds >= 1, "expected host-lib read-only binds");
+        }
     }
 
     #[test]
@@ -1082,6 +1218,7 @@ mod tests {
                 .with_cgroup_path(cgroup_path.clone()),
                 rootfs_path: tmp.path().join("rootfs"),
                 socket_path: tmp.path().join("replica/upper/run/denia/service.sock"),
+                socket_connect_path: tmp.path().join("sock/test.sock"),
                 guest_socket_path: GUEST_SERVICE_SOCKET.to_string(),
                 cgroup_path: cgroup_path.clone(),
                 deployment_id: uuid::Uuid::now_v7(),

@@ -473,7 +473,8 @@ fn overlay_replica_launches_with_readonly_bind_mount() {
     // to it (which must fail because the bind is read-only). Output records the
     // observed content and the write outcome.
     let script = "cat /.denia/bound; \
-         if echo mutate > /.denia/bound 2>/dev/null; then echo WRITE_OK; else echo WRITE_DENIED; fi";
+         if echo mutate > /.denia/bound 2>/dev/null; then echo WRITE_OK; else echo WRITE_DENIED; fi; \
+         if head -c 1 /dev/urandom >/dev/null 2>&1 && echo discard > /dev/null; then echo DEV_OK; else echo DEV_FAIL; fi";
 
     let cgroup_path = cgroup_root.create_leaf("overlay-replica");
     let namespace = NamespaceConfig::new(
@@ -514,6 +515,103 @@ fn overlay_replica_launches_with_readonly_bind_mount() {
     );
     assert!(
         !output.contains("WRITE_OK"),
+        "read-only bind mount must not be writable, got: {output:?}"
+    );
+    assert!(
+        output.contains("DEV_OK"),
+        "expected real /dev nodes (urandom readable, null writable), got: {output:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires root, cgroup v2, Linux namespace permissions, and DENIA_PRIVILEGED_BUSYBOX_STATIC"]
+fn overlay_replica_binds_source_under_unsearchable_dir() {
+    // Regression for the "read-only bind mount errno=13 (EACCES)" failure: the
+    // bind source lives under a 0700 directory the workload's mapped uid cannot
+    // traverse. Applied inside the unprivileged userns the first MS_BIND fails
+    // EACCES on source-path resolution; applied pre-userns (privileged, ADR-026)
+    // it succeeds. Mirrors production/dev where the daemon binary used as the
+    // socket-proxy source can sit under a 0700 home (e.g. a `cargo run`).
+    assert_eq!(
+        std::env::var("DENIA_RUN_PRIVILEGED_TESTS").as_deref(),
+        Ok("1")
+    );
+    assert!(
+        std::fs::read_to_string("/proc/self/status")
+            .expect("status")
+            .lines()
+            .any(|line| line == "Uid:\t0\t0\t0\t0"),
+        "privileged runtime tests must run as root"
+    );
+    assert!(
+        static_busybox().exists(),
+        "static busybox must exist through DENIA_PRIVILEGED_BUSYBOX_STATIC or /usr/lib/nix/busybox"
+    );
+
+    let work_root = tempfile::tempdir().expect("overlay work root");
+    let cgroup_root = CgroupTestRoot::new();
+    let test_userns_base = 100000u32;
+
+    let lower = work_root.path().join("lower");
+    write_busybox_rootfs(&lower);
+    let upper = work_root.path().join("upper");
+    let work = work_root.path().join("work");
+    let merged = work_root.path().join("merged");
+    for dir in [&upper, &work, &merged] {
+        fs::create_dir_all(dir).expect("overlay layer dir");
+    }
+
+    // Bind source under a 0700 directory: the workload's mapped uid maps to an
+    // owner unmapped in the userns, so it falls back to "other" bits (no access)
+    // and source traversal is denied unless the bind runs pre-userns as root.
+    let restricted = work_root.path().join("restricted");
+    fs::create_dir(&restricted).expect("restricted dir");
+    let bound_src = restricted.join("bound-secret");
+    fs::write(&bound_src, "denia-bound-payload\n").expect("write bound source");
+    fs::set_permissions(&restricted, fs::Permissions::from_mode(0o700))
+        .expect("restrict bind source dir");
+
+    let stdout_file = work_root.path().join("replica.out");
+    let stderr_file = work_root.path().join("replica.err");
+
+    let script = "cat /.denia/bound; \
+         if echo mutate > /.denia/bound 2>/dev/null; then echo WRITE_OK; else echo WRITE_DENIED; fi";
+
+    let cgroup_path = cgroup_root.create_leaf("overlay-restricted-bind");
+    let namespace = NamespaceConfig::new(
+        lower.clone(),
+        vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+    )
+    .with_uid_map(test_userns_base, 65536)
+    .with_cgroup_path(cgroup_path)
+    .with_stdio_paths(&stdout_file, &stderr_file)
+    .with_overlay(OverlaySpec {
+        lower: lower.clone(),
+        upper,
+        work,
+        merged,
+    })
+    .with_ro_bind(RoBind {
+        src: bound_src,
+        dest: PathBuf::from("/.denia/bound"),
+    });
+
+    let pid = spawn_namespaced_process(&namespace).expect("spawn overlay replica");
+    let status = syscall::signal::wait(pid).expect("wait overlay replica");
+    assert_eq!(
+        status,
+        syscall::signal::ProcessStatus::Exited(0),
+        "expected replica with bind source under 0700 dir to exit successfully; stderr: {:?}",
+        fs::read_to_string(&stderr_file).ok()
+    );
+
+    let output = fs::read_to_string(&stdout_file).expect("replica stdout");
+    assert!(
+        output.contains("denia-bound-payload"),
+        "expected bound file content to be visible inside the guest, got: {output:?}"
+    );
+    assert!(
+        output.contains("WRITE_DENIED") && !output.contains("WRITE_OK"),
         "read-only bind mount must not be writable, got: {output:?}"
     );
 }
