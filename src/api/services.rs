@@ -291,11 +291,13 @@ async fn service_metrics(
         return Ok(Json(Vec::new()));
     };
     let reader = CgroupMetricsReader::new(state.config.cgroup_root.clone());
-    Ok(Json(vec![reader.read_by_id(
-        &service.name,
-        service.id,
-        deployment_id,
-    )?]))
+    // A scaled-to-zero service has no live cgroup, so the read hits ENOENT. Treat
+    // that as "no metrics yet" (empty, 200) rather than a 500 — matching the
+    // sibling `/v1/workloads` endpoint and the no-promoted-deployment branch above.
+    match reader.read_by_id(&service.name, service.id, deployment_id) {
+        Ok(snapshot) => Ok(Json(vec![snapshot])),
+        Err(_) => Ok(Json(Vec::new())),
+    }
 }
 
 #[cfg(test)]

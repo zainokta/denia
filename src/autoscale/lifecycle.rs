@@ -93,9 +93,12 @@ pub async fn launch_replica(
         .add_replica(&service_key, replica_id, status.socket_path.clone())
         .await;
 
-    // 5. Gate on the health check; roll back everything on failure.
-    let url = format!("http://127.0.0.1:{}", spec.internal_port);
-    if health.check(&url, &spec.health_check).await.is_err() {
+    // 5. Gate on the health check; roll back everything on failure. The probe
+    //    target is the workload's Denia-owned Unix socket (the path Pingora dials),
+    //    not a loopback URL — the bridge was removed in ADR-020. This blocks the
+    //    cold-start 502 race where a replica is promoted before its socket accepts.
+    let target = status.socket_path.to_string_lossy();
+    if health.check(&target, &spec.health_check).await.is_err() {
         let instance = RuntimeInstanceId {
             service_id: spec.service_id,
             service_name: spec.service_name.clone(),
