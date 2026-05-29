@@ -16,7 +16,7 @@ use crate::{
     command::{CommandRunner, TokioCommandRunner},
     config::AppConfig,
     deploy::{DeploymentRepos, SharedRoutes},
-    health::{FakeHealthChecker, HealthChecker},
+    health::{HealthChecker, SocketHealthChecker},
     ingress::pingora::IngressState,
     oci::cache::{LayerCache, LayerCacheGc},
     rate_limit::{AdminRateLimiter, LoginRateLimiter, rate_limit_admin, rate_limit_login},
@@ -90,7 +90,7 @@ impl AppState {
         );
         let access_log = AccessLogStore::new();
         let ingress = Arc::new(IngressState::with_access_log(access_log.clone()));
-        let health: Arc<dyn HealthChecker> = Arc::new(FakeHealthChecker::healthy());
+        let health: Arc<dyn HealthChecker> = Arc::new(SocketHealthChecker::new());
 
         let mut state = Self::new_with_deploy_dependencies_and_log(
             config,
@@ -259,6 +259,10 @@ impl AppState {
         }
     }
 }
+
+/// Test-only health checker; the `AppStateBuilder` below defaults to it.
+#[cfg(any(test, feature = "test-support"))]
+use crate::health::FakeHealthChecker;
 
 /// Test-support builder for `AppState`. Lets tests inject arbitrary
 /// `Arc<dyn ...Repo>` mocks plus a runtime, defaulting every other field to a

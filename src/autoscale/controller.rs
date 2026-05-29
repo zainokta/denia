@@ -286,6 +286,16 @@ impl Controller {
         // desired stays at 0 (the activator wakes it on the first request).
         for ms in services {
             events.extend(self.top_up_to_desired(ms).await);
+            // Per-session logs are wiped on boot, so a scale-to-zero service that
+            // is never woken this session shows a blank log panel. Append a marker
+            // (this runs after `clean_session_logs`, so it survives) for services
+            // left genuinely idle at zero — not a capacity-denied launch.
+            if ms.policy.min_replicas == 0 && self.registry.replica_count(ms.service_id) == 0 {
+                self.append_service_log(
+                    ms.service_id,
+                    "idle (scaled to zero) — waiting for first request to wake",
+                );
+            }
         }
 
         events

@@ -39,6 +39,14 @@ account for remaining host resources, and scale back down — including to zero.
   interface.
 - Scale-to-zero adds a cold-start latency penalty on the first request to an
   idle service; the activator holds the connection during boot.
+- Cold-start readiness gate: a launched replica is promoted to `Healthy` (and so
+  becomes eligible for traffic) only once its Denia-owned Unix socket accepts a
+  connection — `wait_for_service_socket` only proves the socket *file* exists, not
+  that the workload is `listen()`ing. Production uses `SocketHealthChecker` (a
+  `UnixStream::connect` poll bounded by `health.timeout_seconds`); tests use
+  `FakeHealthChecker`. Without this gate the first request to a waking service
+  races the workload's boot and Pingora returns a 502 against the not-yet-listening
+  socket.
 - A resource ledger with reserved host headroom protects the single-node control
   plane from accidental overcommit; scale-up requests that would exceed the
   ledger are rejected with an event rather than silently failing.
