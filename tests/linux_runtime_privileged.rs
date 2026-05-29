@@ -429,6 +429,112 @@ async fn linux_runtime_start_uses_native_namespace_and_cgroup_gate() {
     );
 }
 
+#[tokio::test]
+#[ignore = "requires root, cgroup v2, Linux namespace permissions, and DENIA_PRIVILEGED_BUSYBOX_STATIC"]
+async fn sweep_orphans_reaps_workload_from_a_previous_session() {
+    // Simulate an unclean prior session: start a real workload, then abandon the
+    // in-memory tracking by building a FRESH LinuxRuntime over the same dirs
+    // (as a daemon restart does). `list_running` is empty there, so only the
+    // filesystem+cgroup sweep can reap the survivor.
+    assert_eq!(
+        std::env::var("DENIA_RUN_PRIVILEGED_TESTS").as_deref(),
+        Ok("1")
+    );
+    assert!(
+        std::fs::read_to_string("/proc/self/status")
+            .expect("status")
+            .lines()
+            .any(|line| line == "Uid:\t0\t0\t0\t0"),
+        "privileged runtime tests must run as root"
+    );
+    assert!(
+        static_busybox().exists(),
+        "static busybox must exist through DENIA_PRIVILEGED_BUSYBOX_STATIC or /usr/lib/nix/busybox"
+    );
+    let runtime_dir = tempfile::tempdir().expect("runtime dir");
+    let artifact_dir = tempfile::tempdir().expect("artifact dir");
+    let helper_dir = tempfile::tempdir().expect("helper dir");
+    let cgroup_root = CgroupTestRoot::new();
+    let socket_proxy = socket_proxy_helper(helper_dir.path());
+    let runtime =
+        LinuxRuntime::new_with_paths(runtime_dir.path(), artifact_dir.path(), cgroup_root.path())
+            .with_socket_proxy(socket_proxy);
+    let artifact = ArtifactRecord::new(
+        "sha256:sweep",
+        ArtifactKind::RootfsBundle,
+        ArtifactSource::ExternalRegistry {
+            image: "local/rootfs:sweep".to_string(),
+        },
+    )
+    .expect("artifact");
+    let bundle_dir = artifact_dir.path().join("sha256-sweep");
+    let rootfs = bundle_dir.join("rootfs");
+    write_busybox_rootfs(&rootfs);
+    std::fs::write(
+        bundle_dir.join("process.json"),
+        serde_json::to_vec(&LinuxRuntimeProcessSpec {
+            argv: vec!["/bin/sleep".to_string(), "300".to_string()],
+            env: Vec::new(),
+            workdir: "/".to_string(),
+        })
+        .expect("manifest json"),
+    )
+    .expect("manifest");
+
+    let service_id = uuid::Uuid::now_v7();
+    let deployment_id = uuid::Uuid::now_v7();
+    let status = runtime
+        .start(RuntimeStartRequest {
+            service_name: "sweep-service".to_string(),
+            service_id,
+            deployment_id,
+            artifact,
+            internal_port: 3000,
+            socket_path: runtime_dir.path().join("sweep-service/current.sock"),
+            cpu_millis: 100,
+            memory_bytes: 67108864,
+            env: Vec::new(),
+            pids_max: None,
+            memory_swap_max: None,
+            io_weight: None,
+            replica_index: 0,
+        })
+        .await
+        .expect("runtime start");
+    wait_for_path(&status.socket_path);
+
+    let replica_dir = runtime_dir
+        .path()
+        .join(service_id.to_string())
+        .join(deployment_id.to_string())
+        .join("0");
+    assert!(replica_dir.exists(), "replica dir should exist after start");
+    assert!(
+        status.cgroup_path.exists(),
+        "cgroup should exist after start"
+    );
+
+    // Fresh runtime over the same dirs = empty in-memory tracking, like a restart.
+    let fresh =
+        LinuxRuntime::new_with_paths(runtime_dir.path(), artifact_dir.path(), cgroup_root.path());
+    let swept = fresh.sweep_orphans().await.expect("sweep orphans");
+
+    assert!(
+        swept >= 1,
+        "expected at least one orphan swept, got {swept}"
+    );
+    assert!(
+        !replica_dir.exists(),
+        "sweep should remove the leftover replica dir {}",
+        replica_dir.display()
+    );
+    assert!(
+        !status.cgroup_path.exists(),
+        "sweep should remove the leftover cgroup {}",
+        status.cgroup_path.display()
+    );
+}
+
 #[test]
 #[ignore = "requires root, cgroup v2, Linux namespace permissions, and DENIA_PRIVILEGED_BUSYBOX_STATIC"]
 fn overlay_replica_launches_with_readonly_bind_mount() {

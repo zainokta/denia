@@ -57,6 +57,13 @@ pub struct NamespaceConfig {
     /// Read-only bind mounts (e.g. helper binaries) injected into the new root
     /// after `pivot_root`, before proc is mounted.
     pub ro_binds: Vec<RoBind>,
+    /// Optional read-WRITE bind of a host directory onto an absolute guest path,
+    /// applied pre-userns. Used for the per-replica socket dir so the workload's
+    /// unix socket lives on the real host fs (the same inode the daemon connects
+    /// to) instead of in the overlay — an AF_UNIX socket created on overlayfs is
+    /// bound to the overlay inode and is NOT connectable via the upperdir path.
+    /// `(host_src, guest_dest)`.
+    pub socket_bind: Option<(PathBuf, PathBuf)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +128,7 @@ pub struct NativeLaunchPlan {
     pub max_procs: Option<u64>,
     pub overlay: Option<OverlayPlan>,
     pub ro_binds: Vec<RoBindPlan>,
+    pub socket_bind: Option<(CString, CString)>,
 }
 
 /// CString-ized overlay paths and mount data for the post-fork child.
@@ -198,6 +206,7 @@ impl Default for NamespaceConfig {
             max_procs: Some(1024),
             overlay: None,
             ro_binds: Vec::new(),
+            socket_bind: None,
         }
     }
 }
@@ -227,6 +236,13 @@ impl NamespaceConfig {
 
     pub fn with_cgroup_path(mut self, cgroup_path: impl Into<PathBuf>) -> Self {
         self.cgroup_path = cgroup_path.into();
+        self
+    }
+
+    /// Read-write bind a host directory onto `dest` (absolute within the new
+    /// root). Used for the per-replica socket dir; see the `socket_bind` field.
+    pub fn with_socket_bind(mut self, src: impl Into<PathBuf>, dest: impl Into<PathBuf>) -> Self {
+        self.socket_bind = Some((src.into(), dest.into()));
         self
     }
 
@@ -378,6 +394,13 @@ impl NamespaceConfig {
             .iter()
             .map(ro_bind_plan)
             .collect::<Result<Vec<_>, _>>()?;
+        let socket_bind = match &self.socket_bind {
+            Some((src, dest)) => Some((
+                path_cstring("socket bind src", src)?,
+                path_cstring("socket bind dest", dest)?,
+            )),
+            None => None,
+        };
 
         Ok(NativeLaunchPlan {
             setup,
@@ -398,6 +421,7 @@ impl NamespaceConfig {
             max_procs: self.max_procs,
             overlay,
             ro_binds,
+            socket_bind,
         })
     }
 
@@ -935,6 +959,7 @@ fn child_setup_stage(stage: u8) -> &'static str {
         b'D' => "setup /dev tmpfs",
         b'm' => "mask /proc paths",
         b'n' => "bring loopback up",
+        b'k' => "socket dir bind mount",
         b'g' => "setgid userns root",
         b'i' => "setuid userns root",
         b'N' => "set no_new_privs",
@@ -1042,7 +1067,10 @@ unsafe fn child_stage1(
     // user namespace, letting the child pivot_root with CAP_SYS_ADMIN over its own
     // user ns. See ADR-026.
     if plan.setup.clone_flags & libc::CLONE_NEWNS != 0
-        && (plan.overlay.is_some() || !plan.ro_binds.is_empty() || plan.setup_dev)
+        && (plan.overlay.is_some()
+            || !plan.ro_binds.is_empty()
+            || plan.setup_dev
+            || plan.socket_bind.is_some())
     {
         if unsafe { libc::unshare(libc::CLONE_NEWNS) } < 0 {
             unsafe { child_setup_fail(pipes, b'U') };
@@ -1154,6 +1182,64 @@ unsafe fn child_prepare_root(plan: &NativeLaunchPlan, pipes: &SyncPipes) {
     // workload. See ADR-026.
     if plan.setup_dev {
         unsafe { child_setup_dev(pipes, base) };
+    }
+
+    // Read-write bind the per-replica socket dir from the host onto `dest`, so the
+    // workload's unix socket lives on real host fs (the inode the daemon connects
+    // to). An AF_UNIX socket created on overlayfs binds to the overlay inode and
+    // is NOT connectable via the upperdir path. See ADR-026.
+    if let Some((src, dest)) = &plan.socket_bind {
+        unsafe { child_bind_dir_rw(pipes, base, dest, src) };
+    }
+}
+
+/// Read-write bind `src` (a host directory) onto `<base><dest>` (dest absolute
+/// within the new root), creating the mountpoint chain. Used for the per-replica
+/// socket dir so the workload's unix socket is on real host fs. Runs privileged,
+/// pre-userns; the recursive self-bind + pivot_root carry it into the workload.
+unsafe fn child_bind_dir_rw(
+    pipes: &SyncPipes,
+    base: &std::ffi::CStr,
+    dest: &std::ffi::CStr,
+    src: &std::ffi::CStr,
+) {
+    let base_bytes = base.to_bytes();
+    let dest_bytes = dest.to_bytes();
+    let mut full_buf = Vec::with_capacity(base_bytes.len() + dest_bytes.len() + 1);
+    full_buf.extend_from_slice(base_bytes);
+    full_buf.extend_from_slice(dest_bytes);
+    full_buf.push(0);
+    let full =
+        std::ffi::CStr::from_bytes_with_nul(&full_buf).expect("socket bind dest has valid NUL");
+    let full_bytes = full.to_bytes();
+    // Create the mountpoint directory chain under `base` (which already exists):
+    // mkdir at each '/' past the base prefix, then the final component.
+    let mut index = base_bytes.len() + 1;
+    while index <= full_bytes.len() {
+        if index == full_bytes.len() || full_bytes[index] == b'/' {
+            let mut component = full_bytes[..index].to_vec();
+            component.push(0);
+            let component = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(&component) };
+            if unsafe { libc::mkdir(component.as_ptr(), 0o755) } < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::EEXIST) {
+                    unsafe { child_setup_fail(pipes, b'k') };
+                }
+            }
+        }
+        index += 1;
+    }
+    if unsafe {
+        libc::mount(
+            src.as_ptr(),
+            full.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND | libc::MS_REC,
+            std::ptr::null(),
+        )
+    } < 0
+    {
+        unsafe { child_setup_fail(pipes, b'k') };
     }
 }
 

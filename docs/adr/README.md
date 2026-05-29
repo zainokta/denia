@@ -44,6 +44,7 @@ Each ADR should include:
 | [024](024-async-deployments.md) | Async Deployments With Per-Deployment Log Stream | Accepted | 2026-05-28 |
 | [025](025-cli-driven-host-provisioning.md) | CLI-Driven Host Provisioning | Accepted | 2026-05-28 |
 | [026](026-privileged-overlay-mount-pre-userns.md) | Privileged Overlay Mount Before the User-Namespace Unshare | Accepted | 2026-05-29 |
+| [027](027-daemon-lifecycle-stop-all-and-autostart.md) | Workload Lifecycle Bound to the Daemon (Stop-All on Shutdown, Autostart on Boot) | Accepted | 2026-05-29 |
 
 ## Contributing
 

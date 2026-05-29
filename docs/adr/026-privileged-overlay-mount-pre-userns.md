@@ -115,8 +115,21 @@ socket-proxy is launched through the bound loader:
 inherited by the workload socket-proxy spawns, so the workload keeps using its own
 image libc. A statically-linked socket-proxy yields no libs and is exec'd directly.
 
+**Workload socket on host fs (not the overlay).** socket-proxy's listening unix
+socket must be reachable by the daemon's Pingora ingress. A unix socket created
+on overlayfs (the workload's `merged` view) is bound to the **overlay inode** and
+is **not** connectable via the underlying upperdir path — the host-side daemon
+gets `ECONNREFUSED`. So a per-replica directory on the **real host fs**
+(`<data_dir>/sock/<hash>/`) is **read-write bind-mounted** onto the guest's
+`/run/denia` (`with_socket_bind`, applied pre-userns alongside the overlay/`/dev`
+binds and chowned to `userns_base`). socket-proxy binds `service.sock` there, so
+it is the **same inode** for both guest and host. That path is also short — under
+the `sockaddr_un` 108-byte limit — whereas the deep per-replica overlay path
+(`…/upper/run/denia/service.sock`, ~127 bytes) both exceeds the limit and is the
+unconnectable overlay inode. The daemon/ingress connect via the host path.
+
 The two-stage unshare now fires whenever an overlay is configured, any read-only
-bind is requested, **or** `/dev` setup is requested.
+bind is requested, `/dev` setup is requested, **or** a socket bind is configured.
 
 ## Consequences
 
@@ -158,5 +171,5 @@ bind is requested, **or** `/dev` setup is requested.
 
 - ADR-019 (Per-Replica Runtime Filesystem Isolation) — amended by this ADR
 - ADR-003 (Linux Runtime Process Runner)
-- `src/syscall/ns.rs` — `child_stage1`, `child_prepare_root`, `child_apply_ro_bind`, `child_setup_dev`, `child_exec`
+- `src/syscall/ns.rs` — `child_stage1`, `child_prepare_root`, `child_apply_ro_bind`, `child_setup_dev`, `child_bind_dir_rw`, `child_exec`
 - `src/runtime/linux.rs` — per-replica layer preparation, ownership, and the socket-proxy read-only bind

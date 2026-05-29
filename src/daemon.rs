@@ -8,10 +8,13 @@ use std::time::Duration;
 use crate::{
     app::{AppState, build_router},
     config::AppConfig,
+    deploy::coordinator::DeploymentCoordinator,
+    domain::RuntimeInstanceId,
     ingress::pingora::{
         AcmeDriver, ChallengeStore, IngressServerConfig, RENEWAL_WINDOW_DAYS, build_server,
         load_certs_from_disk, persist_cert, run_server, select_renewals,
     },
+    runtime::Runtime,
     scheduler::{Scheduler, run_until_shutdown},
     state::SqliteStore,
 };
@@ -65,6 +68,19 @@ pub async fn run() -> anyhow::Result<()> {
         .iter()
         .any(|s| s.tls_enabled);
     state.config.require_acme_email(tls_in_use)?;
+
+    // Reap workloads left behind by a previous unclean session (SIGKILL, crash,
+    // power loss). `list_running` is empty on a fresh process, so neither the
+    // autoscaler nor the plain-autostart below can see these survivors — a
+    // filesystem + cgroup sweep is the only thing that reaps them. Runs BEFORE
+    // any launcher so both start from a clean tree.
+    match state.runtime.sweep_orphans().await {
+        Ok(swept) if swept > 0 => {
+            tracing::warn!(swept, "removed orphaned workloads from a previous session")
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(?error, "orphan sweep failed; continuing boot"),
+    }
 
     let (scheduler, _enqueue_rx) = Scheduler::new(store.clone());
     let scheduler = Arc::new(scheduler);
@@ -196,15 +212,23 @@ pub async fn run() -> anyhow::Result<()> {
         None
     };
 
+    // Autostart plain (non-autoscaled) services whose promoted deployment is
+    // still set = "should be running". Autoscaled services were already brought
+    // back by the autoscaler's `reconcile_boot_all` above; routing them through
+    // the autoscaler would break the coordinator's single-replica convention.
+    autostart_plain_promoted(&state).await;
+
+    // Clone a runtime handle before `build_router` consumes `state`, so the
+    // shutdown path below can stop every running workload.
+    let shutdown_runtime = state.runtime.clone();
+
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     let app = build_router(state);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
+    .with_graceful_shutdown(shutdown_signal())
     .await?;
 
     let _ = shutdown_tx.send(());
@@ -227,7 +251,131 @@ pub async fn run() -> anyhow::Result<()> {
         let _ = tx.send(());
         let _ = handle.await;
     }
+
+    // Stop every running workload so nothing is orphaned across a daemon stop.
+    // Runs AFTER the autoscaler task is joined (above) so no tick can launch a
+    // replica mid-teardown. The DB is deliberately NOT mutated — promoted +
+    // Healthy must survive so the next boot autostarts them. Bounded by a
+    // timeout under systemd's TimeoutStopSec; stops run concurrently so N
+    // replicas don't serialize N × the per-replica SIGTERM grace.
+    stop_all_workloads(shutdown_runtime).await;
     Ok(())
+}
+
+/// Resolve when the daemon receives SIGINT (Ctrl+C) or SIGTERM (`systemctl
+/// stop`). `tokio::signal::ctrl_c` alone only catches SIGINT, which would leave
+/// the entire graceful-shutdown path dead under systemd.
+async fn shutdown_signal() {
+    let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(term) => term,
+        Err(error) => {
+            tracing::warn!(?error, "failed to install SIGTERM handler; SIGINT only");
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+}
+
+/// Stop all in-memory-tracked workloads concurrently, bounded by a 25s timeout
+/// (under the systemd `TimeoutStopSec=30s` ceiling). Best-effort: a single
+/// replica failing to stop is logged, never propagated.
+async fn stop_all_workloads(runtime: std::sync::Arc<dyn Runtime>) {
+    let running = runtime.list_running().await.unwrap_or_default();
+    if running.is_empty() {
+        return;
+    }
+    tracing::info!(
+        count = running.len(),
+        "stopping running workloads on shutdown"
+    );
+    let stop_all = async {
+        let mut set = tokio::task::JoinSet::new();
+        for status in running {
+            let runtime = runtime.clone();
+            set.spawn(async move {
+                let instance = RuntimeInstanceId {
+                    service_id: status.service_id,
+                    service_name: status.service_name.clone(),
+                    replica_index: status.replica_index,
+                };
+                if let Err(error) = runtime.stop(&instance).await {
+                    tracing::warn!(
+                        service_id = %status.service_id,
+                        replica = status.replica_index,
+                        ?error,
+                        "failed to stop workload during shutdown"
+                    );
+                }
+            });
+        }
+        while set.join_next().await.is_some() {}
+    };
+    if tokio::time::timeout(Duration::from_secs(25), stop_all)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "workload shutdown timed out; survivors will be reaped by the next boot's orphan sweep"
+        );
+    }
+}
+
+/// Restart plain (non-autoscaled) services whose promoted deployment is still
+/// set. Best-effort per service: one failure (missing artifact, runtime error)
+/// is logged and the rest continue.
+async fn autostart_plain_promoted(state: &AppState) {
+    let services = match state.services.list_services() {
+        Ok(services) => services,
+        Err(error) => {
+            tracing::warn!(?error, "boot autostart: failed to list services");
+            return;
+        }
+    };
+    let coordinator = DeploymentCoordinator::new_with_shared_routing(
+        state.deployment_repos(),
+        state.runtime.clone(),
+        state.health.clone(),
+        state.ingress.clone(),
+        state.routes.clone(),
+    );
+    for service in services.into_iter().filter(|s| s.autoscale.is_none()) {
+        let promoted = match state.deployments.promoted_deployment(service.id) {
+            Ok(promoted) => promoted,
+            Err(error) => {
+                tracing::warn!(service_id = %service.id, ?error, "boot autostart: promoted lookup failed");
+                continue;
+            }
+        };
+        let Some(deployment_id) = promoted else {
+            continue;
+        };
+        let log = match crate::deploy::log::DeploymentLogWriter::create(
+            &state.config.log_dir,
+            deployment_id,
+        ) {
+            Ok(writer) => writer,
+            Err(error) => {
+                tracing::warn!(service_id = %service.id, ?error, "boot autostart: cannot open deployment log");
+                continue;
+            }
+        };
+        let _ = log.write("AUTOSTART", "restarting promoted deployment on boot");
+        match coordinator.restart_promoted(&service, &log).await {
+            Ok(()) => tracing::info!(
+                service_id = %service.id,
+                deployment_id = %deployment_id,
+                "autostarted promoted deployment"
+            ),
+            Err(error) => {
+                let _ = log.write("ERROR", &format!("autostart failed: {error:?}"));
+                tracing::warn!(service_id = %service.id, ?error, "boot autostart failed; skipping");
+            }
+        }
+    }
 }
 
 /// Move the daemon (current process + all sibling threads) into a dedicated
