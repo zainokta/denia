@@ -5,4 +5,4 @@ mod routes;
 
 pub use coordinator::{DeploymentCoordinator, DeploymentPlan, DeploymentRepos, RunDeps};
 pub use error::DeployError;
-pub use routes::{SharedRoutes, apply_routes, route_table_from_snapshot};
+pub use routes::{SharedRoutes, apply_routes, rebuild_routes_on_boot, route_table_from_snapshot};

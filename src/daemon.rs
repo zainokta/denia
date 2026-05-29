@@ -231,6 +231,21 @@ pub async fn run() -> anyhow::Result<()> {
     // `Controller::reconcile_service` on the deploy path — see ADR-028.)
     autostart_plain_promoted(&state).await;
 
+    // Rebuild the ingress route table from persisted state so any service with a
+    // verified domain is reachable on boot WITHOUT a redeploy. The autoscaler's
+    // `reconcile_boot_all` and `autostart_plain_promoted` above repopulate the
+    // replica pools, but the route snapshot starts empty every boot — autoscaled
+    // services in particular never had their Host -> service_id route rewritten,
+    // so they 404'd (and scale-to-zero services could never be woken) until a
+    // redeploy. Runs after both launch paths so pools are populated before the
+    // routes go live.
+    if let Err(error) = crate::deploy::rebuild_routes_on_boot(&state) {
+        tracing::warn!(
+            ?error,
+            "boot route table rebuild failed; domains may be unreachable until redeploy"
+        );
+    }
+
     // Clone a runtime handle before `build_router` consumes `state`, so the
     // shutdown path below can stop every running workload.
     let shutdown_runtime = state.runtime.clone();
