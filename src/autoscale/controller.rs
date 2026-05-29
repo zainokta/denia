@@ -22,6 +22,7 @@ use crate::autoscale::usage::{ServiceUsage, UsageSampler};
 use crate::domain::{AutoscalePolicy, HealthCheck, ResourceLimits, RuntimeInstanceId};
 use crate::health::HealthChecker;
 use crate::ingress::pingora::{ActivationError, ActivationHook, IngressState};
+use crate::observability::logs::LogStore;
 use crate::observability::metrics::CgroupMetricsReader;
 use crate::runtime::Runtime;
 use crate::state::SqliteStore;
@@ -137,6 +138,9 @@ pub struct Controller {
     pub catalog: Arc<dyn ServiceCatalog>,
     pub cooldowns: HashMap<Uuid, CooldownState>,
     pub drain_grace: Duration,
+    /// Sink for control-plane marker lines (scale-to-zero / wake) written into
+    /// the per-service log so the lifecycle is visible in the console.
+    pub log_store: LogStore,
 }
 
 impl Controller {
@@ -151,6 +155,7 @@ impl Controller {
         usage: Box<dyn UsageSource>,
         catalog: Arc<dyn ServiceCatalog>,
         drain_grace: Duration,
+        log_store: LogStore,
     ) -> Self {
         Self {
             registry,
@@ -163,7 +168,16 @@ impl Controller {
             catalog,
             cooldowns: HashMap::new(),
             drain_grace,
+            log_store,
         }
+    }
+
+    /// Append a control-plane marker line to the service's log. Best-effort:
+    /// the key is the service id string (the log file the API reader tails) and
+    /// the format mirrors the deployment log writer (`{rfc3339} {PHASE} {msg}`).
+    fn append_service_log(&self, service_id: Uuid, msg: &str) {
+        let line = format!("{} AUTOSCALE {msg}\n", chrono::Utc::now().to_rfc3339());
+        let _ = self.log_store.append(&service_id.to_string(), &line);
     }
 
     /// Cold-start activation: launch exactly ONE replica for a scaled-to-zero
@@ -194,7 +208,10 @@ impl Controller {
         )
         .await
         {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                self.append_service_log(ms.service_id, "scaling up from zero");
+                Ok(())
+            }
             Err(LifecycleError::Capacity) => {
                 Err(ActivationError::Failed("insufficient_capacity".into()))
             }
@@ -512,6 +529,7 @@ impl Controller {
                             .await;
                         }
                         self.store.set_desired_replicas(ms.service_id, 0).ok();
+                        self.append_service_log(ms.service_id, "scaled to zero (idle)");
                         events.push(AutoscaleEvent::ScaledToZero {
                             service: ms.service_name.clone(),
                         });
@@ -624,6 +642,9 @@ impl Controller {
                     to: current,
                 });
             } else if current < start {
+                if current == 0 {
+                    self.append_service_log(ms.service_id, "scaled to zero");
+                }
                 events.push(AutoscaleEvent::ScaledDown {
                     service: ms.service_name.clone(),
                     from: start,
@@ -865,6 +886,7 @@ mod tests {
             usage,
             catalog,
             Duration::ZERO,
+            LogStore::new(std::env::temp_dir()),
         )
     }
 
@@ -1160,6 +1182,34 @@ mod tests {
             service: "web".to_string()
         }));
         assert_eq!(ctrl.store.get_desired_replicas(svc).unwrap(), Some(0));
+
+        // A control-plane marker line lands in the service log on the >0->0 drain.
+        let logs = ctrl.log_store.read_recent(&svc.to_string(), 10).unwrap();
+        assert!(logs.iter().any(|l| l.contains("AUTOSCALE scaled to zero")));
+    }
+
+    #[tokio::test]
+    async fn activate_logs_wake_from_zero() {
+        let svc = Uuid::now_v7();
+        let ms = managed(svc);
+        let mut ctrl = controller_with_catalog(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::with(ms.clone())),
+        );
+        assert_eq!(ctrl.registry.replica_count(svc), 0);
+
+        ctrl.activate_one(&svc.to_string()).await.unwrap();
+        assert_eq!(ctrl.registry.replica_count(svc), 1);
+
+        let logs = ctrl.log_store.read_recent(&svc.to_string(), 10).unwrap();
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("AUTOSCALE scaling up from zero"))
+        );
     }
 
     #[tokio::test]

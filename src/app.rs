@@ -121,6 +121,7 @@ impl AppState {
             usage,
             catalog,
             std::time::Duration::from_secs(30),
+            crate::observability::logs::LogStore::new(&state.config.log_dir),
         );
         state.autoscaler = Some(Arc::new(tokio::sync::Mutex::new(controller)));
 
