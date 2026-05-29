@@ -76,7 +76,20 @@ services are deliberately **not** routed through the autoscaler: it allocates it
 own replica ids, which would break the coordinator's single-replica
 `DEPLOY_REPLICA_ID`/`replica_index 0` convention used by stop and redeploy.
 
-**Boot ordering** in `daemon::run`: `relocate_daemon_cgroup` → `sweep_orphans` →
+**4. Per-session log hygiene (`src/observability/logs.rs`).** Each daemon process
+lifetime is treated as a "session". On startup, `clean_session_logs(log_dir)`
+empties `<log_dir>` — the service workload logs (`{service_id}.log`) and the
+`deployments/` subtree — so every session begins with a clean log tree. The wipe
+preserves `log_dir` itself (and its `0700` perms from `denia setup`); it does not
+remove+recreate the directory. It is best-effort per entry and a missing
+`log_dir` is a no-op. The trigger is **startup, not shutdown**, so unclean exits
+(SIGKILL/crash/power-loss) are also covered — the next boot cleans them. The
+daemon's own diagnostics go to stderr → journald and are out of scope (systemd
+manages those). The wipe runs **before** `fail_orphan_deployments()` so its
+synthetic `RESTART` markers land in the freshly emptied tree.
+
+**Boot ordering** in `daemon::run`: `clean_session_logs` →
+`fail_orphan_deployments` → `relocate_daemon_cgroup` → `sweep_orphans` →
 autoscaler `reconcile_boot_all` → `autostart_plain_promoted` → serve.
 
 ## Consequences
@@ -129,3 +142,4 @@ autoscaler `reconcile_boot_all` → `autostart_plain_promoted` → serve.
 - `src/daemon.rs` — `shutdown_signal`, `stop_all_workloads`, `autostart_plain_promoted`
 - `src/runtime/linux.rs` — `sweep_orphans`
 - `src/deploy/coordinator.rs` — `restart_promoted`, `finalize`, `stop_service`
+- `src/observability/logs.rs` — `clean_session_logs`
