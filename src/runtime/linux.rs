@@ -78,6 +78,24 @@ fn is_dynamic_loader(path: &Path) -> bool {
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.starts_with("ld-"))
 }
+
+/// Parse a directory entry whose name is a UUID (service/deployment dirs).
+/// Returns `None` for non-dirs, symlinks, or non-UUID names so the orphan
+/// sweep skips bookkeeping dirs like `jobs`.
+fn parse_uuid_dir(path: &Path) -> Option<uuid::Uuid> {
+    if !path.is_dir() {
+        return None;
+    }
+    uuid::Uuid::parse_str(path.file_name()?.to_str()?).ok()
+}
+
+/// Parse a directory entry whose name is a numeric replica index.
+fn parse_index_dir(path: &Path) -> Option<u32> {
+    if !path.is_dir() {
+        return None;
+    }
+    path.file_name()?.to_str()?.parse::<u32>().ok()
+}
 pub(crate) const WORKLOAD_LAUNCHER_TARGET: &str = "/.denia/workload-launcher";
 pub(crate) const GUEST_SERVICE_SOCKET: &str = "/run/denia/service.sock";
 pub(crate) const GUEST_SERVICE_SOCKET_ENV: &str = "DENIA_SERVICE_SOCKET";
@@ -172,18 +190,14 @@ impl LinuxRuntime {
         let upper = replica_dir.join("upper");
         let work = replica_dir.join("work");
         let merged = replica_dir.join("merged");
-        // The socket-proxy creates the guest socket at GUEST_SERVICE_SOCKET, which
-        // lives inside the overlay. Overlay writes land in `upper` (host-visible),
-        // whereas `merged` is private to the child's mount namespace. The host-side
-        // socket path used by readiness waits, status, and the bridge must therefore
-        // be the upper-side path, not rootfs/ nor merged/.
-        let socket_path = upper.join(GUEST_SERVICE_SOCKET.trim_start_matches('/'));
-        // The per-replica socket lives at a deep path (~127 bytes) that exceeds
-        // the sockaddr_un 108-byte limit, so the ingress (and any client) cannot
-        // connect() to it directly. Expose a short hashed alias under the data
-        // dir, symlinked to the real socket in prepare_socket_directory; the
-        // daemon/ingress connect via the alias. See ADR-020/026.
-        let socket_connect_path = {
+        // Per-replica socket dir on the REAL host fs (NOT the overlay): an
+        // AF_UNIX socket created on overlayfs binds to the overlay inode and is
+        // NOT connectable via the upperdir path. This dir is RW-bind-mounted onto
+        // the guest GUEST_SERVICE_SOCKET parent (see with_socket_bind), so
+        // socket-proxy binds the socket here and the daemon connects to the same
+        // inode via a short host path (under the sockaddr_un 108-byte limit).
+        // `socket_path`/`socket_connect_path` are that short host path. See ADR-026.
+        let socket_dir_host = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             format!(
@@ -195,8 +209,18 @@ impl LinuxRuntime {
                 .parent()
                 .unwrap_or(self.runtime_dir.as_path())
                 .join("sock")
-                .join(format!("{:016x}.sock", hasher.finish()))
+                .join(format!("{:016x}", hasher.finish()))
         };
+        let socket_basename = GUEST_SERVICE_SOCKET
+            .rsplit('/')
+            .next()
+            .unwrap_or("service.sock");
+        let guest_socket_dir = GUEST_SERVICE_SOCKET
+            .rsplit_once('/')
+            .map(|(dir, _)| dir)
+            .unwrap_or("/run/denia");
+        let socket_path = socket_dir_host.join(socket_basename);
+        let socket_connect_path = socket_path.clone();
         let cgroup_path = self
             .cgroup_root
             .join(request.service_id.to_string())
@@ -269,6 +293,7 @@ impl LinuxRuntime {
         // when an overlay is set), so the namespace root must be `merged`.
         let mut namespace = NamespaceConfig::new(merged.clone(), child_argv.clone())
             .with_overlay(overlay)
+            .with_socket_bind(socket_dir_host.clone(), guest_socket_dir)
             .with_uid_map(self.userns_base, self.userns_size)
             .with_cgroup_path(cgroup_path.clone())
             .with_workdir(process.workdir.clone())
@@ -398,9 +423,11 @@ impl LinuxRuntime {
     pub fn cleanup(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
         remove_cgroup_dir_if_exists(&plan.cgroup_path)?;
         let _ = rustix::mount::unmount(&plan.merged, rustix::mount::UnmountFlags::DETACH);
-        // Remove the short connect alias (symlink); it lives outside replica_dir
-        // so the wipe below won't catch it.
-        let _ = std::fs::remove_file(&plan.socket_connect_path);
+        // Remove the per-replica host socket dir; it lives under <data_dir>/sock
+        // (outside replica_dir) so the wipe below won't catch it.
+        if let Some(dir) = plan.socket_path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         // The upper layer is ephemeral: wiping the replica dir removes
         // upper/work/merged so a relaunch starts from a clean writable layer.
         remove_dir_if_exists(&plan.replica_dir)?;
@@ -433,26 +460,17 @@ impl LinuxRuntime {
     }
 
     fn prepare_socket_directory(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
-        // The socket lives in the writable upper layer (host-visible) so the
-        // host-side socket path resolves once the guest socket-proxy binds it.
-        let run_dir = plan.upper.join("run");
-        let socket_dir = plan.upper.join("run/denia");
-        create_runtime_directory(&run_dir)?;
-        create_runtime_directory(&socket_dir)?;
-        self.chown_overlay_dir(&run_dir)?;
-        self.chown_overlay_dir(&socket_dir)?;
-        remove_existing_runtime_file(&plan.socket_path)?;
-        // Short connect alias → the deep upper-side socket. The alias path stays
-        // under the sockaddr_un 108-byte limit so the ingress/clients can
-        // connect(); the symlink may dangle until socket-proxy binds, after which
-        // connect() follows it to the real socket.
-        if let Some(parent) = plan.socket_connect_path.parent() {
-            create_runtime_directory(parent)?;
+        // The socket lives on the REAL host fs (RW-bind-mounted into the guest at
+        // GUEST_SERVICE_SOCKET's parent), NOT in the overlay upper — an AF_UNIX
+        // socket on overlayfs is bound to the overlay inode and is not connectable
+        // via the upperdir path. Create the host socket dir and chown it to the
+        // userns base so the workload (mapped userns-root) can bind the socket;
+        // the daemon connects to the same inode directly.
+        if let Some(dir) = plan.socket_path.parent() {
+            create_runtime_directory(dir)?;
+            self.chown_overlay_dir(dir)?;
         }
-        let _ = std::fs::remove_file(&plan.socket_connect_path);
-        std::os::unix::fs::symlink(&plan.socket_path, &plan.socket_connect_path).map_err(
-            path_io("create socket connect alias", &plan.socket_connect_path),
-        )?;
+        remove_existing_runtime_file(&plan.socket_path)?;
         Ok(())
     }
 
@@ -721,9 +739,144 @@ impl Runtime for LinuxRuntime {
             .collect();
         Ok(statuses)
     }
+
+    async fn sweep_orphans(&self) -> Result<usize, RuntimeError> {
+        let mut swept = 0usize;
+        let service_entries = match std::fs::read_dir(&self.runtime_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(RuntimeError::Io(error)),
+        };
+        // runtime_dir layout: {service_id}/{deployment_id}/{replica_index}/.
+        // Names that don't parse as UUID/index (e.g. `jobs`) are skipped.
+        for service_entry in service_entries.flatten() {
+            let service_path = service_entry.path();
+            let Some(service_id) = parse_uuid_dir(&service_path) else {
+                continue;
+            };
+            let Ok(deployment_entries) = std::fs::read_dir(&service_path) else {
+                continue;
+            };
+            for deployment_entry in deployment_entries.flatten() {
+                let deployment_path = deployment_entry.path();
+                let Some(deployment_id) = parse_uuid_dir(&deployment_path) else {
+                    continue;
+                };
+                let Ok(replica_entries) = std::fs::read_dir(&deployment_path) else {
+                    continue;
+                };
+                for replica_entry in replica_entries.flatten() {
+                    let replica_path = replica_entry.path();
+                    let Some(replica_index) = parse_index_dir(&replica_path) else {
+                        continue;
+                    };
+                    self.sweep_one_replica(service_id, deployment_id, replica_index, &replica_path)
+                        .await;
+                    swept += 1;
+                }
+                // Prune the now-(hopefully)-empty deployment dir.
+                let _ = std::fs::remove_dir(&deployment_path);
+            }
+            let _ = std::fs::remove_dir(&service_path);
+        }
+        // Remove socket aliases whose real socket no longer resolves (the deep
+        // upper-side socket went away with the swept replica dir). See `plan`.
+        self.sweep_socket_aliases();
+        Ok(swept)
+    }
 }
 
 impl LinuxRuntime {
+    /// Tear down one leftover replica found on disk: kill its cgroup, unmount
+    /// the overlay, and remove the cgroup + replica directories. Best-effort —
+    /// every step swallows its error (logged) so one stuck replica never aborts
+    /// the rest of the boot sweep.
+    async fn sweep_one_replica(
+        &self,
+        service_id: uuid::Uuid,
+        deployment_id: uuid::Uuid,
+        replica_index: u32,
+        replica_path: &Path,
+    ) {
+        let cgroup_path = self
+            .cgroup_root
+            .join(service_id.to_string())
+            .join(deployment_id.to_string())
+            .join(replica_index.to_string());
+        // 1. Kill any survivors in the cgroup (same backstop as normal stop).
+        match std::fs::write(cgroup_path.join("cgroup.kill"), "1\n") {
+            Ok(()) => self.wait_cgroup_drained(&cgroup_path).await,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                ?error,
+                cgroup = %cgroup_path.display(),
+                "orphan sweep: failed to write cgroup.kill"
+            ),
+        }
+        // 2. Unmount the overlay mountpoint (may not be mounted; ignore errors).
+        let merged = replica_path.join("merged");
+        let _ = rustix::mount::unmount(&merged, rustix::mount::UnmountFlags::DETACH);
+        // 3. Remove the cgroup leaf and the replica directory tree.
+        if let Err(error) = remove_cgroup_dir_if_exists(&cgroup_path) {
+            tracing::warn!(
+                ?error,
+                cgroup = %cgroup_path.display(),
+                "orphan sweep: failed to remove cgroup dir"
+            );
+        }
+        if let Err(error) = remove_dir_if_exists(replica_path) {
+            tracing::warn!(
+                ?error,
+                replica = %replica_path.display(),
+                "orphan sweep: failed to remove replica dir"
+            );
+        }
+    }
+
+    /// Poll `cgroup.procs` until it is empty (all killed pids reaped) or a short
+    /// deadline passes, so the subsequent `rmdir` of the cgroup does not hit
+    /// EBUSY. Best-effort and bounded.
+    async fn wait_cgroup_drained(&self, cgroup_path: &Path) {
+        let procs = cgroup_path.join("cgroup.procs");
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+        loop {
+            match std::fs::read_to_string(&procs) {
+                Ok(contents) if contents.split_whitespace().next().is_none() => return,
+                Ok(_) => {}
+                Err(_) => return,
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Remove dangling socket-alias symlinks under `<data_dir>/sock`. An alias
+    /// points at the deep upper-side socket of a replica; once that replica's
+    /// dir is swept the alias dangles, so a target that no longer resolves marks
+    /// a stale alias safe to delete. See `plan`'s `socket_connect_path`.
+    fn sweep_socket_aliases(&self) {
+        let sock_dir = self
+            .runtime_dir
+            .parent()
+            .unwrap_or(self.runtime_dir.as_path())
+            .join("sock");
+        let Ok(entries) = std::fs::read_dir(&sock_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_symlink = std::fs::symlink_metadata(&path)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            // `metadata` follows the symlink; Err means the target is gone.
+            if is_symlink && std::fs::metadata(&path).is_err() {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
     fn reap_exited_children(&self) -> Result<(), RuntimeError> {
         let exited = {
             let mut children = self
@@ -859,26 +1012,29 @@ mod tests {
         assert_ne!(plan0.cgroup_path, plan1.cgroup_path);
         assert_ne!(plan0.socket_path, plan1.socket_path);
 
-        // Host-side socket path is the upper-side path, not rootfs/ nor merged/.
+        // Host-side socket path is a short dir under <data_dir>/sock (real host
+        // fs, RW-bind-mounted into the guest), NOT the overlay upper/merged nor
+        // the read-only rootfs — an AF_UNIX socket on overlayfs isn't connectable
+        // via the upperdir path. See ADR-026.
         assert!(
-            plan0.socket_path.starts_with(&plan0.upper),
-            "socket path {} must be under upper {}",
-            plan0.socket_path.display(),
-            plan0.upper.display()
-        );
-        assert!(
-            plan0.socket_path.ends_with("upper/run/denia/service.sock"),
+            plan0.socket_path.ends_with("service.sock"),
             "unexpected socket path: {}",
             plan0.socket_path.display()
         );
         assert!(
-            !plan0.socket_path.starts_with(&plan0.rootfs_path),
-            "socket path must not be inside the read-only rootfs"
+            plan0
+                .socket_path
+                .starts_with(runtime_dir.parent().unwrap().join("sock")),
+            "socket path {} must be under <data_dir>/sock",
+            plan0.socket_path.display()
         );
-        assert!(
-            !plan0.socket_path.starts_with(&plan0.merged),
-            "socket path must not be the namespace-private merged mount"
-        );
+        for bad in [&plan0.upper, &plan0.merged, &plan0.rootfs_path] {
+            assert!(
+                !plan0.socket_path.starts_with(bad),
+                "socket path must not be under {}",
+                bad.display()
+            );
+        }
     }
 
     #[test]
@@ -1016,46 +1172,12 @@ mod tests {
             "prepare must not create the socket directory in the read-only rootfs"
         );
         assert!(
-            plan.upper.join("run/denia").is_dir(),
-            "prepare must create the socket directory in the per-replica upper layer"
+            plan.socket_path.parent().unwrap().is_dir(),
+            "prepare must create the host-side socket directory"
         );
         assert!(
             plan.upper.join(".denia").is_dir(),
             "prepare must create the .denia directory in the per-replica upper layer"
-        );
-    }
-
-    #[test]
-    fn prepare_rejects_socket_run_directory_symlink() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let runtime_dir = tmp.path().join("runtime");
-        let artifact_dir = tmp.path().join("artifacts");
-        let cgroup_dir = tmp.path().join("cgroup");
-        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
-        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
-
-        let (artifact, _bundle_dir, _rootfs) =
-            write_process_bundle(&artifact_dir, "sha256:run-link");
-        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
-        let request = runtime_request(&runtime_dir, artifact, "test-svc");
-        let plan = runtime.plan(&request).expect("plan");
-        // Pre-plant a symlink at the upper-side run dir before prepare runs.
-        std::fs::create_dir_all(&plan.upper).expect("upper dir");
-        let outside_run = tmp.path().join("outside-run");
-        std::fs::create_dir_all(&outside_run).expect("outside run dir");
-        symlink(&outside_run, plan.upper.join("run")).expect("run symlink");
-
-        let error = runtime
-            .prepare(&plan, &request)
-            .expect_err("socket run symlink rejected");
-
-        assert!(
-            matches!(error, RuntimeError::UnsafeRuntimePath { ref path } if path == &plan.upper.join("run")),
-            "expected unsafe run path, got: {error:?}"
-        );
-        assert!(
-            !outside_run.join("denia").exists(),
-            "prepare must not create socket directories outside the upper layer"
         );
     }
 
@@ -1073,7 +1195,7 @@ mod tests {
         let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
         let request = runtime_request(&runtime_dir, artifact, "test-svc");
         let plan = runtime.plan(&request).expect("plan");
-        std::fs::create_dir_all(plan.upper.join("run/denia")).expect("socket dir");
+        std::fs::create_dir_all(plan.socket_path.parent().unwrap()).expect("socket dir");
         std::fs::write(&plan.socket_path, "stale").expect("stale socket marker");
 
         runtime.prepare(&plan, &request).expect("prepare");
@@ -1099,7 +1221,7 @@ mod tests {
         let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
         let request = runtime_request(&runtime_dir, artifact, "test-svc");
         let plan = runtime.plan(&request).expect("plan");
-        std::fs::create_dir_all(plan.upper.join("run/denia")).expect("socket dir");
+        std::fs::create_dir_all(plan.socket_path.parent().unwrap()).expect("socket dir");
         symlink(&outside_socket, &plan.socket_path).expect("socket symlink");
 
         let error = runtime

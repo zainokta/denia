@@ -442,6 +442,37 @@ where
         Ok(updated)
     }
 
+    /// Restart the currently-promoted deployment of `service` from its already
+    /// acquired artifact, re-wiring ingress at `replica_index 0`. Used by boot
+    /// autostart for plain (non-autoscaled) services: a service whose promoted
+    /// deployment is still set "should be running" (explicit stop clears the
+    /// promoted row, so a stopped service is skipped here).
+    ///
+    /// No-op (`Ok`) when there is no promoted deployment or its artifact is
+    /// missing (e.g. GC'd) — the caller logs and moves on. Re-promotion via
+    /// `finalize` is idempotent.
+    pub async fn restart_promoted(
+        &self,
+        service: &ServiceConfig,
+        log: &crate::deploy::log::DeploymentLogWriter,
+    ) -> Result<(), DeployError> {
+        let Some(deployment_id) = self.repos.deployments.promoted_deployment(service.id)? else {
+            return Ok(());
+        };
+        let Some(artifact) = self
+            .repos
+            .deployments
+            .get_deployment_artifact(deployment_id)?
+        else {
+            let _ = log.write(
+                "AUTOSTART",
+                "promoted deployment has no artifact (GC'd); skipping",
+            );
+            return Ok(());
+        };
+        self.finalize(deployment_id, service, artifact, log).await
+    }
+
     pub async fn stop_service(&self, service: &ServiceConfig) -> Result<(), DeployError> {
         let promoted_deployment = self.repos.deployments.promoted_deployment(service.id)?;
 
@@ -706,5 +737,137 @@ mod async_tests {
             .find(|d2| d2.id == d.id)
             .expect("row exists");
         assert_eq!(row.status, DeploymentStatus::Pending);
+    }
+
+    /// Build a coordinator wired to a clonable `FakeRuntime` (so the test can
+    /// inspect `started_requests` afterwards) plus a stored service.
+    fn coord_with_runtime() -> (
+        SqliteStore,
+        DeploymentCoordinator<FakeRuntime, FakeHealthChecker>,
+        FakeRuntime,
+        ServiceConfig,
+    ) {
+        let store = SqliteStore::open_in_memory().expect("sqlite");
+        store.migrate().expect("migrate");
+        let runtime = FakeRuntime::default();
+        let coordinator = DeploymentCoordinator::new(
+            build_repos(&store),
+            runtime.clone(),
+            FakeHealthChecker::healthy(),
+        );
+        let project_id = store.default_project_id().expect("default project");
+        let service = store
+            .put_service(
+                ServiceConfig::new(
+                    project_id,
+                    "web",
+                    vec!["web.example.test".to_string()],
+                    ServiceSource::ExternalImage(ExternalImageSource {
+                        image: "ghcr.io/acme/web:latest".to_string(),
+                        credential: None,
+                        registry_id: None,
+                        image_ref: None,
+                    }),
+                    3000,
+                    HealthCheck::new("/ready", 5),
+                    Some(ResourceLimits::default()),
+                    vec![],
+                )
+                .expect("service"),
+            )
+            .expect("stored service");
+        (store, coordinator, runtime, service)
+    }
+
+    #[tokio::test]
+    async fn restart_promoted_relaunches_from_existing_artifact() {
+        use crate::artifacts::{ArtifactKind, ArtifactRecord};
+        let (store, coordinator, runtime, service) = coord_with_runtime();
+        let repos = build_repos(&store);
+
+        let deployment = repos
+            .deployments
+            .create_deployment(DeploymentRequest::external_image(
+                service.id,
+                "ghcr.io/acme/web:latest",
+            ))
+            .expect("deployment");
+        let artifact = ArtifactRecord::new(
+            "sha256:deadbeef",
+            ArtifactKind::OciImage,
+            ArtifactSource::ExternalRegistry {
+                image: "ghcr.io/acme/web:latest".to_string(),
+            },
+        )
+        .expect("artifact");
+        repos
+            .deployments
+            .put_artifact(artifact)
+            .expect("put artifact");
+        repos
+            .deployments
+            .set_deployment_artifact(deployment.id, "sha256:deadbeef")
+            .expect("link artifact");
+        repos
+            .deployments
+            .promote_deployment(service.id, deployment.id)
+            .expect("promote");
+
+        let log = test_log_writer(deployment.id).expect("log");
+        coordinator
+            .restart_promoted(&service, &log)
+            .await
+            .expect("restart");
+
+        let started = runtime.started_requests();
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].replica_index, 0);
+        assert_eq!(started[0].service_id, service.id);
+        assert_eq!(started[0].deployment_id, deployment.id);
+        // Re-promote is idempotent: the promotion survives.
+        assert_eq!(
+            repos
+                .deployments
+                .promoted_deployment(service.id)
+                .expect("promoted"),
+            Some(deployment.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_promoted_no_promoted_is_noop() {
+        let (_store, coordinator, runtime, service) = coord_with_runtime();
+        // No promoted deployment for this service.
+        let log = test_log_writer(uuid::Uuid::now_v7()).expect("log");
+        coordinator
+            .restart_promoted(&service, &log)
+            .await
+            .expect("noop ok");
+        assert!(runtime.started_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn restart_promoted_skips_when_artifact_missing() {
+        let (store, coordinator, runtime, service) = coord_with_runtime();
+        let repos = build_repos(&store);
+        // Promote a deployment WITHOUT linking an artifact (e.g. GC'd).
+        let deployment = repos
+            .deployments
+            .create_deployment(DeploymentRequest::external_image(
+                service.id,
+                "ghcr.io/acme/web:latest",
+            ))
+            .expect("deployment");
+        repos
+            .deployments
+            .promote_deployment(service.id, deployment.id)
+            .expect("promote");
+
+        let log = test_log_writer(deployment.id).expect("log");
+        coordinator
+            .restart_promoted(&service, &log)
+            .await
+            .expect("skip ok");
+        assert!(runtime.started_requests().is_empty());
     }
 }
