@@ -120,13 +120,28 @@ socket must be reachable by the daemon's Pingora ingress. A unix socket created
 on overlayfs (the workload's `merged` view) is bound to the **overlay inode** and
 is **not** connectable via the underlying upperdir path — the host-side daemon
 gets `ECONNREFUSED`. So a per-replica directory on the **real host fs**
-(`<data_dir>/sock/<hash>/`) is **read-write bind-mounted** onto the guest's
-`/run/denia` (`with_socket_bind`, applied pre-userns alongside the overlay/`/dev`
-binds and chowned to `userns_base`). socket-proxy binds `service.sock` there, so
-it is the **same inode** for both guest and host. That path is also short — under
-the `sockaddr_un` 108-byte limit — whereas the deep per-replica overlay path
+(`<data_dir>/sock/<hash>/`) is **read-write bind-mounted onto the same absolute
+path inside the guest** (identity mount via `with_socket_bind`, applied pre-userns
+alongside the overlay/`/dev` binds and chowned to `userns_base`). socket-proxy
+binds `service.sock` there, so it is the **same inode** for both guest and host.
+
+The mount is **identity** (guest path == host path) deliberately. Pingora
+validates a pooled UDS connection by comparing `getpeername(fd)` — the server's
+bound `sun_path` — against its dial path (`ConnFdReusable for Path`,
+`pingora-core/src/protocols/mod.rs`). If socket-proxy binds a *guest-only* path
+(the earlier `/run/denia/service.sock`) while the daemon dials the host path, the
+two `sun_path` strings never match even though it is the same inode, so the check
+fails on **every** reuse — logging `Crit: unix FD mismatch: peer: /run/denia/…,
+addr: /var/lib/denia/sock/<hash>/…` and discarding the pooled connection to open a
+fresh one per request (requests still succeed; UDS keep-alive pooling is silently
+disabled). Binding and dialing the identical string keeps the reuse check passing.
+
+That path is also short — under the `sockaddr_un` 108-byte limit (the hashed dir
+keeps it ~49 bytes) — whereas the deep per-replica overlay path
 (`…/upper/run/denia/service.sock`, ~127 bytes) both exceeds the limit and is the
-unconnectable overlay inode. The daemon/ingress connect via the host path.
+unconnectable overlay inode. The guest path the workload sees in the
+`DENIA_SERVICE_SOCKET` env is this same host path. The daemon/ingress connect via
+the host path.
 
 The two-stage unshare now fires whenever an overlay is configured, any read-only
 bind is requested, `/dev` setup is requested, **or** a socket bind is configured.

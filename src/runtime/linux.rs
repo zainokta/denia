@@ -97,7 +97,7 @@ fn parse_index_dir(path: &Path) -> Option<u32> {
     path.file_name()?.to_str()?.parse::<u32>().ok()
 }
 pub(crate) const WORKLOAD_LAUNCHER_TARGET: &str = "/.denia/workload-launcher";
-pub(crate) const GUEST_SERVICE_SOCKET: &str = "/run/denia/service.sock";
+pub(crate) const SOCKET_BASENAME: &str = "service.sock";
 pub(crate) const GUEST_SERVICE_SOCKET_ENV: &str = "DENIA_SERVICE_SOCKET";
 pub(crate) const CGROUP_CONTROLLERS: &[&str] = &["cpu", "memory", "pids", "io"];
 
@@ -178,12 +178,6 @@ impl LinuxRuntime {
         for (key, value) in &request.env {
             env_map.insert(key.clone(), value.clone());
         }
-        env_map.insert(
-            GUEST_SERVICE_SOCKET_ENV.to_string(),
-            GUEST_SERVICE_SOCKET.to_string(),
-        );
-        let env: Vec<(String, String)> = env_map.into_iter().collect();
-
         let service_dir = self.runtime_dir.join(request.service_id.to_string());
         let deployment_dir = service_dir.join(request.deployment_id.to_string());
         let replica_dir = deployment_dir.join(request.replica_index.to_string());
@@ -193,10 +187,13 @@ impl LinuxRuntime {
         // Per-replica socket dir on the REAL host fs (NOT the overlay): an
         // AF_UNIX socket created on overlayfs binds to the overlay inode and is
         // NOT connectable via the upperdir path. This dir is RW-bind-mounted onto
-        // the guest GUEST_SERVICE_SOCKET parent (see with_socket_bind), so
-        // socket-proxy binds the socket here and the daemon connects to the same
-        // inode via a short host path (under the sockaddr_un 108-byte limit).
-        // `socket_path`/`socket_connect_path` are that short host path. See ADR-026.
+        // the SAME absolute path inside the guest (identity mount, see
+        // with_socket_bind), so socket-proxy binds and the daemon dials the
+        // identical sun_path string. That keeps Pingora's UDS connection-reuse
+        // check (`getpeername` == dial path) passing — a divergent guest path
+        // would log `unix FD mismatch` and force a fresh connection per request.
+        // The hashed dir keeps the path under the sockaddr_un 108-byte limit.
+        // `socket_path`/`socket_connect_path` are that host path. See ADR-026.
         let socket_dir_host = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -211,16 +208,13 @@ impl LinuxRuntime {
                 .join("sock")
                 .join(format!("{:016x}", hasher.finish()))
         };
-        let socket_basename = GUEST_SERVICE_SOCKET
-            .rsplit('/')
-            .next()
-            .unwrap_or("service.sock");
-        let guest_socket_dir = GUEST_SERVICE_SOCKET
-            .rsplit_once('/')
-            .map(|(dir, _)| dir)
-            .unwrap_or("/run/denia");
-        let socket_path = socket_dir_host.join(socket_basename);
+        let socket_path = socket_dir_host.join(SOCKET_BASENAME);
         let socket_connect_path = socket_path.clone();
+        // Identity path: socket-proxy `--listen`, the workload's DENIA_SERVICE_SOCKET
+        // env, and the daemon's dial target are all this single host path.
+        let guest_socket = socket_path.to_string_lossy().into_owned();
+        env_map.insert(GUEST_SERVICE_SOCKET_ENV.to_string(), guest_socket.clone());
+        let env: Vec<(String, String)> = env_map.into_iter().collect();
         let cgroup_path = self
             .cgroup_root
             .join(request.service_id.to_string())
@@ -261,7 +255,7 @@ impl LinuxRuntime {
         }
         child_argv.push(SOCKET_PROXY_TARGET.to_string());
         child_argv.push("--listen".to_string());
-        child_argv.push(GUEST_SERVICE_SOCKET.to_string());
+        child_argv.push(guest_socket.clone());
         child_argv.push("--connect".to_string());
         child_argv.push(format!("127.0.0.1:{}", request.internal_port));
         child_argv.push("--".to_string());
@@ -293,7 +287,7 @@ impl LinuxRuntime {
         // when an overlay is set), so the namespace root must be `merged`.
         let mut namespace = NamespaceConfig::new(merged.clone(), child_argv.clone())
             .with_overlay(overlay)
-            .with_socket_bind(socket_dir_host.clone(), guest_socket_dir)
+            .with_socket_bind(socket_dir_host.clone(), socket_dir_host.clone())
             .with_uid_map(self.userns_base, self.userns_size)
             .with_cgroup_path(cgroup_path.clone())
             .with_workdir(process.workdir.clone())
@@ -308,7 +302,7 @@ impl LinuxRuntime {
             rootfs_path,
             socket_path,
             socket_connect_path,
-            guest_socket_path: GUEST_SERVICE_SOCKET.to_string(),
+            guest_socket_path: guest_socket,
             cgroup_path,
             deployment_id: request.deployment_id,
             service_dir,
@@ -461,7 +455,7 @@ impl LinuxRuntime {
 
     fn prepare_socket_directory(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
         // The socket lives on the REAL host fs (RW-bind-mounted into the guest at
-        // GUEST_SERVICE_SOCKET's parent), NOT in the overlay upper — an AF_UNIX
+        // the same absolute path, identity mount), NOT in the overlay upper — an AF_UNIX
         // socket on overlayfs is bound to the overlay inode and is not connectable
         // via the upperdir path. Create the host socket dir and chown it to the
         // userns base so the workload (mapped userns-root) can bind the socket;
@@ -918,8 +912,8 @@ impl LinuxRuntime {
 #[cfg(test)]
 mod tests {
     use super::{
-        CGROUP_CONTROLLERS, GUEST_SERVICE_SOCKET, GUEST_SERVICE_SOCKET_ENV, LinuxRuntime,
-        LinuxRuntimePlan, LinuxRuntimeProcessSpec, TrackedChild, TrackedProcess,
+        CGROUP_CONTROLLERS, GUEST_SERVICE_SOCKET_ENV, LinuxRuntime, LinuxRuntimePlan,
+        LinuxRuntimeProcessSpec, TrackedChild, TrackedProcess,
     };
     use crate::artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource};
     use crate::domain::RuntimeStartRequest;
@@ -1068,7 +1062,7 @@ mod tests {
             plan.namespace.env,
             vec![(
                 GUEST_SERVICE_SOCKET_ENV.to_string(),
-                GUEST_SERVICE_SOCKET.to_string()
+                plan.socket_path.to_string_lossy().into_owned()
             )]
         );
         assert_eq!(plan.namespace.cgroup_path, plan.cgroup_path);
@@ -1092,7 +1086,7 @@ mod tests {
         let expected_tail = vec![
             "/.denia/socket-proxy".to_string(),
             "--listen".to_string(),
-            "/run/denia/service.sock".to_string(),
+            plan.socket_path.to_string_lossy().into_owned(),
             "--connect".to_string(),
             "127.0.0.1:8080".to_string(),
             "--".to_string(),
@@ -1341,7 +1335,11 @@ mod tests {
                 rootfs_path: tmp.path().join("rootfs"),
                 socket_path: tmp.path().join("replica/upper/run/denia/service.sock"),
                 socket_connect_path: tmp.path().join("sock/test.sock"),
-                guest_socket_path: GUEST_SERVICE_SOCKET.to_string(),
+                guest_socket_path: tmp
+                    .path()
+                    .join("sock/test.sock")
+                    .to_string_lossy()
+                    .into_owned(),
                 cgroup_path: cgroup_path.clone(),
                 deployment_id: uuid::Uuid::now_v7(),
                 service_dir: tmp.path().join("runtime/test-svc"),
