@@ -49,6 +49,37 @@ impl LogStore {
     }
 }
 
+/// Remove all per-session log files (service `{id}.log` at the top level and the
+/// `deployments/` subtree) so each daemon session starts with a clean log tree.
+/// Preserves `log_dir` itself and its permissions. Best-effort per entry; a
+/// missing `log_dir` is a no-op (fresh boot). Returns the number of top-level
+/// entries removed.
+pub fn clean_session_logs(log_dir: &Path) -> std::io::Result<usize> {
+    let entries = match fs::read_dir(log_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let res = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            fs::remove_dir_all(&path) // deployments/ subtree
+        } else {
+            fs::remove_file(&path) // {service_id}.log
+        };
+        match res {
+            Ok(()) => removed += 1,
+            Err(error) => tracing::warn!(
+                ?error,
+                path = %path.display(),
+                "session log cleanup: failed to remove entry"
+            ),
+        }
+    }
+    Ok(removed)
+}
+
 /// Splits a buffer into complete lines (newline-terminated) and any trailing
 /// partial line (text after the last `\n`).
 fn split_complete(buf: &str) -> (Vec<String>, String) {
@@ -129,6 +160,34 @@ impl LogTailer {
         let (complete, partial) = split_complete(&combined);
         self.partial = partial;
         Ok(complete)
+    }
+}
+
+#[cfg(test)]
+mod clean_tests {
+    use super::clean_session_logs;
+    use std::fs;
+
+    #[test]
+    fn wipes_service_and_deployment_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.log"), "svc a\n").unwrap();
+        fs::write(root.join("b.log"), "svc b\n").unwrap();
+        fs::create_dir(root.join("deployments")).unwrap();
+        fs::write(root.join("deployments").join("d.log"), "deploy\n").unwrap();
+
+        // a.log, b.log, deployments/ -> 3 top-level entries removed
+        assert_eq!(clean_session_logs(root).unwrap(), 3);
+        assert!(root.exists());
+        assert_eq!(fs::read_dir(root).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn missing_dir_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        assert_eq!(clean_session_logs(&missing).unwrap(), 0);
     }
 }
 

@@ -35,6 +35,17 @@ pub async fn run() -> anyhow::Result<()> {
     let store = SqliteStore::open(&config.database_path)?;
     store.migrate()?;
 
+    // Each daemon process lifetime is a "session": wipe the previous session's
+    // on-disk workload + deployment logs so every start begins with a clean log
+    // tree. Done at startup (not shutdown) so unclean exits (SIGKILL/crash) are
+    // also covered. Runs before orphan-deployment recovery so the synthetic
+    // RESTART markers below land in the freshly emptied tree.
+    match crate::observability::logs::clean_session_logs(&config.log_dir) {
+        Ok(n) if n > 0 => tracing::info!(removed = n, "cleaned previous session logs"),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(?error, "session log cleanup failed; continuing boot"),
+    }
+
     let orphans = store.fail_orphan_runs()?;
     if orphans > 0 {
         eprintln!("recovered {orphans} orphaned job run(s)");
