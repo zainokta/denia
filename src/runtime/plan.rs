@@ -19,6 +19,11 @@ pub struct LinuxRuntimePlan {
     pub namespace: NamespaceConfig,
     pub rootfs_path: PathBuf,
     pub socket_path: PathBuf,
+    /// Short host-side alias (symlink) to `socket_path`, kept under the
+    /// `sockaddr_un` 108-byte limit so the ingress and clients can `connect()`.
+    /// The real `socket_path` (~127B, deep under the per-replica upper) exceeds
+    /// that limit and cannot be connected directly.
+    pub socket_connect_path: PathBuf,
     pub guest_socket_path: String,
     pub cgroup_path: PathBuf,
     pub deployment_id: Uuid,

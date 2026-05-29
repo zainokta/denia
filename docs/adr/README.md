@@ -36,13 +36,14 @@ Each ADR should include:
 | [016](016-managed-traefik.md) | Denia-Managed Traefik | Superseded by ADR-020 | 2026-05-27 |
 | [017](017-service-crud-api.md) | Service CRUD API | Proposed | 2026-05-27 |
 | [018](018-autoscaling.md) | Autoscaling | Accepted | 2026-05-27 |
-| [019](019-runtime-filesystem-isolation.md) | Per-Replica Runtime Filesystem Isolation | Accepted | 2026-05-27 |
+| [019](019-runtime-filesystem-isolation.md) | Per-Replica Runtime Filesystem Isolation | Accepted (amended by ADR-026) | 2026-05-27 |
 | [020](020-pingora-ingress.md) | In-Process Pingora Ingress | Accepted | 2026-05-28 |
 | [021](021-control-plane-secret-encryption.md) | Control-Plane SOPS Secret Encryption | Accepted | 2026-05-28 |
 | [022](022-oci-layer-cache.md) | Persistent OCI Layer Cache With Weekly GC | Accepted | 2026-05-28 |
 | [023](023-toml-config-file.md) | TOML Config File With Env Override | Accepted | 2026-05-28 |
 | [024](024-async-deployments.md) | Async Deployments With Per-Deployment Log Stream | Accepted | 2026-05-28 |
 | [025](025-cli-driven-host-provisioning.md) | CLI-Driven Host Provisioning | Accepted | 2026-05-28 |
+| [026](026-privileged-overlay-mount-pre-userns.md) | Privileged Overlay Mount Before the User-Namespace Unshare | Accepted | 2026-05-29 |
 
 ## Contributing
 

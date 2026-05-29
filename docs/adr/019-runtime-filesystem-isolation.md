@@ -1,6 +1,6 @@
 # ADR-019: Per-Replica Runtime Filesystem Isolation
 
-- **Status**: Accepted
+- **Status**: Accepted (amended by [ADR-026](026-privileged-overlay-mount-pre-userns.md))
 - **Date**: 2026-05-27
 
 ## Context
@@ -70,6 +70,12 @@ launch path; the previous direct-rootfs path is removed.
   namespace requires Linux ≥ 5.11. Denia's target hosts run modern kernels; the
   gated privileged test asserts the overlay mounts succeed, and the runtime
   returns a typed error (rather than panicking) if the kernel rejects the mount.
+
+  **Amended by [ADR-026](026-privileged-overlay-mount-pre-userns.md)**: this
+  proved fragile on btrfs (`EACCES`, `overlayfs: upper fs does not support
+  tmpfile`). The overlay is now mounted privileged in the initial user namespace
+  before the userns unshare, removing the dependency on unprivileged-userns
+  overlay support.
 
 ## Alternatives Considered
 

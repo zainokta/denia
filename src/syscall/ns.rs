@@ -457,13 +457,11 @@ fn overlay_data_cstring(lower: &Path, upper: &Path, work: &Path) -> Result<CStri
     data.extend_from_slice(upper.as_os_str().as_bytes());
     data.extend_from_slice(b",workdir=");
     data.extend_from_slice(work.as_os_str().as_bytes());
-    // `userxattr` lets the overlay use the `user.overlay.*` xattr namespace
-    // instead of `trusted.overlay.*`, which is the only namespace
-    // unprivileged user-namespace mounters can set. Required on Linux 5.11+
-    // when the mount happens inside an unprivileged userns (CAP_SYS_ADMIN in
-    // the userns but not in the initial namespace). Without it the mount
-    // syscall fails with EACCES.
-    data.extend_from_slice(b",userxattr");
+    // No `userxattr`: the overlay is mounted privileged in the initial user
+    // namespace (see `child_prepare_root` / ADR-026), so it uses the standard
+    // `trusted.overlay.*` xattr namespace. Mounting it inside the workload's
+    // unprivileged userns instead fails EACCES on btrfs ("upper fs does not
+    // support tmpfile").
     CString::new(data).map_err(|_| {
         SyscallError::Capability("overlay mount data contains an interior NUL byte".to_string())
     })
@@ -919,14 +917,15 @@ fn write_byte(fd: RawFd, byte: u8) -> std::io::Result<()> {
 fn child_setup_stage(stage: u8) -> &'static str {
     match stage {
         b'C' => "cgroup release",
-        b'U' => "unshare",
+        b'U' => "unshare mount namespace",
+        b'X' => "unshare user/pid namespace",
         b'M' => "id-map release",
         b'F' => "pid namespace fork",
         b'P' => "make mount propagation private",
         b'O' => "open stdio",
         b'R' => "chroot",
         b'a' => "chroot: overlay mount",
-        b'r' => "chroot: rootfs self-bind mount",
+        b'r' => "chroot: new-root self-bind mount",
         b'o' => "chroot: create /.old_root",
         b'v' => "chroot: pivot_root",
         b'u' => "chroot: unmount /.old_root",
@@ -935,6 +934,9 @@ fn child_setup_stage(stage: u8) -> &'static str {
         b'p' => "mount proc",
         b'D' => "setup /dev tmpfs",
         b'm' => "mask /proc paths",
+        b'n' => "bring loopback up",
+        b'g' => "setgid userns root",
+        b'i' => "setuid userns root",
         b'N' => "set no_new_privs",
         b'B' => "drop capability bounding set",
         b'L' => "apply resource limits",
@@ -944,11 +946,58 @@ fn child_setup_stage(stage: u8) -> &'static str {
     }
 }
 
+#[repr(C)]
+struct IfReqFlags {
+    ifr_name: [libc::c_char; libc::IFNAMSIZ],
+    ifr_flags: libc::c_short,
+    _pad: [u8; 22],
+}
+
+/// Bring the loopback interface up in the current network namespace. Requires
+/// `CAP_NET_ADMIN` over the user namespace owning the netns; call it before
+/// `execve` (which strips the workload's capabilities). Returns the errno on
+/// failure. Async-signal-safe (only raw socket/ioctl/close syscalls).
+unsafe fn bring_loopback_up() -> Result<(), i32> {
+    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if sock < 0 {
+        return Err(unsafe { *libc::__errno_location() });
+    }
+    let mut req = IfReqFlags {
+        ifr_name: [0; libc::IFNAMSIZ],
+        ifr_flags: 0,
+        _pad: [0; 22],
+    };
+    req.ifr_name[0] = b'l' as libc::c_char;
+    req.ifr_name[1] = b'o' as libc::c_char;
+    let result = unsafe {
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut req) < 0 {
+            Err(*libc::__errno_location())
+        } else {
+            req.ifr_flags |= libc::IFF_UP as libc::c_short;
+            if libc::ioctl(sock, libc::SIOCSIFFLAGS, &req) < 0 {
+                Err(*libc::__errno_location())
+            } else {
+                Ok(())
+            }
+        }
+    };
+    unsafe { libc::close(sock) };
+    result
+}
+
 unsafe fn child_setup_fail(pipes: &SyncPipes, stage: u8) -> ! {
     // Capture errno BEFORE any further syscall (write_byte uses libc::write).
     let errno = unsafe { *libc::__errno_location() };
-    // Pre-format a single 5-byte payload [stage, e0, e1, e2, e3] so the
-    // parent can read errno alongside the stage tag without changing the
+    unsafe { child_setup_fail_errno(pipes, stage, errno) }
+}
+
+/// Like `child_setup_fail`, but reports an explicit errno. Used for stages whose
+/// syscall wrapper (e.g. `rustix`) returns the error by value and does NOT set
+/// the C `errno` global — reading `__errno_location()` there yields a stale,
+/// misleading value, so the caller passes `Errno::raw_os_error()` directly.
+unsafe fn child_setup_fail_errno(pipes: &SyncPipes, stage: u8, errno: i32) -> ! {
+    // Pre-format a single 5-byte payload [stage, e0, e1, e2, e3] so the parent
+    // can read errno alongside the stage tag without changing the
     // single-byte-then-EOF protocol elsewhere. This is async-signal-safe.
     let bytes = errno.to_le_bytes();
     let payload = [stage, bytes[0], bytes[1], bytes[2], bytes[3]];
@@ -980,8 +1029,29 @@ unsafe fn child_stage1(
         _ => unsafe { child_setup_fail(pipes, b'C') },
     }
 
+    // Two-stage unshare. The mount namespace is created FIRST, while the child
+    // still holds the daemon's initial-namespace CAP_SYS_ADMIN (capabilities
+    // survive fork() until CLONE_NEWUSER), and the new root — plus its read-only
+    // bind mounts — are set up there, privileged. Mounting overlayfs-as-upper
+    // inside an unprivileged user namespace fails EACCES on btrfs ("upper fs does
+    // not support tmpfile"); read-only binds fail EACCES too, because the
+    // workload's mapped uid cannot traverse the host-absolute bind source (e.g. a
+    // 0700 home) and the remount-ro needs CAP_SYS_ADMIN over the host superblock.
+    // A privileged, pre-userns setup avoids both. The second unshare re-applies
+    // CLONE_NEWNS so the mount namespace carrying the new root is owned by the new
+    // user namespace, letting the child pivot_root with CAP_SYS_ADMIN over its own
+    // user ns. See ADR-026.
+    if plan.setup.clone_flags & libc::CLONE_NEWNS != 0
+        && (plan.overlay.is_some() || !plan.ro_binds.is_empty() || plan.setup_dev)
+    {
+        if unsafe { libc::unshare(libc::CLONE_NEWNS) } < 0 {
+            unsafe { child_setup_fail(pipes, b'U') };
+        }
+        unsafe { child_prepare_root(plan, pipes) };
+    }
+
     if unsafe { libc::unshare(plan.setup.clone_flags) } < 0 {
-        unsafe { child_setup_fail(pipes, b'U') };
+        unsafe { child_setup_fail(pipes, b'X') };
     }
     if write_byte(pipes.child_ready_write, b'R').is_err() {
         unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
@@ -1026,36 +1096,36 @@ fn wait_for_stage2(pid: libc::pid_t) -> ! {
     }
 }
 
-unsafe fn child_exec(
-    plan: &NativeLaunchPlan,
-    pipes: &SyncPipes,
-    argv: &[*const libc::c_char],
-    env: &[*const libc::c_char],
-    stdio: &ChildStdio,
-) -> ! {
-    if plan.setup.clone_flags & libc::CLONE_NEWNS != 0
-        && rustix::mount::mount_change(
-            c"/",
-            rustix::mount::MountPropagationFlags::PRIVATE
-                | rustix::mount::MountPropagationFlags::REC,
-        )
-        .is_err()
-    {
-        unsafe { child_setup_fail(pipes, b'P') };
+/// Prepare the new root in the freshly created mount namespace, while the child
+/// is still privileged in the initial user namespace. Called between the two
+/// unshares in `child_stage1` when an overlay is configured or read-only binds
+/// are requested.
+///
+/// The mount tree is set `MS_REC | MS_PRIVATE` first so neither the overlay nor
+/// the read-only binds propagate back into the host's shared mount table
+/// (`MountFlags=shared`). Mounting overlayfs-as-upper here — rather than inside
+/// the workload's user namespace — is what makes it work on btrfs; the in-userns
+/// mount fails EACCES ("upper fs does not support tmpfile"). Read-only binds are
+/// applied here for the same reason: the host-absolute bind source may sit under
+/// a directory the workload's mapped uid cannot traverse (e.g. a 0700 home), and
+/// the remount-ro needs CAP_SYS_ADMIN over the host superblock — both hold
+/// pre-userns. The resulting mounts are inherited — and thus `MNT_LOCKED` — by the
+/// user namespace created in stage 2, so `child_exec` re-binds the root before
+/// `pivot_root` (a locked mount cannot be a `pivot_root` target); the recursive
+/// self-bind carries the read-only binds along. See ADR-026.
+unsafe fn child_prepare_root(plan: &NativeLaunchPlan, pipes: &SyncPipes) {
+    if let Err(e) = rustix::mount::mount_change(
+        c"/",
+        rustix::mount::MountPropagationFlags::PRIVATE | rustix::mount::MountPropagationFlags::REC,
+    ) {
+        unsafe { child_setup_fail_errno(pipes, b'P', e.raw_os_error()) };
     }
 
-    if let Some(stdout_fd) = stdio.stdout_fd {
-        redirect_stdio_fd(pipes, stdout_fd, libc::STDOUT_FILENO);
-    }
-    if let Some(stderr_fd) = stdio.stderr_fd {
-        redirect_stdio_fd(pipes, stderr_fd, libc::STDERR_FILENO);
-    }
-
-    // Select the path that becomes the new root. With an overlay, mount the
-    // private overlay at `merged` and pivot into it; otherwise bind-mount the
-    // shared `rootfs` onto itself (the existing behavior) so it is a mount
-    // point that `pivot_root` accepts.
-    let new_root = if let Some(overlay) = &plan.overlay {
+    // The new root is either a freshly mounted overlay (its `merged` dir) or, for
+    // the non-overlay path, the plain artifact rootfs. Read-only binds are placed
+    // relative to that base so the recursive self-bind + pivot_root in
+    // `child_exec` carry them into the workload.
+    let base: &std::ffi::CStr = if let Some(overlay) = &plan.overlay {
         if unsafe {
             libc::mount(
                 overlay.overlay_fs_type.as_ptr(),
@@ -1070,20 +1140,166 @@ unsafe fn child_exec(
         }
         overlay.merged.as_c_str()
     } else {
-        if unsafe {
-            libc::mount(
-                plan.rootfs.as_ptr(),
-                plan.rootfs.as_ptr(),
-                std::ptr::null(),
-                libc::MS_BIND | libc::MS_REC,
-                std::ptr::null(),
-            )
-        } < 0
-        {
-            unsafe { child_setup_fail(pipes, b'r') }; // rootfs self-bind mount
-        }
         plan.rootfs.as_c_str()
     };
+
+    for bind in &plan.ro_binds {
+        unsafe { child_apply_ro_bind(pipes, base, bind) };
+    }
+
+    // A fresh /dev tmpfs with real device nodes bound from the host. `mknod` is
+    // EPERM in the (later) unprivileged userns, and the systemd daemon lacks
+    // CAP_MKNOD even here, so we BIND host nodes (needs only CAP_SYS_ADMIN). The
+    // recursive self-bind + pivot_root in `child_exec` carry them into the
+    // workload. See ADR-026.
+    if plan.setup_dev {
+        unsafe { child_setup_dev(pipes, base) };
+    }
+}
+
+/// Build `<base>/dev` as a fresh tmpfs and bind the host's character device
+/// nodes into it. Runs privileged in the initial user namespace (pre-pivot), so
+/// the `MS_BIND` mounts succeed without `CAP_MKNOD` (which the daemon lacks).
+/// The nodes ride into the workload via the recursive self-bind + `pivot_root`
+/// in `child_exec`. See ADR-026.
+unsafe fn child_setup_dev(pipes: &SyncPipes, base: &std::ffi::CStr) {
+    fn join_nul(base: &[u8], suffix: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(base.len() + suffix.len() + 1);
+        v.extend_from_slice(base);
+        v.extend_from_slice(suffix);
+        v.push(0);
+        v
+    }
+    let base_bytes = base.to_bytes();
+    let dev_buf = join_nul(base_bytes, b"/dev");
+    let dev_dir = std::ffi::CStr::from_bytes_with_nul(&dev_buf).expect("dev dir has valid NUL");
+
+    // Minimal images omit /dev; create it, then mount a fresh tmpfs over it.
+    if unsafe { libc::mkdir(dev_dir.as_ptr(), 0o755) } < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EEXIST) {
+            unsafe { child_setup_fail(pipes, b'D') };
+        }
+    }
+    if unsafe {
+        libc::mount(
+            c"tmpfs".as_ptr(),
+            dev_dir.as_ptr(),
+            c"tmpfs".as_ptr(),
+            libc::MS_NOSUID | libc::MS_NOEXEC,
+            c"mode=755,size=65536".as_ptr().cast(),
+        )
+    } < 0
+    {
+        unsafe { child_setup_fail(pipes, b'D') };
+    }
+
+    // Bind real host device nodes onto empty file mountpoints in the tmpfs.
+    // null/zero/full/random/urandom are required; tty is best-effort.
+    let nodes: &[(&std::ffi::CStr, &[u8], bool)] = &[
+        (c"/dev/null", b"/dev/null", true),
+        (c"/dev/zero", b"/dev/zero", true),
+        (c"/dev/full", b"/dev/full", true),
+        (c"/dev/random", b"/dev/random", true),
+        (c"/dev/urandom", b"/dev/urandom", true),
+        (c"/dev/tty", b"/dev/tty", false),
+    ];
+    for &(host_src, suffix, required) in nodes {
+        let dst_buf = join_nul(base_bytes, suffix);
+        let dst =
+            std::ffi::CStr::from_bytes_with_nul(&dst_buf).expect("dev node path has valid NUL");
+        let fd = unsafe {
+            libc::open(
+                dst.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+                0o666,
+            )
+        };
+        if fd >= 0 {
+            let _ = unsafe { libc::close(fd) };
+        }
+        let bound = unsafe {
+            libc::mount(
+                host_src.as_ptr(),
+                dst.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        } >= 0;
+        if !bound && required {
+            unsafe { child_setup_fail(pipes, b'D') };
+        }
+    }
+
+    // /dev/pts and /dev/shm directories (best-effort).
+    for suffix in [b"/dev/pts".as_slice(), b"/dev/shm".as_slice()] {
+        let buf = join_nul(base_bytes, suffix);
+        let dir = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(&buf) };
+        let _ = unsafe { libc::mkdir(dir.as_ptr(), 0o755) };
+    }
+}
+
+unsafe fn child_exec(
+    plan: &NativeLaunchPlan,
+    pipes: &SyncPipes,
+    argv: &[*const libc::c_char],
+    env: &[*const libc::c_char],
+    stdio: &ChildStdio,
+) -> ! {
+    if plan.setup.clone_flags & libc::CLONE_NEWNS != 0
+        && let Err(e) = rustix::mount::mount_change(
+            c"/",
+            rustix::mount::MountPropagationFlags::PRIVATE
+                | rustix::mount::MountPropagationFlags::REC,
+        )
+    {
+        unsafe { child_setup_fail_errno(pipes, b'P', e.raw_os_error()) };
+    }
+
+    if let Some(stdout_fd) = stdio.stdout_fd {
+        redirect_stdio_fd(pipes, stdout_fd, libc::STDOUT_FILENO);
+    }
+    if let Some(stderr_fd) = stdio.stderr_fd {
+        redirect_stdio_fd(pipes, stderr_fd, libc::STDERR_FILENO);
+    }
+
+    // The new root was already mounted — privileged, in the initial user
+    // namespace — by `child_prepare_root` before the user-namespace unshare.
+    // Here we only select its path to pivot into. See ADR-026.
+    let new_root = if let Some(overlay) = &plan.overlay {
+        overlay.merged.as_c_str()
+    } else {
+        plan.rootfs.as_c_str()
+    };
+
+    // Ensure the manifest workdir exists in the new root before pivot_root; the
+    // image may omit it and the post-pivot chdir would then ENOENT. Default "/"
+    // always exists.
+    let workdir_bytes = plan.workdir.to_bytes();
+    if workdir_bytes != b"/" {
+        let mut wd_buf = new_root.to_bytes().to_vec();
+        wd_buf.extend_from_slice(workdir_bytes);
+        let wd_path = std::path::Path::new(std::ffi::OsStr::from_bytes(&wd_buf));
+        let _ = std::fs::create_dir_all(wd_path);
+    }
+
+    // The new root is either the overlay mounted before the user-namespace
+    // unshare (now an inherited MNT_LOCKED mount that `pivot_root` rejects with
+    // EINVAL) or the plain artifact rootfs. Bind it onto itself here, inside the
+    // new user namespace, to get a fresh unlocked mount point to pivot into.
+    if unsafe {
+        libc::mount(
+            new_root.as_ptr(),
+            new_root.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND | libc::MS_REC,
+            std::ptr::null(),
+        )
+    } < 0
+    {
+        unsafe { child_setup_fail(pipes, b'r') }; // new-root self-bind mount
+    }
 
     let mut old_root_buf = new_root.to_bytes().to_vec();
     old_root_buf.extend_from_slice(b"/.old_root\0");
@@ -1108,35 +1324,54 @@ unsafe fn child_exec(
         unsafe { child_setup_fail(pipes, b'v') }; // pivot_root
     }
 
-    if rustix::process::chdir(c"/").is_err() {
-        unsafe { child_setup_fail(pipes, b'W') };
+    if let Err(e) = rustix::process::chdir(c"/") {
+        unsafe { child_setup_fail_errno(pipes, b'W', e.raw_os_error()) };
     }
 
-    if rustix::mount::unmount(c"/.old_root", rustix::mount::UnmountFlags::DETACH).is_err() {
-        unsafe { child_setup_fail(pipes, b'u') }; // unmount old_root
+    // Mount /proc and apply the masks BEFORE detaching /.old_root. A fresh
+    // procfs mount in the workload's user namespace is denied EPERM unless a
+    // fully-visible proc already exists as a reference (the kernel's
+    // `mount_too_revealing` anti-spoofing rule for proc in a userns). The old
+    // root's /proc — still mounted at /.old_root/proc until the detach below —
+    // is that reference; detaching first makes the proc mount fail. (Verified:
+    // proc-after-detach => EPERM, proc-before-detach => OK.) /dev and the
+    // read-only binds were already set up pre-userns in `child_prepare_root`.
+    if plan.setup.mount_proc {
+        // Minimal images omit /proc; ensure the mount target exists.
+        let _ = std::fs::create_dir_all("/proc");
+        match mount_proc(&plan.proc_fs_type, &plan.proc_mount_target) {
+            Ok(()) => {}
+            // A proc already mounted at /proc is benign (e.g. inherited) — keep it.
+            Err(e) if e == rustix::io::Errno::EXIST || e == rustix::io::Errno::BUSY => {}
+            Err(e) => unsafe { child_setup_fail_errno(pipes, b'p', e.raw_os_error()) },
+        }
+    }
+
+    if plan.mask_proc && mask_proc_paths().is_err() {
+        unsafe { child_setup_fail(pipes, b'm') };
+    }
+
+    // The old root's /proc is no longer needed as the mount reference — detach
+    // the whole old-root subtree now. /dev was set up pre-userns and read-only
+    // binds travelled in via the recursive self-bind, so nothing else is needed
+    // from /.old_root.
+    if let Err(e) = rustix::mount::unmount(c"/.old_root", rustix::mount::UnmountFlags::DETACH) {
+        unsafe { child_setup_fail_errno(pipes, b'u', e.raw_os_error()) }; // unmount old_root
     }
     let _ = unsafe { libc::rmdir(c"/.old_root".as_ptr()) };
-
-    // Inject read-only bind mounts now that the new root is in place and the
-    // upper layer is writable. Each dest is absolute within the new root.
-    for bind in &plan.ro_binds {
-        unsafe { child_apply_ro_bind(pipes, bind) };
-    }
 
     if unsafe { libc::chdir(plan.workdir.as_ptr()) } < 0 {
         unsafe { child_setup_fail(pipes, b'W') };
     }
 
-    if plan.setup.mount_proc && mount_proc(&plan.proc_fs_type, &plan.proc_mount_target).is_err() {
-        unsafe { child_setup_fail(pipes, b'p') };
-    }
-
-    if plan.setup_dev && setup_dev_tmpfs().is_err() {
-        unsafe { child_setup_fail(pipes, b'D') };
-    }
-
-    if plan.mask_proc && mask_proc_paths().is_err() {
-        unsafe { child_setup_fail(pipes, b'm') };
+    // Bring loopback up in the workload's own network namespace while we still
+    // hold CAP_NET_ADMIN — execve strips the workload's capabilities (it is not
+    // uid 0 inside the userns). A fresh netns has `lo` DOWN, and the socket-proxy
+    // and workload talk over 127.0.0.1, which requires it UP.
+    if plan.setup.clone_flags & libc::CLONE_NEWNET != 0
+        && let Err(e) = unsafe { bring_loopback_up() }
+    {
+        unsafe { child_setup_fail_errno(pipes, b'n', e) };
     }
 
     if plan.setup.no_new_privs && !caps::try_set_no_new_privs() {
@@ -1146,12 +1381,31 @@ unsafe fn child_exec(
         unsafe { child_setup_fail(pipes, b'B') };
     }
 
-    if apply_rlimits(plan.max_pids, plan.max_fds, plan.max_procs).is_err() {
-        unsafe { child_setup_fail(pipes, b'L') };
+    if let Err(e) = apply_rlimits(plan.max_fds, plan.max_procs) {
+        unsafe { child_setup_fail_errno(pipes, b'L', e.raw_os_error()) };
     }
 
     if plan.seccomp && seccomp::install_filter().is_err() {
         unsafe { child_setup_fail(pipes, b'S') };
+    }
+
+    // Drop into the mapped user-namespace root (uid/gid 0 inside the userns =
+    // host userns_base) as the LAST step before execve. The id-map is written by
+    // now, and the child holds CAP_SETUID/SETGID in the userns (creator lineage),
+    // so this succeeds. It MUST come after every privileged step above —
+    // setresuid clears capabilities when leaving kernel-uid 0; execve as
+    // userns-root then re-grants userns caps (unless no_new_privs was set for a
+    // hardened launch). Without this the workload runs as the unmapped host uid
+    // ("nobody" in the userns): capless and not the owner of the per-replica
+    // layers + socket dir chowned to userns_base, so socket-proxy's bind() and
+    // any upper-layer write fail EACCES. gid before uid. See ADR-026.
+    if plan.setup.clone_flags & libc::CLONE_NEWUSER != 0 {
+        if unsafe { libc::setresgid(0, 0, 0) } < 0 {
+            unsafe { child_setup_fail(pipes, b'g') };
+        }
+        if unsafe { libc::setresuid(0, 0, 0) } < 0 {
+            unsafe { child_setup_fail(pipes, b'i') };
+        }
     }
 
     unsafe { libc::execve(plan.program.as_ptr(), argv.as_ptr(), env.as_ptr()) };
@@ -1170,58 +1424,57 @@ fn mount_proc(fs_type: &CString, target: &CString) -> Result<(), rustix::io::Err
     )
 }
 
-fn setup_dev_tmpfs() -> Result<(), rustix::io::Errno> {
-    rustix::mount::mount(
-        c"tmpfs",
-        c"/dev",
-        c"tmpfs",
-        rustix::mount::MountFlags::NOSUID | rustix::mount::MountFlags::NOEXEC,
-        Some(c"mode=755,size=65536"),
-    )?;
-    unsafe {
-        create_dev_node(c"/dev/null", 1, 3, 0o666);
-        create_dev_node(c"/dev/zero", 1, 5, 0o666);
-        create_dev_node(c"/dev/full", 1, 7, 0o666);
-        create_dev_node(c"/dev/random", 1, 8, 0o666);
-        create_dev_node(c"/dev/urandom", 1, 9, 0o666);
-        create_dev_node(c"/dev/tty", 5, 0, 0o666);
-    }
-    let _ = std::fs::create_dir_all("/dev/pts");
-    let _ = std::fs::create_dir_all("/dev/shm");
-    Ok(())
-}
-
-unsafe fn create_dev_node(path: &std::ffi::CStr, major: u32, minor: u32, mode: libc::mode_t) {
-    unsafe {
-        let dev = libc::makedev(major, minor);
-        if libc::mknod(path.as_ptr(), libc::S_IFCHR | mode, dev) < 0 {
-            let _ = libc::symlink(c"/dev/null".as_ptr(), path.as_ptr());
-        }
-    }
-}
-
 fn mask_proc_paths() -> Result<(), rustix::io::Errno> {
-    let targets: &[&std::ffi::CStr] = &[
-        c"/proc/sys",
+    // Directory entries that expose kernel state: bind read-only so they stay
+    // readable (apps reading sysctls keep working) but immutable. File entries:
+    // shadow with the real /dev/null bound in child_setup_dev. Best-effort — a
+    // target absent on a minimal kernel, or an unsupported mask, is skipped
+    // rather than failing the workload.
+    let dir_targets: &[&std::ffi::CStr] = &[c"/proc/sys", c"/proc/irq", c"/proc/bus", c"/proc/fs"];
+    let file_targets: &[&std::ffi::CStr] = &[
         c"/proc/sysrq-trigger",
-        c"/proc/irq",
-        c"/proc/bus",
-        c"/proc/fs",
+        c"/proc/kcore",
         c"/proc/latency_stats",
         c"/proc/timer_list",
         c"/proc/sched_debug",
     ];
-    for &target in targets {
-        let _ = rustix::mount::mount_bind_recursive(c"/dev/null", target);
+    for &target in dir_targets {
+        let bound = unsafe {
+            libc::mount(
+                target.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND | libc::MS_REC,
+                std::ptr::null(),
+            )
+        } == 0;
+        if bound {
+            let _ = unsafe {
+                libc::mount(
+                    std::ptr::null(),
+                    target.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
+                    std::ptr::null(),
+                )
+            };
+        }
+    }
+    for &target in file_targets {
+        let _ = unsafe {
+            libc::mount(
+                c"/dev/null".as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        };
     }
     Ok(())
 }
 
-fn apply_rlimits(
-    _max_pids: Option<u64>,
-    max_fds: Option<u64>,
-    max_procs: Option<u64>,
-) -> Result<(), rustix::io::Errno> {
+fn apply_rlimits(max_fds: Option<u64>, max_procs: Option<u64>) -> Result<(), rustix::io::Errno> {
     if let Some(max) = max_fds {
         rustix::process::setrlimit(
             rustix::process::Resource::Nofile,
@@ -1250,20 +1503,34 @@ fn apply_rlimits(
     Ok(())
 }
 
-/// Apply a single read-only bind mount inside the freshly pivoted root.
+/// Apply a single read-only bind mount under `base`, the new-root path, while
+/// the child is still privileged in the initial user namespace (pre-pivot,
+/// pre-userns).
 ///
-/// Creates `dest`'s parent directory chain and the mountpoint itself (an empty
-/// file when `dest_is_file`, otherwise a directory), bind-mounts `src` onto it,
-/// then remounts read-only. On any failure the child reports stage `b'b'`.
-unsafe fn child_apply_ro_bind(pipes: &SyncPipes, bind: &RoBindPlan) {
+/// The full mountpoint is `base` + `dest`; `dest` is absolute within the new
+/// root. Creates the parent directory chain under `base` and the mountpoint
+/// itself (an empty file when `dest_is_file`, otherwise a directory),
+/// bind-mounts the host-absolute `src` onto it, then remounts read-only. On any
+/// failure the child reports stage `b'b'`.
+unsafe fn child_apply_ro_bind(pipes: &SyncPipes, base: &std::ffi::CStr, bind: &RoBindPlan) {
+    // Full destination = base (new-root path) + dest (absolute within new root).
+    let base_bytes = base.to_bytes();
     let dest_bytes = bind.dest.to_bytes();
+    let mut full_buf = Vec::with_capacity(base_bytes.len() + dest_bytes.len() + 1);
+    full_buf.extend_from_slice(base_bytes);
+    full_buf.extend_from_slice(dest_bytes);
+    full_buf.push(0);
+    let full_dest =
+        std::ffi::CStr::from_bytes_with_nul(&full_buf).expect("ro bind dest path has valid NUL");
+    let full_bytes = full_dest.to_bytes();
 
-    // Create each parent directory component of dest. `dest` is absolute, so
-    // the first byte is '/'; skip it and mkdir at every subsequent slash.
-    let mut index = 1;
-    while index < dest_bytes.len() {
-        if dest_bytes[index] == b'/' {
-            let mut component = dest_bytes[..index].to_vec();
+    // Create each parent directory component of the full dest. `base` already
+    // exists; `dest` is absolute, so start past the base prefix and its leading
+    // '/', and mkdir at every subsequent slash.
+    let mut index = base_bytes.len() + 1;
+    while index < full_bytes.len() {
+        if full_bytes[index] == b'/' {
+            let mut component = full_bytes[..index].to_vec();
             component.push(0);
             let component = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(&component) };
             if unsafe { libc::mkdir(component.as_ptr(), 0o755) } < 0 {
@@ -1279,7 +1546,7 @@ unsafe fn child_apply_ro_bind(pipes: &SyncPipes, bind: &RoBindPlan) {
     if bind.dest_is_file {
         let fd = unsafe {
             libc::open(
-                bind.dest.as_ptr(),
+                full_dest.as_ptr(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
                 0o644,
             )
@@ -1292,17 +1559,20 @@ unsafe fn child_apply_ro_bind(pipes: &SyncPipes, bind: &RoBindPlan) {
         } else {
             let _ = unsafe { libc::close(fd) };
         }
-    } else if unsafe { libc::mkdir(bind.dest.as_ptr(), 0o755) } < 0 {
+    } else if unsafe { libc::mkdir(full_dest.as_ptr(), 0o755) } < 0 {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() != Some(libc::EEXIST) {
             unsafe { child_setup_fail(pipes, b'b') };
         }
     }
 
+    // The bind source is a host-absolute path resolved in the initial mount
+    // namespace (pre-pivot, pre-userns), so it is used directly with no
+    // `/.old_root` prefix.
     if unsafe {
         libc::mount(
             bind.src.as_ptr(),
-            bind.dest.as_ptr(),
+            full_dest.as_ptr(),
             std::ptr::null(),
             libc::MS_BIND,
             std::ptr::null(),
@@ -1315,7 +1585,7 @@ unsafe fn child_apply_ro_bind(pipes: &SyncPipes, bind: &RoBindPlan) {
     if unsafe {
         libc::mount(
             std::ptr::null(),
-            bind.dest.as_ptr(),
+            full_dest.as_ptr(),
             std::ptr::null(),
             libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID,
             std::ptr::null(),
@@ -1648,7 +1918,7 @@ mod tests {
         );
         assert_eq!(
             overlay.data.to_str().expect("data"),
-            "lowerdir=/lower,upperdir=/upper,workdir=/work,userxattr"
+            "lowerdir=/lower,upperdir=/upper,workdir=/work"
         );
 
         assert_eq!(plan.ro_binds.len(), 1);
@@ -1743,7 +2013,9 @@ mod tests {
 
     #[test]
     fn child_setup_stage_names_common_failures() {
-        assert_eq!(child_setup_stage(b'U'), "unshare");
+        assert_eq!(child_setup_stage(b'U'), "unshare mount namespace");
+        assert_eq!(child_setup_stage(b'X'), "unshare user/pid namespace");
+        assert_eq!(child_setup_stage(b'a'), "chroot: overlay mount");
         assert_eq!(child_setup_stage(b'R'), "chroot");
         assert_eq!(child_setup_stage(b'E'), "execve");
         assert_eq!(child_setup_stage(b'?'), "unknown setup stage");
