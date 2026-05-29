@@ -227,6 +227,8 @@ pub async fn run() -> anyhow::Result<()> {
     // still set = "should be running". Autoscaled services were already brought
     // back by the autoscaler's `reconcile_boot_all` above; routing them through
     // the autoscaler would break the coordinator's single-replica convention.
+    // (Runtime deploys of autoscaled services hand off to the controller via
+    // `Controller::reconcile_service` on the deploy path — see ADR-028.)
     autostart_plain_promoted(&state).await;
 
     // Clone a runtime handle before `build_router` consumes `state`, so the

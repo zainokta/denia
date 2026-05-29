@@ -22,6 +22,7 @@ use denia::autoscale::usage::ServiceUsage;
 use denia::domain::{AutoscalePolicy, HealthCheck, ResourceLimits};
 use denia::health::FakeHealthChecker;
 use denia::ingress::pingora::IngressState;
+use denia::logs::LogStore;
 use denia::runtime::FakeRuntime;
 use denia::state::SqliteStore;
 use uuid::Uuid;
@@ -160,6 +161,7 @@ fn build_controller(
         Box::new(usage),
         Arc::new(catalog),
         Duration::ZERO,
+        LogStore::new(std::env::temp_dir()),
     )
 }
 
@@ -368,4 +370,87 @@ async fn capacity_denied_under_pressure() {
 /// is to keep a typed handle. Here we just replace the box.
 fn set_usage(ctrl: &mut Controller, cpu_pct: u32, mem_pct: u32) {
     ctrl.usage = Box::new(ScriptedUsage { cpu_pct, mem_pct });
+}
+
+/// ADR-028 deploy hand-off, min==0: a runtime deploy of an autoscaled service
+/// hands ownership to the controller via `reconcile_service`. With min==0 it
+/// launches nothing (the activator owns the 0->1 wake), so `/v1/workloads`
+/// reports 0 — but unlike the pre-fix deploy path there is NO shadow workload.
+/// The first request cold-starts to 1, and idle drains back to 0 (the cycle the
+/// user expected but never saw because the deploy path shadowed the autoscaler).
+#[tokio::test]
+async fn deploy_handoff_min_zero_wakes_then_scales_to_zero() {
+    let svc = Uuid::now_v7();
+    let dep = Uuid::now_v7();
+    let ms = managed(svc, dep); // policy() is min=0, max=3
+    let catalog = StaticCatalog::new(vec![ms.clone()]);
+    let mut ctrl = build_controller(
+        roomy_ledger(),
+        ScriptedUsage {
+            cpu_pct: 0,
+            mem_pct: 0,
+        },
+        catalog,
+    );
+
+    // Deploy hand-off: min==0 launches nothing.
+    let handoff = ctrl.reconcile_service(svc).await;
+    assert!(
+        handoff.is_empty(),
+        "min==0 deploy launches nothing, got {handoff:?}"
+    );
+    assert_eq!(ctrl.replica_count(svc), 0);
+    assert_eq!(ctrl.store.get_desired_replicas(svc).unwrap(), Some(0));
+
+    // First request cold-starts to one healthy replica (now tracked → workloads=1).
+    ctrl.activate_one(&svc.to_string()).await.expect("wake ok");
+    assert_eq!(ctrl.replica_count(svc), 1);
+    assert_eq!(ctrl.healthy_replicas(svc), 1);
+
+    // Idle past idle_timeout_s with low CPU → scale to zero.
+    ctrl.ingress
+        .set_last_activity(&svc.to_string(), Instant::now() - Duration::from_secs(700))
+        .await;
+    let zero = ctrl.tick_all(1000).await;
+    assert_eq!(ctrl.replica_count(svc), 0);
+    assert!(
+        zero.contains(&AutoscaleEvent::ScaledToZero {
+            service: "web".to_string(),
+        }),
+        "expected ScaledToZero, got {zero:?}"
+    );
+}
+
+/// ADR-028 deploy hand-off, min>=1: `reconcile_service` launches `min` replicas
+/// and the controller tracks them, so `/v1/workloads` reports the real count.
+/// (The bug: a deploy-launched workload was never in the registry, so workloads
+/// reported 0 while the service was actually serving traffic.)
+#[tokio::test]
+async fn deploy_handoff_min_one_is_tracked() {
+    let svc = Uuid::now_v7();
+    let dep = Uuid::now_v7();
+    let mut ms = managed(svc, dep);
+    ms.policy.min_replicas = 1; // min=1, max=3
+    let catalog = StaticCatalog::new(vec![ms.clone()]);
+    let mut ctrl = build_controller(
+        roomy_ledger(),
+        ScriptedUsage {
+            cpu_pct: 0,
+            mem_pct: 0,
+        },
+        catalog,
+    );
+
+    let events = ctrl.reconcile_service(svc).await;
+
+    assert_eq!(ctrl.replica_count(svc), 1);
+    assert_eq!(ctrl.healthy_replicas(svc), 1);
+    assert_eq!(ctrl.ingress.healthy_count(&svc.to_string()).await, 1);
+    assert_eq!(ctrl.store.get_desired_replicas(svc).unwrap(), Some(1));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AutoscaleEvent::ScaledUp { from: 0, to: 1, .. })),
+        "expected ScaledUp 0->1, got {events:?}"
+    );
 }
