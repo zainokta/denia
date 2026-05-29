@@ -180,7 +180,19 @@ async fn lifecycle_command(
                 state.ingress.clone(),
                 state.routes.clone(),
             );
-            coordinator.stop_service(&service).await?;
+            if service.autoscale.is_some() {
+                // Autoscaled service: the controller owns the replicas (ADR-028).
+                // Drain them FIRST (removes ingress entries + releases the
+                // ledger) while the service is still promoted so `drain_all` can
+                // resolve its limits via the catalog, THEN tear down routes and
+                // clear the promoted row so the autoscaler does not relaunch.
+                if let Some(autoscaler) = &state.autoscaler {
+                    autoscaler.lock().await.drain_all(service.id).await;
+                }
+                coordinator.stop_service_routes_only(&service).await?;
+            } else {
+                coordinator.stop_service(&service).await?;
+            }
             Ok((
                 StatusCode::ACCEPTED,
                 Json(LifecycleResponse { service_id, action }),

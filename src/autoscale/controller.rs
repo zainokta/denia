@@ -285,58 +285,139 @@ impl Controller {
         // the policy bounds. A `min_replicas==0` service with no persisted
         // desired stays at 0 (the activator wakes it on the first request).
         for ms in services {
-            let desired = self
-                .store
-                .get_desired_replicas(ms.service_id)
-                .ok()
-                .flatten()
-                .unwrap_or(ms.policy.min_replicas);
-            let target = desired.clamp(ms.policy.min_replicas, ms.policy.max_replicas);
-            let start = self.registry.replica_count(ms.service_id) as u32;
-            let mut current = start;
-
-            while current < target {
-                let index = self.next_replica_index(ms.service_id);
-                let spec = launch_spec(ms, index);
-                match launch_replica(
-                    &spec,
-                    &mut self.registry,
-                    &mut self.ledger,
-                    self.runtime.as_ref(),
-                    self.ingress.as_ref(),
-                    self.health.as_ref(),
-                )
-                .await
-                {
-                    Ok(_) => current += 1,
-                    Err(LifecycleError::Capacity) => {
-                        events.push(AutoscaleEvent::ScaleUpDenied {
-                            service: ms.service_name.clone(),
-                            reason: "insufficient_capacity".to_string(),
-                        });
-                        break;
-                    }
-                    Err(e) => {
-                        events.push(AutoscaleEvent::ScaleUpDenied {
-                            service: ms.service_name.clone(),
-                            reason: e.to_string(),
-                        });
-                        break;
-                    }
-                }
-            }
-
-            if current > start {
-                events.push(AutoscaleEvent::ScaledUp {
-                    service: ms.service_name.clone(),
-                    from: start,
-                    to: current,
-                });
-            }
-
-            self.store.set_desired_replicas(ms.service_id, current).ok();
+            events.extend(self.top_up_to_desired(ms).await);
         }
 
+        events
+    }
+
+    /// Bring `ms` up to its persisted desired count, clamped to the policy
+    /// bounds. Start-bounded: it launches only `target - current`, so it is
+    /// idempotent across repeated calls and redeploys (existing replicas are
+    /// never double-started; a redeploy's rollover is handled by `tick`). A
+    /// `min_replicas==0` service with no persisted desired stays at 0 (the
+    /// activator wakes it on the first request). Shared by `reconcile_boot` and
+    /// the single-service `reconcile_service` deploy hand-off.
+    async fn top_up_to_desired(&mut self, ms: &ManagedService) -> Vec<AutoscaleEvent> {
+        let mut events = Vec::new();
+        let desired = self
+            .store
+            .get_desired_replicas(ms.service_id)
+            .ok()
+            .flatten()
+            .unwrap_or(ms.policy.min_replicas);
+        let target = desired.clamp(ms.policy.min_replicas, ms.policy.max_replicas);
+        let start = self.registry.replica_count(ms.service_id) as u32;
+        let mut current = start;
+
+        while current < target {
+            let index = self.next_replica_index(ms.service_id);
+            let spec = launch_spec(ms, index);
+            match launch_replica(
+                &spec,
+                &mut self.registry,
+                &mut self.ledger,
+                self.runtime.as_ref(),
+                self.ingress.as_ref(),
+                self.health.as_ref(),
+            )
+            .await
+            {
+                Ok(_) => current += 1,
+                Err(LifecycleError::Capacity) => {
+                    events.push(AutoscaleEvent::ScaleUpDenied {
+                        service: ms.service_name.clone(),
+                        reason: "insufficient_capacity".to_string(),
+                    });
+                    break;
+                }
+                Err(e) => {
+                    events.push(AutoscaleEvent::ScaleUpDenied {
+                        service: ms.service_name.clone(),
+                        reason: e.to_string(),
+                    });
+                    break;
+                }
+            }
+        }
+
+        if current > start {
+            events.push(AutoscaleEvent::ScaledUp {
+                service: ms.service_name.clone(),
+                from: start,
+                to: current,
+            });
+        }
+
+        self.store.set_desired_replicas(ms.service_id, current).ok();
+        events
+    }
+
+    /// Drain every replica of `ms`: stop new traffic, run out the grace window,
+    /// stop the runtime, release the ledger, and remove from the registry +
+    /// ingress pool. Shared by the idle scale-to-zero branch and the `drain_all`
+    /// stop path.
+    async fn drain_all_replicas(&mut self, ms: &ManagedService) {
+        let replicas: Vec<(Uuid, u32)> = self
+            .registry
+            .replicas(ms.service_id)
+            .iter()
+            .map(|r| (r.id, r.index))
+            .collect();
+        for (replica_id, index) in replicas {
+            let instance = RuntimeInstanceId {
+                service_id: ms.service_id,
+                service_name: ms.service_name.clone(),
+                replica_index: index,
+            };
+            let _ = drain_replica(
+                &ms.service_id.to_string(),
+                replica_id,
+                &instance,
+                &ms.limits,
+                self.drain_grace,
+                &mut self.registry,
+                &mut self.ledger,
+                self.runtime.as_ref(),
+                self.ingress.as_ref(),
+            )
+            .await;
+        }
+    }
+
+    /// Single-service reconcile, invoked after a runtime deploy of an autoscaled
+    /// service hands ownership of its replicas to the controller. Brings the
+    /// service up to its persisted desired count via the same start-bounded
+    /// top-up loop as `reconcile_boot`, but WITHOUT the boot adopt/orphan pass.
+    /// Returns an empty Vec if the service is not currently managed (no
+    /// autoscale policy / no promoted deployment / no linked artifact).
+    pub async fn reconcile_service(&mut self, service_id: Uuid) -> Vec<AutoscaleEvent> {
+        let Some(ms) = self.catalog.resolve(&service_id.to_string()) else {
+            return Vec::new();
+        };
+        self.top_up_to_desired(&ms).await
+    }
+
+    /// Drain and forget every replica of `service_id` (the stop path for an
+    /// autoscaled service). Releases the ledger, removes ingress + registry
+    /// entries, and persists `desired=0`. Resolve the catalog here BEFORE the
+    /// caller clears the promoted row — once it is cleared the service is no
+    /// longer resolvable and this becomes a no-op.
+    pub async fn drain_all(&mut self, service_id: Uuid) -> Vec<AutoscaleEvent> {
+        let Some(ms) = self.catalog.resolve(&service_id.to_string()) else {
+            return Vec::new();
+        };
+        let start = self.registry.replica_count(service_id) as u32;
+        self.drain_all_replicas(&ms).await;
+        self.store.set_desired_replicas(service_id, 0).ok();
+        let mut events = Vec::new();
+        if start > 0 {
+            events.push(AutoscaleEvent::ScaledDown {
+                service: ms.service_name.clone(),
+                from: start,
+                to: 0,
+            });
+        }
         events
     }
 
@@ -503,31 +584,7 @@ impl Controller {
                         };
                     let metrics_low = u.avg_cpu_pct < ms.policy.target_cpu_pct as u32;
                     if idle_secs > ms.policy.idle_timeout_s as u64 && metrics_low {
-                        let replicas: Vec<(Uuid, u32)> = self
-                            .registry
-                            .replicas(ms.service_id)
-                            .iter()
-                            .map(|r| (r.id, r.index))
-                            .collect();
-                        for (replica_id, index) in replicas {
-                            let instance = RuntimeInstanceId {
-                                service_id: ms.service_id,
-                                service_name: ms.service_name.clone(),
-                                replica_index: index,
-                            };
-                            let _ = drain_replica(
-                                &ms.service_id.to_string(),
-                                replica_id,
-                                &instance,
-                                &ms.limits,
-                                self.drain_grace,
-                                &mut self.registry,
-                                &mut self.ledger,
-                                self.runtime.as_ref(),
-                                self.ingress.as_ref(),
-                            )
-                            .await;
-                        }
+                        self.drain_all_replicas(ms).await;
                         self.store.set_desired_replicas(ms.service_id, 0).ok();
                         self.append_service_log(ms.service_id, "scaled to zero (idle)");
                         events.push(AutoscaleEvent::ScaledToZero {
@@ -1559,6 +1616,140 @@ mod tests {
 
         assert_eq!(ctrl.registry.replica_count(svc), 0);
         assert!(runtime.started_requests().is_empty());
+    }
+
+    // ---- deploy hand-off: reconcile_service / drain_all (ADR-028) ----
+
+    #[tokio::test]
+    async fn reconcile_service_min1_launches_min() {
+        let svc = Uuid::now_v7();
+        let ms = managed(svc); // policy() has min_replicas == 1
+        let mut ctrl = controller_with_catalog(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::with(ms.clone())),
+        );
+
+        let events = ctrl.reconcile_service(svc).await;
+
+        assert_eq!(ctrl.registry.replica_count(svc), 1);
+        assert_eq!(ctrl.registry.healthy_count(svc), 1);
+        assert_eq!(ctrl.ingress.healthy_count(&svc.to_string()).await, 1);
+        assert_eq!(ctrl.store.get_desired_replicas(svc).unwrap(), Some(1));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AutoscaleEvent::ScaledUp { from: 0, to: 1, .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_service_min0_stays_zero() {
+        let svc = Uuid::now_v7();
+        let ms = zero_scaled(svc); // min_replicas == 0
+        let runtime = Arc::new(FakeRuntime::default());
+        let mut ctrl = controller_full(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::with(ms.clone())),
+            runtime.clone(),
+        );
+
+        let events = ctrl.reconcile_service(svc).await;
+
+        // min==0 with no persisted desired: the activator owns the 0->1 wake, so
+        // the deploy hand-off launches nothing.
+        assert_eq!(ctrl.registry.replica_count(svc), 0);
+        assert!(runtime.started_requests().is_empty());
+        assert!(events.is_empty());
+        assert_eq!(ctrl.store.get_desired_replicas(svc).unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn reconcile_service_idempotent_on_redeploy() {
+        let svc = Uuid::now_v7();
+        let ms = managed(svc);
+        let runtime = Arc::new(FakeRuntime::default());
+        let mut ctrl = controller_full(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::with(ms.clone())),
+            runtime.clone(),
+        );
+        // Two replicas already running at the promoted deployment, desired=2.
+        seed_replica_at(&mut ctrl, &ms, ms.deployment_id, 0).await;
+        seed_replica_at(&mut ctrl, &ms, ms.deployment_id, 1).await;
+        ctrl.store.set_desired_replicas(svc, 2).unwrap();
+        assert_eq!(runtime.started_requests().len(), 2);
+
+        let events = ctrl.reconcile_service(svc).await;
+
+        // Start-bounded: nothing new launched, the rollout is `tick`'s job.
+        assert_eq!(ctrl.registry.replica_count(svc), 2);
+        assert_eq!(runtime.started_requests().len(), 2);
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_service_unknown_noop() {
+        let svc = Uuid::now_v7();
+        let runtime = Arc::new(FakeRuntime::default());
+        // Empty catalog: the service is not managed.
+        let mut ctrl = controller_full(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::default()),
+            runtime.clone(),
+        );
+
+        let events = ctrl.reconcile_service(svc).await;
+
+        assert!(events.is_empty());
+        assert_eq!(ctrl.registry.replica_count(svc), 0);
+        assert!(runtime.started_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_all_drains_and_releases() {
+        let svc = Uuid::now_v7();
+        let ms = managed(svc);
+        let mut ctrl = controller_with_catalog(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 0,
+                mem_pct: 0,
+            }),
+            Arc::new(FakeCatalog::with(ms.clone())),
+        );
+        seed_replica_at(&mut ctrl, &ms, ms.deployment_id, 0).await;
+        seed_replica_at(&mut ctrl, &ms, ms.deployment_id, 1).await;
+        assert_eq!(ctrl.registry.replica_count(svc), 2);
+        assert!(ctrl.ledger.committed_cpu() > 0);
+
+        let events = ctrl.drain_all(svc).await;
+
+        assert_eq!(ctrl.registry.replica_count(svc), 0);
+        assert_eq!(ctrl.ledger.committed_cpu(), 0);
+        assert_eq!(ctrl.ledger.committed_mem(), 0);
+        assert_eq!(ctrl.ingress.healthy_count(&svc.to_string()).await, 0);
+        assert_eq!(ctrl.store.get_desired_replicas(svc).unwrap(), Some(0));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AutoscaleEvent::ScaledDown { from: 2, to: 0, .. }))
+        );
     }
 
     // ---- catalog-driven method tests (TDD: written before implementation) ----

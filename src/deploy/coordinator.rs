@@ -25,9 +25,11 @@ use crate::repo::sqlite::{
 use crate::runtime::Runtime;
 
 /// Stable replica id for the single endpoint the deploy path registers for a
-/// service. The deploy coordinator manages one promoted replica per service; the
-/// autoscaler owns multi-replica fan-out via its own (UUIDv7) ids. A fixed
-/// nil-derived id keeps this endpoint addressable and replaceable on re-deploy.
+/// PLAIN (non-autoscaled) service. The deploy coordinator manages one promoted
+/// replica per plain service; autoscaled services are owned by the controller,
+/// which fans out replicas under its own (UUIDv7) ids and is NEVER given a
+/// `DEPLOY_REPLICA_ID` endpoint (ADR-028). A fixed nil-derived id keeps this
+/// endpoint addressable and replaceable on re-deploy.
 const DEPLOY_REPLICA_ID: Uuid = Uuid::nil();
 
 pub struct DeploymentPlan {
@@ -237,10 +239,15 @@ where
         Ok(())
     }
 
-    /// Runtime-start + healthcheck + promote + write_routing_config portion of
-    /// the deploy pipeline. Mirrors the body of `deploy()` but uses the
-    /// supplied `deployment_id` (no `create_deployment` here) and emits log
-    /// lines for the SSE viewer.
+    /// Promote + wire-up portion of the deploy pipeline. Mirrors the body of
+    /// `deploy()` but uses the supplied `deployment_id` (no `create_deployment`
+    /// here) and emits log lines for the SSE viewer.
+    ///
+    /// Plain services: runtime-start `replica_index 0` → healthcheck → promote →
+    /// `add_deploy_replica` → `write_route_table`. Autoscaled services hand
+    /// replica ownership to the controller (ADR-028): promote + `write_route_table`
+    /// only (no workload start, no `DEPLOY_REPLICA_ID`); the API layer then calls
+    /// `Controller::reconcile_service`.
     async fn finalize(
         &self,
         deployment_id: Uuid,
@@ -248,6 +255,27 @@ where
         artifact: ArtifactRecord,
         log: &crate::deploy::log::DeploymentLogWriter,
     ) -> Result<(), DeployError> {
+        if service.autoscale.is_some() {
+            // Autoscaled service: the autoscaler owns replica launch/teardown
+            // (ADR-028). The deploy path must NOT start a DEPLOY_REPLICA_ID
+            // workload or register an ingress replica — that would shadow the
+            // controller (its registry would stay empty, `/v1/workloads` would
+            // report 0, and scale-to-zero / cold-start would never engage). We
+            // only promote and write the route table; the API layer then calls
+            // `Controller::reconcile_service`, which launches `min` replicas
+            // (each health-gated) or none for min==0 (woken by the activator).
+            log.write(
+                "AUTOSCALE_HANDOFF",
+                "autoscaled service: controller owns replicas",
+            )
+            .ok();
+            self.repos
+                .deployments
+                .promote_deployment(service.id, deployment_id)?;
+            self.write_route_table(service).await?;
+            return Ok(());
+        }
+
         let project = self
             .repos
             .projects
@@ -289,8 +317,9 @@ where
         self.repos
             .deployments
             .promote_deployment(service.id, deployment_id)?;
-        self.write_routing_config(service, &runtime_status.socket_path)
+        self.add_deploy_replica(service, &runtime_status.socket_path)
             .await?;
+        self.write_route_table(service).await?;
         Ok(())
     }
 
@@ -304,6 +333,22 @@ where
         self.repos
             .deployments
             .set_deployment_artifact(deployment.id, &plan.artifact.digest)?;
+
+        if plan.service.autoscale.is_some() {
+            // Autoscaled service: hand replica ownership to the controller
+            // (ADR-028). Persist + promote the deployment and write the route
+            // table, but do not start a DEPLOY_REPLICA_ID workload. The caller
+            // is responsible for invoking `Controller::reconcile_service`.
+            self.repos
+                .deployments
+                .promote_deployment(plan.service.id, deployment.id)?;
+            self.write_route_table(&plan.service).await?;
+            self.repos
+                .deployments
+                .update_deployment_status(deployment.id, DeploymentStatus::Healthy)?;
+            deployment.status = DeploymentStatus::Healthy;
+            return Ok(deployment);
+        }
 
         let project = self
             .repos
@@ -343,8 +388,9 @@ where
         self.repos
             .deployments
             .promote_deployment(plan.service.id, deployment.id)?;
-        self.write_routing_config(&plan.service, &runtime_status.socket_path)
+        self.add_deploy_replica(&plan.service, &runtime_status.socket_path)
             .await?;
+        self.write_route_table(&plan.service).await?;
         self.repos
             .deployments
             .update_deployment_status(deployment.id, DeploymentStatus::Healthy)?;
@@ -513,7 +559,50 @@ where
         Ok(())
     }
 
-    async fn write_routing_config(
+    /// Stop path for an autoscaled service. The controller has already drained
+    /// every replica (released the ledger, removed the ingress + registry
+    /// entries), so this only tears down the route + deployment state. Unlike
+    /// `stop_service` it does NOT `runtime.stop(replica 0)` or
+    /// `remove_replica(DEPLOY_REPLICA_ID)` — an autoscaled service never has a
+    /// `DEPLOY_REPLICA_ID` endpoint (ADR-028). Clearing the promoted row is the
+    /// durable "should not be running" signal that keeps the autoscaler from
+    /// relaunching on the next tick or boot.
+    pub async fn stop_service_routes_only(
+        &self,
+        service: &ServiceConfig,
+    ) -> Result<(), DeployError> {
+        let promoted_deployment = self.repos.deployments.promoted_deployment(service.id)?;
+
+        if let Some(routing) = &self.routing {
+            let route_key = service.id.to_string();
+            let table = {
+                let mut routes = routing
+                    .routes
+                    .lock()
+                    .map_err(|_| DeployError::RoutesLockPoisoned)?;
+                routes.remove(&route_key);
+                route_table_from_snapshot(&routes)?
+            };
+            routing.ingress.swap_routes(table);
+        }
+
+        if let Some(deployment_id) = promoted_deployment {
+            self.repos
+                .deployments
+                .update_deployment_status(deployment_id, DeploymentStatus::Stopped)?;
+            self.repos
+                .deployments
+                .clear_promoted_deployment(service.id)?;
+        }
+        Ok(())
+    }
+
+    /// Register the deployed workload's Denia-owned Unix socket as the service's
+    /// single promoted replica (`DEPLOY_REPLICA_ID`) and mark it healthy so the
+    /// Pingora proxy can dial it directly (no loopback bridge, ADR-020). Plain
+    /// (non-autoscaled) services only — autoscaled services have their replicas
+    /// registered by the controller (ADR-028).
+    async fn add_deploy_replica(
         &self,
         service: &ServiceConfig,
         socket_path: &std::path::Path,
@@ -521,14 +610,10 @@ where
         let Some(routing) = &self.routing else {
             return Ok(());
         };
-        // Key replica/route state by service_id, not service.name — names are only
+        // Key replica state by service_id, not service.name — names are only
         // unique within a project, so two projects' same-named services would
         // otherwise share runtime/ingress state (F-3).
         let route_key = service.id.to_string();
-
-        // Register the workload's Denia-owned Unix socket as the service's
-        // (single) promoted replica and mark it healthy so the Pingora proxy can
-        // dial it directly (no loopback bridge, ADR-020).
         routing
             .ingress
             .add_replica(&route_key, DEPLOY_REPLICA_ID, socket_path.to_path_buf())
@@ -537,13 +622,25 @@ where
             .ingress
             .set_replica_healthy(&route_key, DEPLOY_REPLICA_ID, true)
             .await;
+        Ok(())
+    }
+
+    /// Rebuild and swap the ingress route table (verified domains -> service_id)
+    /// from the current snapshot. Runs for BOTH plain and autoscaled services so
+    /// Host/SNI routing and the scale-to-zero activator can resolve the service
+    /// even when it has zero live replicas.
+    async fn write_route_table(&self, service: &ServiceConfig) -> Result<(), DeployError> {
+        let Some(routing) = &self.routing else {
+            return Ok(());
+        };
+        // Key route state by service_id, not service.name (F-3).
+        let route_key = service.id.to_string();
 
         let hostnames = self.repos.domains.list_verified_hostnames(service.id)?;
         if hostnames.is_empty() {
-            // No verified domains yet — the replica is registered but the service
-            // has no host route. A future verify call rebuilds the table only if
-            // an entry exists, so the operator should verify a domain before
-            // deploy, or re-deploy after verifying.
+            // No verified domains yet — no host route. A future verify call
+            // rebuilds the table only if an entry exists, so the operator should
+            // verify a domain before deploy, or re-deploy after verifying.
             return Ok(());
         }
         let table = {
@@ -556,9 +653,9 @@ where
                 RouteSpec {
                     route_key: format!("svc-{}", service.id),
                     service_name: service.name.clone(),
-                    // Proxy pool lookup key — MUST equal the `add_replica` key
-                    // above (`service.id.to_string()`) so the Pingora hot path
-                    // resolves Host -> route.service_id -> pool hit (C1).
+                    // Proxy pool lookup key — MUST equal the replica pool key
+                    // (`service.id.to_string()`) so the Pingora hot path resolves
+                    // Host -> route.service_id -> pool hit (C1).
                     service_id: route_key,
                     domains: hostnames,
                     tls: service.tls_enabled,
@@ -664,7 +761,8 @@ fn deployment_request(service: &ServiceConfig, artifact: &ArtifactRecord) -> Dep
 mod async_tests {
     use super::*;
     use crate::domain::{
-        ExternalImageSource, HealthCheck, ResourceLimits, ServiceConfig, ServiceSource,
+        AutoscalePolicy, ExternalImageSource, HealthCheck, ResourceLimits, ServiceConfig,
+        ServiceSource,
     };
     use crate::health::FakeHealthChecker;
     use crate::repo::sqlite::{
@@ -869,5 +967,127 @@ mod async_tests {
             .await
             .expect("skip ok");
         assert!(runtime.started_requests().is_empty());
+    }
+
+    /// ADR-028: deploying an autoscaled service must NOT start a
+    /// DEPLOY_REPLICA_ID workload or register an ingress replica — the
+    /// controller owns replicas. The deploy only promotes + writes routes.
+    #[tokio::test]
+    async fn deploy_autoscaled_does_not_start_replica() {
+        use crate::artifacts::{ArtifactKind, ArtifactRecord};
+        let store = SqliteStore::open_in_memory().expect("sqlite");
+        store.migrate().expect("migrate");
+        let runtime = FakeRuntime::default();
+        let ingress = std::sync::Arc::new(IngressState::default());
+        let routes: SharedRoutes =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+        let coordinator = DeploymentCoordinator::new_with_shared_routing(
+            build_repos(&store),
+            runtime.clone(),
+            FakeHealthChecker::healthy(),
+            ingress.clone(),
+            routes.clone(),
+        );
+
+        let project_id = store.default_project_id().expect("default project");
+        let mut svc = ServiceConfig::new(
+            project_id,
+            "web",
+            vec!["web.example.test".to_string()],
+            ServiceSource::ExternalImage(ExternalImageSource {
+                image: "ghcr.io/acme/web:latest".to_string(),
+                credential: None,
+                registry_id: None,
+                image_ref: None,
+            }),
+            3000,
+            HealthCheck::new("/ready", 5),
+            Some(ResourceLimits::default()),
+            vec![],
+        )
+        .expect("service");
+        svc.autoscale = Some(AutoscalePolicy {
+            min_replicas: 0,
+            max_replicas: 3,
+            target_cpu_pct: 80,
+            target_mem_pct: None,
+            scale_down_cooldown_s: 300,
+            idle_timeout_s: 600,
+        });
+        let svc = store.put_service(svc).expect("stored service");
+
+        let artifact = ArtifactRecord::new(
+            "sha256:deadbeef",
+            ArtifactKind::OciImage,
+            ArtifactSource::ExternalRegistry {
+                image: "ghcr.io/acme/web:latest".to_string(),
+            },
+        )
+        .expect("artifact");
+
+        let deployment = coordinator
+            .deploy(DeploymentPlan {
+                service: svc.clone(),
+                artifact,
+            })
+            .await
+            .expect("deploy ok");
+
+        // No DEPLOY_REPLICA_ID workload started; no ingress replica registered.
+        assert!(runtime.started_requests().is_empty());
+        assert_eq!(ingress.healthy_count(&svc.id.to_string()).await, 0);
+        // But the deployment is promoted + Healthy.
+        assert_eq!(deployment.status, DeploymentStatus::Healthy);
+        assert_eq!(
+            build_repos(&store)
+                .deployments
+                .promoted_deployment(svc.id)
+                .expect("promoted"),
+            Some(deployment.id)
+        );
+    }
+
+    /// ADR-028: the autoscaled stop path tears down route + deployment state
+    /// only — the controller has already drained the replicas, so this must NOT
+    /// `runtime.stop()` a `DEPLOY_REPLICA_ID` workload.
+    #[tokio::test]
+    async fn stop_service_routes_only_clears_promoted_without_runtime_stop() {
+        let (store, coordinator, runtime, service) = coord_with_runtime();
+        let repos = build_repos(&store);
+        let deployment = repos
+            .deployments
+            .create_deployment(DeploymentRequest::external_image(
+                service.id,
+                "ghcr.io/acme/web:latest",
+            ))
+            .expect("deployment");
+        repos
+            .deployments
+            .promote_deployment(service.id, deployment.id)
+            .expect("promote");
+
+        coordinator
+            .stop_service_routes_only(&service)
+            .await
+            .expect("stop routes-only");
+
+        // No runtime.stop of replica 0 (the controller already drained).
+        assert!(runtime.stopped_instances().is_empty());
+        // Promoted row cleared + deployment Stopped.
+        assert_eq!(
+            repos
+                .deployments
+                .promoted_deployment(service.id)
+                .expect("promoted"),
+            None
+        );
+        let row = repos
+            .deployments
+            .list_deployments(service.id)
+            .expect("list")
+            .into_iter()
+            .find(|d| d.id == deployment.id)
+            .expect("row");
+        assert_eq!(row.status, DeploymentStatus::Stopped);
     }
 }

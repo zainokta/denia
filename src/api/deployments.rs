@@ -94,6 +94,7 @@ async fn create_deployment(
         state.ingress.clone(),
         state.routes.clone(),
     );
+    let autoscaler = state.autoscaler.clone();
 
     tokio::spawn(async move {
         let deps = crate::deploy::coordinator::RunDeps {
@@ -103,9 +104,25 @@ async fn create_deployment(
             sops_binary: sops_binary.as_path(),
             age_key_file: age_key_file.as_path(),
         };
-        let _ = coordinator_for_task
+        let is_autoscaled = svc.autoscale.is_some();
+        let service_id = svc.id;
+        let run = coordinator_for_task
             .run_with_deps(deployment_id, svc, req, &log, deps)
             .await;
+        // Autoscaled service: hand replica ownership to the controller so it
+        // launches `min` replicas (each health-gated) or none for min==0 (woken
+        // by the activator). Without this, the deploy promotes a routable
+        // service the autoscaler never tracks — `/v1/workloads` would report 0
+        // and scale-to-zero / cold-start would never engage (ADR-028).
+        if run.is_ok()
+            && is_autoscaled
+            && let Some(autoscaler) = autoscaler
+        {
+            let events = autoscaler.lock().await.reconcile_service(service_id).await;
+            for ev in &events {
+                let _ = log.write("AUTOSCALE", &format!("{ev:?}"));
+            }
+        }
     });
 
     Ok((StatusCode::ACCEPTED, Json(deployment)))
