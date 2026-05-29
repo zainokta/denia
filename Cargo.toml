@@ -2,6 +2,8 @@
 name = "denia"
 version = "0.1.0"
 edition = "2024"
+description = "Docker-free single-node PaaS with Denia-owned Linux runtime isolation"
+license = "Apache-2.0"
 
 [dependencies]
 age = { version = "0.10", default-features = false }
