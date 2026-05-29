@@ -126,4 +126,101 @@ describe('ServiceForm', () => {
     expect(value.domains).toEqual([])
     expect(value.tls_enabled).toBe(false)
   })
+
+  describe('autoscale', () => {
+    function openAdvanced() {
+      fireEvent.click(screen.getByRole('button', { name: /advanced/i }))
+    }
+    function enableAutoscale() {
+      openAdvanced()
+      fireEvent.click(screen.getByLabelText('enable autoscaling'))
+    }
+    function fillBaseFields() {
+      fill('name', 'web')
+      fill('internal port', '8080')
+      fill('image', 'nginx:latest')
+    }
+
+    it('submits autoscale: null when left disabled', () => {
+      const onSubmit = vi.fn<(value: ServiceInput | Service) => void>()
+      render(<ServiceForm projects={projects} onSubmit={onSubmit} />)
+
+      fillBaseFields()
+      fireEvent.click(screen.getByRole('button', { name: /create service/i }))
+
+      const value = onSubmit.mock.calls[0]![0]
+      expect(value.autoscale).toBeNull()
+    })
+
+    it('builds an autoscale policy from defaults when enabled', () => {
+      const onSubmit = vi.fn<(value: ServiceInput | Service) => void>()
+      render(<ServiceForm projects={projects} onSubmit={onSubmit} />)
+
+      fillBaseFields()
+      enableAutoscale()
+      fireEvent.click(screen.getByRole('button', { name: /create service/i }))
+
+      const value = onSubmit.mock.calls[0]![0]
+      expect(value.autoscale).toEqual({
+        min_replicas: 1,
+        max_replicas: 3,
+        target_cpu_pct: 70,
+        target_mem_pct: null,
+        scale_down_cooldown_s: 300,
+        idle_timeout_s: 600,
+      })
+    })
+
+    it('includes target_mem_pct when the memory field is set', () => {
+      const onSubmit = vi.fn<(value: ServiceInput | Service) => void>()
+      render(<ServiceForm projects={projects} onSubmit={onSubmit} />)
+
+      fillBaseFields()
+      enableAutoscale()
+      fill('target memory percent', '80')
+      fireEvent.click(screen.getByRole('button', { name: /create service/i }))
+
+      const value = onSubmit.mock.calls[0]![0]
+      expect(value.autoscale?.target_mem_pct).toBe(80)
+    })
+
+    it('allows min replicas = 0 (scale-to-zero)', () => {
+      const onSubmit = vi.fn<(value: ServiceInput | Service) => void>()
+      render(<ServiceForm projects={projects} onSubmit={onSubmit} />)
+
+      fillBaseFields()
+      enableAutoscale()
+      fill('min replicas', '0')
+      fireEvent.click(screen.getByRole('button', { name: /create service/i }))
+
+      const value = onSubmit.mock.calls[0]![0]
+      expect(value.autoscale?.min_replicas).toBe(0)
+    })
+
+    it('blocks submit when min replicas exceeds max', () => {
+      const onSubmit = vi.fn<(value: ServiceInput | Service) => void>()
+      render(<ServiceForm projects={projects} onSubmit={onSubmit} />)
+
+      fillBaseFields()
+      enableAutoscale()
+      fill('min replicas', '5')
+      fill('max replicas', '2')
+
+      const submit = screen.getByRole('button', { name: /create service/i })
+      expect(submit.hasAttribute('disabled')).toBe(true)
+    })
+
+    it('blocks submit when idle timeout is below cooldown', () => {
+      const onSubmit = vi.fn<(value: ServiceInput | Service) => void>()
+      render(<ServiceForm projects={projects} onSubmit={onSubmit} />)
+
+      fillBaseFields()
+      enableAutoscale()
+      fill('scale down cooldown seconds', '600')
+      fill('idle timeout seconds', '300')
+
+      const submit = screen.getByRole('button', { name: /create service/i })
+      expect(submit.hasAttribute('disabled')).toBe(true)
+    })
+  })
 })

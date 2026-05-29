@@ -253,6 +253,19 @@ export const ResourceLimits = Schema.Struct({
   memory_bytes: Schema.Number,
 })
 
+// Mirrors the backend `AutoscalePolicy` serde shape (src/domain/service.rs).
+// `target_mem_pct` is optional (memory only triggers scale-up); `min_replicas`
+// may be 0 for scale-to-zero.
+export const AutoscalePolicy = Schema.Struct({
+  min_replicas: Schema.Number,
+  max_replicas: Schema.Number,
+  target_cpu_pct: Schema.Number,
+  target_mem_pct: Schema.NullOr(Schema.Number),
+  scale_down_cooldown_s: Schema.Number,
+  idle_timeout_s: Schema.Number,
+})
+export type AutoscalePolicy = typeof AutoscalePolicy.Type
+
 export class Service extends Schema.Class<Service>('Service')({
   id: Schema.String,
   project_id: Schema.String,
@@ -266,6 +279,7 @@ export class Service extends Schema.Class<Service>('Service')({
   tls_enabled: Schema.optionalKey(Schema.Boolean).pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
+  autoscale: Schema.optional(Schema.NullOr(AutoscalePolicy)),
 }) {}
 
 export const Services = Schema.Array(Service)

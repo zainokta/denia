@@ -75,6 +75,33 @@ export function ServiceForm({
     initial?.resource_limits ? String(initial.resource_limits.memory_bytes) : '',
   )
 
+  // Autoscale policy (mirrors backend AutoscalePolicy). Enabled flag toggles the
+  // whole block; numeric fields are seeded from the existing policy or defaults.
+  const initialAutoscale = initial?.autoscale ?? undefined
+  const [autoscaleEnabled, setAutoscaleEnabled] = useState(
+    initialAutoscale != null,
+  )
+  const [minReplicas, setMinReplicas] = useState(
+    initialAutoscale ? String(initialAutoscale.min_replicas) : '1',
+  )
+  const [maxReplicas, setMaxReplicas] = useState(
+    initialAutoscale ? String(initialAutoscale.max_replicas) : '3',
+  )
+  const [targetCpuPct, setTargetCpuPct] = useState(
+    initialAutoscale ? String(initialAutoscale.target_cpu_pct) : '70',
+  )
+  const [targetMemPct, setTargetMemPct] = useState(
+    initialAutoscale?.target_mem_pct != null
+      ? String(initialAutoscale.target_mem_pct)
+      : '',
+  )
+  const [cooldownS, setCooldownS] = useState(
+    initialAutoscale ? String(initialAutoscale.scale_down_cooldown_s) : '300',
+  )
+  const [idleTimeoutS, setIdleTimeoutS] = useState(
+    initialAutoscale ? String(initialAutoscale.idle_timeout_s) : '600',
+  )
+
   const [envRows, setEnvRows] = useState<EnvRow[]>(
     initial ? envFromInitial(initial.env) : [],
   )
@@ -112,7 +139,9 @@ export function ServiceForm({
   // service already carries non-default health/resource/env values.
   const [advancedOpen, setAdvancedOpen] = useState(
     isEdit &&
-      ((initial?.env.length ?? 0) > 0 || initial?.resource_limits != null),
+      ((initial?.env.length ?? 0) > 0 ||
+        initial?.resource_limits != null ||
+        initial?.autoscale != null),
   )
 
   // A required field flags its error only after it has been blurred, so the
@@ -172,11 +201,41 @@ export function ServiceForm({
 
   const nameEmpty = name.trim().length === 0
 
+  // Autoscale validation mirrors backend AutoscalePolicy::validate so the
+  // operator sees the problem inline instead of a 400 on submit.
+  const autoscaleError: string | null = (() => {
+    if (!autoscaleEnabled) return null
+    const min = Number.parseInt(minReplicas, 10)
+    const max = Number.parseInt(maxReplicas, 10)
+    const cpu = Number.parseInt(targetCpuPct, 10)
+    const cooldown = Number.parseInt(cooldownS, 10)
+    const idle = Number.parseInt(idleTimeoutS, 10)
+    const memRaw = targetMemPct.trim()
+    const mem = memRaw.length > 0 ? Number.parseInt(memRaw, 10) : null
+    const pctOk = (p: number) => Number.isInteger(p) && p >= 1 && p <= 100
+    if (
+      !Number.isInteger(min) ||
+      !Number.isInteger(max) ||
+      min < 0 ||
+      max < 1 ||
+      min > max
+    )
+      return 'replica bounds: need max ≥ 1 and 0 ≤ min ≤ max'
+    if (!pctOk(cpu)) return 'target cpu must be 1–100%'
+    if (mem !== null && !pctOk(mem)) return 'target memory must be 1–100%'
+    if (!Number.isInteger(cooldown) || cooldown < 0)
+      return 'cooldown must be a non-negative integer'
+    if (!Number.isInteger(idle) || idle < cooldown)
+      return 'idle timeout must be ≥ cooldown'
+    return null
+  })()
+
   const valid =
     !nameEmpty &&
     portValid &&
     source !== undefined &&
-    projectId.length > 0
+    projectId.length > 0 &&
+    autoscaleError === null
 
   const missing: string[] = []
   if (projectId.length === 0) missing.push('project')
@@ -187,6 +246,7 @@ export function ServiceForm({
     else if (imageMode === 'direct') missing.push('image')
     else missing.push('registry + ref')
   }
+  if (autoscaleError !== null) missing.push('autoscale config')
 
   // Inline error shows only for a required field that's been blurred and is
   // still empty/invalid.
@@ -226,6 +286,18 @@ export function ServiceForm({
         .filter((row) => row.key.trim().length > 0)
         .map((row) => [row.key.trim(), row.value] as [string, string]),
       tls_enabled: parsedDomains.length > 0 && tlsEnabled,
+      autoscale: autoscaleEnabled
+        ? {
+            min_replicas: Number.parseInt(minReplicas, 10) || 0,
+            max_replicas: Number.parseInt(maxReplicas, 10) || 0,
+            target_cpu_pct: Number.parseInt(targetCpuPct, 10) || 0,
+            target_mem_pct: targetMemPct.trim()
+              ? Number.parseInt(targetMemPct, 10) || 0
+              : null,
+            scale_down_cooldown_s: Number.parseInt(cooldownS, 10) || 0,
+            idle_timeout_s: Number.parseInt(idleTimeoutS, 10) || 0,
+          }
+        : null,
     }
 
     if (isEdit && initial) {
@@ -653,6 +725,145 @@ export function ServiceForm({
                   <span className="field-suffix">bytes</span>
                 </span>
               </div>
+            </div>
+
+            <div className="mb-4">
+              <label className="mb-2 inline-flex items-center gap-2 text-sm text-[var(--fg)]">
+                <input
+                  type="checkbox"
+                  className="field-check"
+                  aria-label="enable autoscaling"
+                  checked={autoscaleEnabled}
+                  onChange={(e) => setAutoscaleEnabled(e.target.checked)}
+                />
+                enable autoscaling
+              </label>
+              {autoscaleEnabled ? (
+                <>
+                  <div className="mb-3 flex flex-wrap items-end gap-2">
+                    <div className="flex flex-col gap-1">
+                      <label className="kicker" htmlFor="sf-as-min">
+                        min replicas
+                      </label>
+                      <span className="field-input-group">
+                        <input
+                          id="sf-as-min"
+                          type="number"
+                          min={0}
+                          aria-label="min replicas"
+                          className={`${inputClass} w-24 tnum`}
+                          value={minReplicas}
+                          onChange={(e) => setMinReplicas(e.target.value)}
+                        />
+                        <span className="field-suffix">replicas</span>
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className="kicker" htmlFor="sf-as-max">
+                        max replicas
+                      </label>
+                      <span className="field-input-group">
+                        <input
+                          id="sf-as-max"
+                          type="number"
+                          min={1}
+                          aria-label="max replicas"
+                          className={`${inputClass} w-24 tnum`}
+                          value={maxReplicas}
+                          onChange={(e) => setMaxReplicas(e.target.value)}
+                        />
+                        <span className="field-suffix">replicas</span>
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="mb-3 flex flex-wrap items-end gap-2">
+                    <div className="flex flex-col gap-1">
+                      <label className="kicker" htmlFor="sf-as-cpu">
+                        target cpu
+                      </label>
+                      <span className="field-input-group">
+                        <input
+                          id="sf-as-cpu"
+                          type="number"
+                          min={1}
+                          max={100}
+                          aria-label="target cpu percent"
+                          className={`${inputClass} w-24 tnum`}
+                          value={targetCpuPct}
+                          onChange={(e) => setTargetCpuPct(e.target.value)}
+                        />
+                        <span className="field-suffix">%</span>
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className="kicker" htmlFor="sf-as-mem">
+                        target memory (optional)
+                      </label>
+                      <span className="field-input-group">
+                        <input
+                          id="sf-as-mem"
+                          type="number"
+                          min={1}
+                          max={100}
+                          aria-label="target memory percent"
+                          className={`${inputClass} w-24 tnum`}
+                          value={targetMemPct}
+                          onChange={(e) => setTargetMemPct(e.target.value)}
+                        />
+                        <span className="field-suffix">%</span>
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="mb-2 flex flex-wrap items-end gap-2">
+                    <div className="flex flex-col gap-1">
+                      <label className="kicker" htmlFor="sf-as-cooldown">
+                        scale-down cooldown
+                      </label>
+                      <span className="field-input-group">
+                        <input
+                          id="sf-as-cooldown"
+                          type="number"
+                          min={0}
+                          aria-label="scale down cooldown seconds"
+                          className={`${inputClass} w-28 tnum`}
+                          value={cooldownS}
+                          onChange={(e) => setCooldownS(e.target.value)}
+                        />
+                        <span className="field-suffix">s</span>
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className="kicker" htmlFor="sf-as-idle">
+                        idle timeout
+                      </label>
+                      <span className="field-input-group">
+                        <input
+                          id="sf-as-idle"
+                          type="number"
+                          min={0}
+                          aria-label="idle timeout seconds"
+                          className={`${inputClass} w-28 tnum`}
+                          value={idleTimeoutS}
+                          onChange={(e) => setIdleTimeoutS(e.target.value)}
+                        />
+                        <span className="field-suffix">s</span>
+                      </span>
+                    </div>
+                  </div>
+
+                  <p className="field-help">
+                    min 0 = scale to zero when idle; first request cold-starts a
+                    replica
+                  </p>
+                  {autoscaleError ? (
+                    <p className="field-error" role="alert">
+                      {autoscaleError}
+                    </p>
+                  ) : null}
+                </>
+              ) : null}
             </div>
 
             <div className="mb-1">
