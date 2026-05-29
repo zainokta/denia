@@ -395,6 +395,23 @@ export function ServiceDetail() {
                       {service?.tls_enabled ? 'enabled' : 'disabled'}
                     </span>
                   </li>
+                  <li className="flex items-center gap-3 px-4 py-2.5 text-sm border-b border-[var(--border)]">
+                    <span className="kicker w-32">autoscale</span>
+                    <span className="text-[var(--fg)]">
+                      {service?.autoscale
+                        ? [
+                            `${service.autoscale.min_replicas}–${service.autoscale.max_replicas} replicas`,
+                            `${service.autoscale.target_cpu_pct}% cpu`,
+                            ...(service.autoscale.target_mem_pct != null
+                              ? [`${service.autoscale.target_mem_pct}% mem`]
+                              : []),
+                            ...(service.autoscale.min_replicas === 0
+                              ? ['scale-to-zero']
+                              : []),
+                          ].join(' · ')
+                        : 'disabled'}
+                    </span>
+                  </li>
                   <li className="flex items-center gap-3 px-4 py-2.5 text-sm">
                     <span className="kicker w-32">status</span>
                     {newestDeployment ? (

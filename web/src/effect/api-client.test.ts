@@ -511,16 +511,16 @@ describe('ApiClient jobs', () => {
 
 describe('ArtifactRef schema', () => {
   const FIXTURE_DEPLOY_WITH_ARTIFACT = {
-    id: 1,
-    service_id: 1,
+    id: '0190b8a0-0000-7000-8000-000000000001',
+    service_id: '0190b8a0-0000-7000-8000-0000000000aa',
     status: 'Healthy',
     created_at: '2026-05-25T00:00:00Z',
     artifact: { digest: 'sha256:abc123', kind: 'OciImage' as const },
   }
 
   const FIXTURE_DEPLOY_WITHOUT_ARTIFACT = {
-    id: 2,
-    service_id: 1,
+    id: '0190b8a0-0000-7000-8000-000000000002',
+    service_id: '0190b8a0-0000-7000-8000-0000000000aa',
     status: 'Building',
     created_at: '2026-05-25T01:00:00Z',
   }
@@ -528,7 +528,7 @@ describe('ArtifactRef schema', () => {
   it.effect('decodes Deployment with artifact ref', () =>
     Schema.decodeUnknownEffect(Deployment)(FIXTURE_DEPLOY_WITH_ARTIFACT).pipe(
       Effect.map((d) => {
-        expect(d.id).toBe(1)
+        expect(d.id).toBe(FIXTURE_DEPLOY_WITH_ARTIFACT.id)
         expect(d.artifact).toBeDefined()
         expect(d.artifact!.digest).toBe('sha256:abc123')
         expect(d.artifact!.kind).toBe('OciImage')
@@ -539,7 +539,7 @@ describe('ArtifactRef schema', () => {
   it.effect('decodes Deployment without artifact ref', () =>
     Schema.decodeUnknownEffect(Deployment)(FIXTURE_DEPLOY_WITHOUT_ARTIFACT).pipe(
       Effect.map((d) => {
-        expect(d.id).toBe(2)
+        expect(d.id).toBe(FIXTURE_DEPLOY_WITHOUT_ARTIFACT.id)
         expect(d.status).toBe('Building')
         expect(d.artifact).toBeUndefined()
       }),

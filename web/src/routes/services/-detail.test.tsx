@@ -5,6 +5,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 afterEach(() => {
   cleanup()
+  logsState.lines = []
+  logsState.error = null
 })
 
 const navigateMock = vi.fn()
@@ -19,6 +21,11 @@ vi.mock('@tanstack/react-router', async () => {
     ...actual,
     useParams: vi.fn(() => ({ serviceId: 's-1' })),
     useNavigate: vi.fn(() => navigateMock),
+    // <Link> needs router context (useLinkProps reads it); stub it to a plain
+    // anchor so ServiceDetail renders in jsdom without a RouterProvider.
+    Link: ({ children }: { children?: React.ReactNode }) => (
+      <a href="#">{children}</a>
+    ),
   }
 })
 
@@ -30,6 +37,17 @@ vi.mock('#/hooks/useAuth', () => ({
     me: undefined,
   }),
   can: (_required: string, _userRole: string) => true,
+}))
+
+// useServiceLogs opens a streaming fetch to /logs/stream, which has no base URL
+// in jsdom. Stub it with settable state so the Logs tab can be tested directly.
+const logsState = vi.hoisted(() => ({
+  lines: [] as string[],
+  error: null as string | null,
+}))
+
+vi.mock('#/hooks/useServiceLogs', () => ({
+  useServiceLogs: () => logsState,
 }))
 
 import { runQuery } from '#/effect/runtime'
@@ -85,14 +103,14 @@ function makeWrapper() {
   }
 }
 
-// Hook declaration order in ServiceDetail:
-//   getService, listProjects, deployments, logs, metrics, requests, domains.
+// runQuery call order in ServiceDetail (logs are NOT a runQuery call — they come
+// from the useServiceLogs hook, mocked above):
+//   getService, listProjects, deployments, metrics, requests, domains.
 // Map each to a fixture; anything unspecified defaults to [].
 interface Returns {
   service?: unknown
   projects?: unknown
   deployments?: unknown
-  logs?: unknown
   metrics?: unknown
   requests?: unknown
   domains?: unknown
@@ -103,7 +121,6 @@ function setReturns(r: Returns) {
     r.service ?? fixService,
     r.projects ?? [],
     r.deployments ?? [],
-    r.logs ?? [],
     r.metrics ?? [],
     r.requests ?? [],
     r.domains ?? [],
@@ -131,6 +148,51 @@ describe('ServiceDetail', () => {
     expect(screen.getByText('enabled')).toBeTruthy()
   })
 
+  it('shows autoscale as disabled on overview when no policy is set', async () => {
+    setReturns({})
+    render(<ServiceDetail />, { wrapper: makeWrapper() })
+    await screen.findByRole('heading', { name: 'web' })
+    expect(screen.getByText('disabled')).toBeTruthy()
+  })
+
+  it('summarizes the autoscale policy on overview when set', async () => {
+    setReturns({
+      service: {
+        ...fixService,
+        autoscale: {
+          min_replicas: 1,
+          max_replicas: 3,
+          target_cpu_pct: 70,
+          target_mem_pct: 60,
+          scale_down_cooldown_s: 300,
+          idle_timeout_s: 600,
+        },
+      },
+    })
+    render(<ServiceDetail />, { wrapper: makeWrapper() })
+    await screen.findByRole('heading', { name: 'web' })
+    expect(screen.getByText(/replicas · 70% cpu · 60% mem/)).toBeTruthy()
+  })
+
+  it('flags scale-to-zero on overview when min replicas is 0', async () => {
+    setReturns({
+      service: {
+        ...fixService,
+        autoscale: {
+          min_replicas: 0,
+          max_replicas: 2,
+          target_cpu_pct: 70,
+          target_mem_pct: null,
+          scale_down_cooldown_s: 300,
+          idle_timeout_s: 600,
+        },
+      },
+    })
+    render(<ServiceDetail />, { wrapper: makeWrapper() })
+    await screen.findByRole('heading', { name: 'web' })
+    expect(screen.getByText(/scale-to-zero/)).toBeTruthy()
+  })
+
   it('shows source summary when the Source tab is selected', async () => {
     setReturns({})
     render(<ServiceDetail />, { wrapper: makeWrapper() })
@@ -142,7 +204,8 @@ describe('ServiceDetail', () => {
   })
 
   it('shows logs when the Logs tab is selected', async () => {
-    setReturns({ logs: fixLogs })
+    setReturns({})
+    logsState.lines = fixLogs
     render(<ServiceDetail />, { wrapper: makeWrapper() })
     await screen.findByRole('heading', { name: 'web' })
 
@@ -197,7 +260,9 @@ describe('ServiceDetail', () => {
     mockRunQuery.mockResolvedValue(undefined)
 
     fireEvent.click(screen.getByRole('button', { name: 'delete' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'yes' }))
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'confirm delete service' }),
+    )
 
     // deleteService -> runQuery was invoked
     await vi.waitFor(() => {
