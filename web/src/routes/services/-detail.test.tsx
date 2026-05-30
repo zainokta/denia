@@ -39,15 +39,22 @@ vi.mock('#/hooks/useAuth', () => ({
   can: (_required: string, _userRole: string) => true,
 }))
 
-// useServiceLogs opens a streaming fetch to /logs/stream, which has no base URL
-// in jsdom. Stub it with settable state so the Logs tab can be tested directly.
+// The Logs tab renders <LogStream>, which streams over useLogStream (an SSE
+// fetch with no base URL in jsdom). Stub the hook with settable state so the
+// Logs tab can be tested directly.
 const logsState = vi.hoisted(() => ({
   lines: [] as string[],
   error: null as string | null,
 }))
 
-vi.mock('#/hooks/useServiceLogs', () => ({
-  useServiceLogs: () => logsState,
+vi.mock('#/hooks/useLogStream', () => ({
+  useLogStream: () => ({
+    lines: logsState.lines.map((text, seq) => ({ seq, text })),
+    status: logsState.error ? 'error' : 'streaming',
+    error: logsState.error,
+    clear: () => {},
+    reconnect: () => {},
+  }),
 }))
 
 import { runQuery } from '#/effect/runtime'
