@@ -1,11 +1,18 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import { Effect } from 'effect'
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Boxes, Rocket } from 'lucide-react'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
-import { StatusSignal } from '#/components/StatusSignal'
-import { DeployPhase } from '#/components/DeployPhase'
+import type { NodeSnapshot } from '#/effect/schema'
+import { BarMeter, RadialGauge, Sparkline } from '#/components/Charts'
+import { StatusBadge } from '#/components/StatusBadge'
+import { EmptyState } from '#/components/EmptyState'
+import { SkeletonRows } from '#/components/Skeleton'
+import { Num } from '#/components/Num'
+import type { SemState } from '#/lib/status'
+import { formatBytes, formatPercent, formatRelative, shortId } from '#/lib/format'
 
 const getNodeMetrics = Effect.gen(function* () {
   const api = yield* ApiClient
@@ -30,41 +37,52 @@ const getServiceDeployments = (id: string) =>
 
 export const Route = createFileRoute('/')({ component: Dashboard })
 
-function CpuPercent(cpu: {
-  user_jiffies: number
-  nice_jiffies: number
-  system_jiffies: number
-  idle_jiffies: number
-  iowait_jiffies: number
-}): string {
+// Threshold colouring: utilisation reads steady until it climbs, then warns,
+// then faults. Signal, not decoration.
+function usageState(pct: number): SemState {
+  if (pct >= 88) return 'fault'
+  if (pct >= 70) return 'warn'
+  return 'steady'
+}
+
+function cpuBusyTotal(cpu: NodeSnapshot['cpu']): { busy: number; total: number } {
   const total =
     cpu.user_jiffies +
     cpu.nice_jiffies +
     cpu.system_jiffies +
     cpu.idle_jiffies +
     cpu.iowait_jiffies
-  if (total === 0) return '0.0'
   const busy =
     cpu.user_jiffies + cpu.nice_jiffies + cpu.system_jiffies + cpu.iowait_jiffies
-  return ((busy / total) * 100).toFixed(1)
+  return { busy, total }
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes >= 1_073_741_824)
-    return `${(bytes / 1_073_741_824).toFixed(1)} GiB`
-  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MiB`
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`
-  return `${bytes} B`
-}
+// Instantaneous node CPU% from deltas between successive snapshots (the raw
+// counters are cumulative since boot). Keeps a short client-side history so the
+// gauge reads "now" and the sparkline shows the recent trend.
+function useNodeHistory(snapshot: NodeSnapshot | undefined) {
+  const [series, setSeries] = useState<ReadonlyArray<number>>([])
+  const prev = useRef<{ busy: number; total: number; at: string } | null>(null)
 
-function formatDisk(total: number, available: number): string {
-  const used = total - available
-  const pct = total > 0 ? ((used / total) * 100).toFixed(1) : '0.0'
-  return `${formatBytes(used)} / ${formatBytes(total)} (${pct}%)`
+  useEffect(() => {
+    if (!snapshot) return
+    const { busy, total } = cpuBusyTotal(snapshot.cpu)
+    const last = prev.current
+    if (last && snapshot.recorded_at !== last.at) {
+      const dBusy = busy - last.busy
+      const dTotal = total - last.total
+      const pct = dTotal > 0 ? Math.max(0, Math.min(100, (dBusy / dTotal) * 100)) : 0
+      setSeries((s) => [...s, pct].slice(-40))
+    }
+    prev.current = { busy, total, at: snapshot.recorded_at }
+  }, [snapshot])
+
+  const cpuPct = series.length > 0 ? series[series.length - 1] : 0
+  return { cpuPct, cpuSeries: series }
 }
 
 export function Dashboard() {
-  const { data: nodeMetrics } = useQuery({
+  const { data: nodeMetrics, isLoading: nodeLoading } = useQuery({
     queryKey: ['node', 'metrics'],
     queryFn: () => runQuery(getNodeMetrics),
     refetchInterval: 5000,
@@ -78,161 +96,223 @@ export function Dashboard() {
     refetchIntervalInBackground: false,
   })
 
-  const { data: services = [] } = useQuery({
+  const { data: services = [], isLoading: servicesLoading } = useQuery({
     queryKey: ['services'],
     queryFn: () => runQuery(listServices),
   })
 
-  const running = workloads.filter(
-    (w) => w.status && w.status !== 'Stopped',
-  )
+  const { cpuPct, cpuSeries } = useNodeHistory(nodeMetrics)
 
+  const running = workloads.filter((w) => w.status && w.status !== 'Stopped')
   const hasServices = services.length > 0
+  const serviceIds = useMemo(() => services.map((s) => s.id), [services])
 
-  const serviceIds = useMemo(
-    () => services.map((s) => s.id),
-    [services],
-  )
+  const memPct = nodeMetrics
+    ? ((nodeMetrics.memory_total_bytes - nodeMetrics.memory_available_bytes) /
+        Math.max(1, nodeMetrics.memory_total_bytes)) *
+      100
+    : 0
+  const diskPct = nodeMetrics
+    ? ((nodeMetrics.disk_total_bytes - nodeMetrics.disk_available_bytes) /
+        Math.max(1, nodeMetrics.disk_total_bytes)) *
+      100
+    : 0
 
   return (
-    <main className="page-wrap px-4 pb-12 pt-12">
-      {/* Node health summary — dense, mono, flat */}
-      {nodeMetrics ? (
-        <section className="mb-10">
-          <p className="kicker mb-3">node health</p>
-          <div className="flex flex-wrap gap-x-8 gap-y-2 text-sm">
-            <span className="tnum inline-flex items-baseline gap-2 text-[var(--fg)]">
-              <span className="text-xs text-[var(--fg-muted)]">cpu</span>
-              {CpuPercent(nodeMetrics.cpu)}%
-            </span>
-            <span className="tnum inline-flex items-baseline gap-2 text-[var(--fg)]">
-              <span className="text-xs text-[var(--fg-muted)]">mem</span>
-              {formatBytes(
-                nodeMetrics.memory_total_bytes -
-                  nodeMetrics.memory_available_bytes,
-              )}{' '}
-              / {formatBytes(nodeMetrics.memory_total_bytes)}
-            </span>
-            <span className="tnum inline-flex items-baseline gap-2 text-[var(--fg)]">
-              <span className="text-xs text-[var(--fg-muted)]">disk</span>
-              {formatDisk(
-                nodeMetrics.disk_total_bytes,
-                nodeMetrics.disk_available_bytes,
-              )}
-            </span>
-            <span className="tnum inline-flex items-baseline gap-2 text-[var(--fg)]">
-              <span className="text-xs text-[var(--fg-muted)]">load</span>
-              {nodeMetrics.load_1m.toFixed(2)} /{' '}
-              {nodeMetrics.load_5m.toFixed(2)} /{' '}
-              {nodeMetrics.load_15m.toFixed(2)}
-            </span>
-          </div>
-        </section>
-      ) : null}
+    <div className="page-wrap px-4 pb-16 pt-10">
+      <header className="panel-head" style={{ marginBottom: '1.5rem' }}>
+        <div>
+          <p className="kicker">control plane</p>
+          <h1 className="t-display">Overview</h1>
+        </div>
+        <span className="badge">
+          <span
+            className={`signal ${running.length > 0 ? 'signal-steady' : 'opacity-40'}`}
+            aria-hidden="true"
+          />
+          <Num>{running.length}</Num> running
+        </span>
+      </header>
 
-      {/* Running workloads */}
-      <section className="mb-10">
-        <p className="kicker mb-3">
-          workloads{' '}
-          <span className="text-[var(--fg-muted)]">
-            {running.length} running
-          </span>
-        </p>
-        {running.length === 0 ? (
-          <p className="text-sm text-[var(--fg-muted)]">
-            No running workloads.
+      <div className="stack-lg">
+        {/* Node health: gauges + load */}
+        <section>
+          <p className="kicker" style={{ marginBottom: '0.9rem' }}>
+            node health
           </p>
-        ) : (
-          <div className="panel overflow-hidden">
-            <ul className="m-0 list-none">
-              {running.slice(0, 5).map((w, i) => (
-                <li
-                  key={`${w.service_id}-${w.deployment_id ?? i}`}
-                  className={`flex items-center gap-4 px-4 py-2.5 text-sm ${
-                    i > 0 ? 'border-t border-[var(--border)]' : ''
-                  }`}
-                >
-                  {w.status ? <StatusSignal status={w.status} /> : null}
-                  <span className="font-semibold text-[var(--fg)] min-w-0 truncate">
-                    {w.service_name}
-                  </span>
-                  {w.cpu_usage_usec !== null ? (
-                    <span className="tnum text-xs text-[var(--fg-muted)] ml-auto">
-                      {(w.cpu_usage_usec / 10000).toFixed(1)}%
-                    </span>
-                  ) : null}
-                  {w.memory_current_bytes !== null ? (
-                    <span className="tnum text-xs text-[var(--fg-muted)]">
-                      {formatBytes(w.memory_current_bytes)}
-                    </span>
-                  ) : null}
-                </li>
+          {nodeMetrics ? (
+            <div className="panel panel-pad">
+              <div className="flex flex-wrap items-center gap-x-10 gap-y-6">
+                <div className="flex flex-col items-center gap-2">
+                  <RadialGauge
+                    value={cpuPct}
+                    label={formatPercent(cpuPct, 0)}
+                    sublabel="cpu"
+                    state={usageState(cpuPct)}
+                  />
+                  <Sparkline
+                    values={cpuSeries.length > 1 ? cpuSeries : [0, 0]}
+                    width={132}
+                    height={26}
+                    ariaLabel="cpu trend"
+                  />
+                </div>
+                <RadialGauge
+                  value={memPct}
+                  label={formatPercent(memPct, 0)}
+                  sublabel="memory"
+                  state={usageState(memPct)}
+                />
+                <RadialGauge
+                  value={diskPct}
+                  label={formatPercent(diskPct, 0)}
+                  sublabel="disk"
+                  state={usageState(diskPct)}
+                />
+                <dl className="flex flex-col gap-3" style={{ margin: 0 }}>
+                  <Detail
+                    label="memory used"
+                    value={`${formatBytes(nodeMetrics.memory_total_bytes - nodeMetrics.memory_available_bytes)} / ${formatBytes(nodeMetrics.memory_total_bytes)}`}
+                  />
+                  <Detail
+                    label="disk used"
+                    value={`${formatBytes(nodeMetrics.disk_total_bytes - nodeMetrics.disk_available_bytes)} / ${formatBytes(nodeMetrics.disk_total_bytes)}`}
+                  />
+                  <Detail
+                    label="load (1 / 5 / 15m)"
+                    value={`${nodeMetrics.load_1m.toFixed(2)} ${nodeMetrics.load_5m.toFixed(2)} ${nodeMetrics.load_15m.toFixed(2)}`}
+                  />
+                </dl>
+              </div>
+            </div>
+          ) : nodeLoading ? (
+            <SkeletonRows rows={3} />
+          ) : (
+            <div className="panel panel-pad">
+              <p className="text-faint">Node metrics unavailable.</p>
+            </div>
+          )}
+        </section>
+
+        {/* Running workloads */}
+        <section>
+          <p className="kicker" style={{ marginBottom: '0.9rem' }}>
+            workloads
+          </p>
+          {running.length === 0 ? (
+            <div className="panel">
+              <EmptyState
+                icon={<Boxes size={22} />}
+                title="No running workloads"
+                hint="Deploy a service to see it report live runtime state here."
+                action={
+                  <Link to="/services" className="btn btn-primary">
+                    Go to services
+                  </Link>
+                }
+              />
+            </div>
+          ) : (
+            <div className="panel overflow-hidden">
+              <table className="dtable">
+                <thead>
+                  <tr>
+                    <th>service</th>
+                    <th>status</th>
+                    <th className="num">memory</th>
+                    <th>usage</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {running.slice(0, 8).map((w, i) => {
+                    const mem = w.memory_current_bytes ?? 0
+                    const memOfNode = nodeMetrics
+                      ? (mem / Math.max(1, nodeMetrics.memory_total_bytes)) * 100
+                      : 0
+                    return (
+                      <tr key={`${w.service_id}-${w.deployment_id ?? i}`}>
+                        <td>
+                          <Link to="/services/$serviceId" params={{ serviceId: w.service_id }}>
+                            {w.service_name}
+                          </Link>
+                        </td>
+                        <td>
+                          {w.status ? <StatusBadge status={w.status} /> : '—'}
+                        </td>
+                        <td className="num">
+                          <Num>{w.memory_current_bytes !== null ? formatBytes(mem) : '—'}</Num>
+                        </td>
+                        <td style={{ minWidth: '8rem' }}>
+                          <BarMeter
+                            value={memOfNode}
+                            max={100}
+                            state={usageState(memOfNode)}
+                          />
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        {/* Recent deployments */}
+        <section>
+          <p className="kicker" style={{ marginBottom: '0.9rem' }}>
+            recent deployments
+          </p>
+          {servicesLoading ? (
+            <SkeletonRows rows={3} />
+          ) : serviceIds.length === 0 ? (
+            <div className="panel">
+              <EmptyState title="No deployments yet" hint="They will appear here once you deploy." />
+            </div>
+          ) : (
+            <div className="panel overflow-hidden">
+              {serviceIds.slice(0, 6).map((id) => (
+                <ServiceDeploymentRow key={id} serviceId={id} />
               ))}
-            </ul>
-          </div>
-        )}
-      </section>
-
-      {/* Recent deployments timeline — last 5 across all services */}
-      <section className="mb-10">
-        <p className="kicker mb-3">recent deployments</p>
-        {serviceIds.length === 0 ? (
-          <p className="text-sm text-[var(--fg-muted)]">
-            No services yet.
-          </p>
-        ) : (
-          <RecentDeployments serviceIds={serviceIds} />
-        )}
-      </section>
-
-      {/* Getting started when no services exist */}
-      {!hasServices ? (
-        <section className="panel p-6">
-          <p className="kicker mb-3">getting started</p>
-          <p className="mb-4 text-sm text-[var(--fg-muted)]">
-            Create a project, then deploy your first service.
-          </p>
-          <div className="flex flex-wrap gap-3">
-            <Link to="/projects" className="btn btn-primary">
-              Projects
-            </Link>
-            <Link to="/services" className="btn">
-              Services
-            </Link>
-          </div>
+            </div>
+          )}
         </section>
-      ) : null}
-    </main>
-  )
-}
 
-function RecentDeployments({ serviceIds }: { serviceIds: string[] }) {
-  // Fetch deployments for each service — in a real app with many services
-  // we'd want a backend aggregate endpoint, but for solo-operator scale
-  // this is fine.
-  return (
-    <div className="panel overflow-hidden">
-      <DeploymentRows serviceIds={serviceIds} maxRows={5} />
+        {/* Getting started */}
+        {!servicesLoading && !hasServices ? (
+          <section className="panel panel-pad">
+            <p className="kicker" style={{ marginBottom: '0.6rem' }}>
+              getting started
+            </p>
+            <p className="text-faint" style={{ marginBottom: '1rem', maxWidth: '52ch' }}>
+              Create a project to scope your work, then define a service and deploy it.
+              Routes, TLS, and runtime metrics follow automatically.
+            </p>
+            <div className="cluster">
+              <Link to="/projects" className="btn btn-primary">
+                <Rocket size={14} aria-hidden="true" /> Create a project
+              </Link>
+              <Link to="/services" className="btn">
+                Services
+              </Link>
+            </div>
+          </section>
+        ) : null}
+      </div>
     </div>
   )
 }
 
-function DeploymentRows({
-  serviceIds,
-  maxRows,
-}: {
-  serviceIds: string[]
-  maxRows: number
-}) {
-  // Fetch the first service's deployments to render something useful
-  // without excessive parallel queries. In practice, a single-node operator
-  // has few services. We render inline loading per service.
+function Detail({ label, value }: { label: string; value: string }) {
   return (
-    <>
-      {serviceIds.slice(0, maxRows).map((id) => (
-        <ServiceDeploymentRow key={id} serviceId={id} />
-      ))}
-    </>
+    <div className="flex items-baseline gap-3">
+      <dt className="kicker" style={{ minWidth: '11ch' }}>
+        {label}
+      </dt>
+      <dd className="tnum" style={{ margin: 0 }}>
+        {value}
+      </dd>
+    </div>
   )
 }
 
@@ -245,16 +325,22 @@ function ServiceDeploymentRow({ serviceId }: { serviceId: string }) {
   })
 
   if (deployments.length === 0) return null
-
   const newest = deployments.reduce((a, b) => (a.id > b.id ? a : b))
 
   return (
-    <div className="flex items-center gap-4 px-4 py-2.5 text-sm border-t border-[var(--border)] first:border-t-0">
-      <StatusSignal status={newest.status} />
-      <DeployPhase status={newest.status} />
-      <span className="tnum text-xs text-[var(--fg-muted)] ml-auto">
-        {newest.created_at}
+    <Link
+      to="/deployments/$deploymentId"
+      params={{ deploymentId: newest.id }}
+      className="flex items-center gap-4 px-4 py-3 border-t border-[var(--border)] first:border-t-0 no-underline hover:no-underline"
+      style={{ color: 'inherit' }}
+    >
+      <StatusBadge status={newest.status} />
+      <span className="kicker" style={{ color: 'var(--fg-faint)' }}>
+        {shortId(newest.id)}
       </span>
-    </div>
+      <span className="tnum text-faint ml-auto" style={{ fontSize: 'var(--text-label)' }}>
+        {formatRelative(newest.created_at, Date.now())}
+      </span>
+    </Link>
   )
 }

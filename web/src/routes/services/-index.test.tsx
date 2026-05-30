@@ -19,6 +19,20 @@ vi.mock('#/effect/runtime', () => ({
   runQuery: vi.fn(() => Promise.resolve([])),
 }))
 
+// <Link> needs router context (useLinkProps reads it); stub it to a plain
+// anchor so ServicesIndex renders in jsdom without a RouterProvider. Mirrors
+// the stub used in services/-detail.test.tsx.
+vi.mock('@tanstack/react-router', async () => {
+  const actual = await vi.importActual('@tanstack/react-router')
+  return {
+    ...actual,
+    useNavigate: vi.fn(() => vi.fn()),
+    Link: ({ children }: { children?: React.ReactNode }) => (
+      <a href="#">{children}</a>
+    ),
+  }
+})
+
 vi.mock('#/hooks/useAuth', () => ({
   useAuth: () => ({
     isSuperAdmin: true,

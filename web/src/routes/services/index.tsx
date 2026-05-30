@@ -1,4 +1,4 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, Link } from '@tanstack/react-router'
 import {
   useMutation,
   useQueries,
@@ -6,12 +6,16 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { useState } from 'react'
-import { ChevronDown, ChevronUp } from 'lucide-react'
+import { Boxes, ChevronDown, ChevronUp, Rocket } from 'lucide-react'
 import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
-import { StatusSignal } from '#/components/StatusSignal'
 import { ServiceForm } from '#/components/ServiceForm'
+import { StatusBadge } from '#/components/StatusBadge'
+import { EmptyState } from '#/components/EmptyState'
+import { SkeletonRows } from '#/components/Skeleton'
+import { InlineError, errorMessage } from '#/components/ErrorPanel'
+import { useActionToasts } from '#/components/Toast'
 import { useAuth, can } from '#/hooks/useAuth'
 import type {
   Service,
@@ -73,13 +77,20 @@ type DeploymentStatusValue = NonNullable<WorkloadView['status']>
 export function ServicesIndex() {
   const queryClient = useQueryClient()
   const { isSuperAdmin, roleForActiveProject } = useAuth()
+  const toast = useActionToasts()
 
   const [createOpen, setCreateOpen] = useState(false)
   const [createError, setCreateError] = useState('')
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
   const [deleteError, setDeleteError] = useState('')
 
-  const { data: services = [], isFetching } = useQuery({
+  const {
+    data: services = [],
+    isLoading,
+    isError,
+    error,
+    refetch,
+  } = useQuery({
     queryKey: ['services'],
     queryFn: () => runQuery(listServices),
   })
@@ -133,10 +144,12 @@ export function ServicesIndex() {
       queryClient.invalidateQueries({ queryKey: ['services'] })
       setCreateOpen(false)
       setCreateError('')
+      toast.ok('Service created')
     },
     onError: (err: unknown) => {
-      const msg = err instanceof Error ? err.message : 'Create failed'
+      const msg = errorMessage(err)
       setCreateError(msg)
+      toast.err(msg)
     },
   })
 
@@ -146,10 +159,12 @@ export function ServicesIndex() {
       queryClient.invalidateQueries({ queryKey: ['services'] })
       setDeleteConfirm(null)
       setDeleteError('')
+      toast.ok('Service deleted')
     },
     onError: (err: unknown) => {
-      const msg = err instanceof Error ? err.message : 'Delete failed'
+      const msg = errorMessage(err)
       setDeleteError(msg)
+      toast.err(msg)
     },
   })
 
@@ -158,165 +173,218 @@ export function ServicesIndex() {
       runQuery(createDeployment(service)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['services'] })
+      toast.ok('Deployment started')
     },
+    onError: (err: unknown) => toast.err(errorMessage(err)),
   })
 
   const stop = useMutation({
     mutationFn: (id: string) => runQuery(stopService(id)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['services'] })
+      toast.ok('Service stopped')
     },
+    onError: (err: unknown) => toast.err(errorMessage(err)),
   })
 
+  const hasServices = services.length > 0
+
   return (
-    <main className="page-wrap px-4 pb-12 pt-12">
-      <p className="kicker mb-3">services</p>
-      <h1 className="mb-4 text-2xl font-semibold tracking-tight text-[var(--fg)]">
-        Services
-      </h1>
+    <main className="page-wrap px-4 pb-16 pt-10">
+      <header className="panel-head" style={{ marginBottom: '1.5rem' }}>
+        <div>
+          <p className="kicker">control plane</p>
+          <h1 className="t-display">Services</h1>
+        </div>
+        {hasServices ? (
+          <span className="badge">
+            <span className="tnum">{services.length}</span>{' '}
+            service{services.length !== 1 ? 's' : ''}
+          </span>
+        ) : null}
+      </header>
 
-      {canOperateService() ? (
-        <section className="panel mb-6 overflow-hidden">
-          <button
-            type="button"
-            className="flex w-full items-center justify-between px-4 py-2.5 text-left text-sm font-semibold text-[var(--fg)] hover:bg-[var(--surface-2)]"
-            aria-expanded={createOpen}
-            aria-controls="new-service-panel"
-            onClick={() => setCreateOpen((v) => !v)}
-          >
-            <span className="flex items-center gap-2">
-              <span className="signal signal-steady" aria-hidden="true" />
-              new service
-            </span>
-            {createOpen ? (
-              <ChevronUp size={14} className="text-[var(--fg-muted)]" aria-hidden="true" />
-            ) : (
-              <ChevronDown size={14} className="text-[var(--fg-muted)]" aria-hidden="true" />
-            )}
-          </button>
-
-          {createOpen ? (
-            <div
-              id="new-service-panel"
-              className="border-t border-[var(--border)] px-4 py-3"
+      <div className="stack-lg">
+        {canOperateService() ? (
+          <section className="panel overflow-hidden">
+            <button
+              type="button"
+              className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-[var(--surface-2)]"
+              aria-expanded={createOpen}
+              aria-controls="new-service-panel"
+              onClick={() => setCreateOpen((v) => !v)}
             >
-              <ServiceForm
-                projects={projects.map((p) => ({ id: p.id, name: p.name }))}
-                registries={registries.map((r) => ({
-                  id: r.id,
-                  name: r.name,
-                  project_id: r.project_id,
-                  endpoint: r.endpoint,
-                }))}
-                pending={create.isPending}
-                error={createError || undefined}
-                onSubmit={(value) => create.mutate(value)}
+              <span className="cluster">
+                <span className="signal signal-steady" aria-hidden="true" />
+                <span className="kicker">new service</span>
+              </span>
+              {createOpen ? (
+                <ChevronUp size={14} className="text-[var(--fg-muted)]" aria-hidden="true" />
+              ) : (
+                <ChevronDown size={14} className="text-[var(--fg-muted)]" aria-hidden="true" />
+              )}
+            </button>
+
+            {createOpen ? (
+              <div
+                id="new-service-panel"
+                className="border-t border-[var(--border)] panel-pad"
+              >
+                <ServiceForm
+                  projects={projects.map((p) => ({ id: p.id, name: p.name }))}
+                  registries={registries.map((r) => ({
+                    id: r.id,
+                    name: r.name,
+                    project_id: r.project_id,
+                    endpoint: r.endpoint,
+                  }))}
+                  pending={create.isPending}
+                  error={createError || undefined}
+                  onSubmit={(value) => create.mutate(value)}
+                />
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
+        <section>
+          {deleteError ? (
+            <div style={{ marginBottom: '0.9rem' }}>
+              <InlineError message={deleteError} />
+            </div>
+          ) : null}
+
+          {isLoading ? (
+            <SkeletonRows rows={4} />
+          ) : isError ? (
+            <div className="panel">
+              <EmptyState
+                icon={<Boxes size={22} />}
+                title="Could not load services"
+                hint={errorMessage(error)}
+                action={
+                  <button type="button" className="btn" onClick={() => refetch()}>
+                    Retry
+                  </button>
+                }
               />
             </div>
-          ) : null}
-        </section>
-      ) : null}
-
-      {services.length === 0 && !isFetching ? (
-        <p className="text-[var(--fg-muted)]">
-          No services yet. Create a project and deploy your first service.
-        </p>
-      ) : (
-        <section className="panel overflow-hidden">
-          <div className="flex items-center border-b border-[var(--border)] px-4 py-2.5">
-            <p className="kicker m-0">
-              {isFetching
-                ? 'fetching...'
-                : `${services.length} service${services.length !== 1 ? 's' : ''}`}
-            </p>
-          </div>
-          {deleteError ? (
-            <div className="border-b border-[var(--border)] px-4 py-2 text-xs text-[var(--violet)]">
-              <span className="signal signal-fault mr-2 inline-block align-middle" />
-              {deleteError}
+          ) : !hasServices ? (
+            <div className="panel">
+              <EmptyState
+                icon={<Rocket size={22} />}
+                title="No services yet"
+                hint="Create a project and deploy your first service. Routes, TLS, and runtime metrics follow automatically."
+                action={
+                  <Link to="/projects" className="btn btn-primary">
+                    Create a project
+                  </Link>
+                }
+              />
             </div>
-          ) : null}
-          <ul className="m-0 list-none">
-            {services.map((svc, i) => {
-              const status = statusByService.get(svc.id) ?? null
-              return (
-                <li
-                  key={svc.id}
-                  className={`flex items-center gap-4 px-4 py-3 text-sm ${
-                    i > 0 ? 'border-t border-[var(--border)]' : ''
-                  }`}
-                >
-                  {status ? (
-                    <StatusSignal status={status} />
-                  ) : null}
-                  <a
-                    href={`/services/${svc.id}`}
-                    className="min-w-0 flex-1 text-[var(--fg)] no-underline hover:underline"
-                  >
-                    <span className="font-semibold">{svc.name}</span>
-                    <span className="ml-3 text-xs text-[var(--fg-muted)]">
-                      {svc.domains.join(', ') || `:${svc.internal_port}`}
-                    </span>
-                  </a>
-                  {canOperate(svc.project_id) ? (
-                    <>
-                      <button
-                        className="btn btn-primary text-xs"
-                        type="button"
-                        onClick={() => deploy.mutate(svc)}
-                        disabled={deploy.isPending}
-                      >
-                        {deploy.isPending ? 'deploying...' : 'deploy'}
-                      </button>
-                      <button
-                        className="btn text-xs"
-                        type="button"
-                        onClick={() => stop.mutate(svc.id)}
-                        disabled={stop.isPending}
-                      >
-                        stop
-                      </button>
-                      {deleteConfirm === svc.id ? (
-                        <span className="inline-flex items-center gap-1 text-xs">
-                          <span className="text-[var(--violet)]">delete?</span>
-                          <button
-                            type="button"
-                            className="btn text-xs"
-                            aria-label="confirm delete service"
-                            onClick={() => remove.mutate(svc.id)}
-                            disabled={remove.isPending}
+          ) : (
+            <div className="panel overflow-hidden">
+              <table className="dtable">
+                <thead>
+                  <tr>
+                    <th>service</th>
+                    <th>status</th>
+                    <th>routes</th>
+                    {canOperateService() ? <th aria-label="actions" /> : null}
+                  </tr>
+                </thead>
+                <tbody>
+                  {services.map((svc) => {
+                    const status = statusByService.get(svc.id) ?? null
+                    return (
+                      <tr key={svc.id}>
+                        <td>
+                          <Link
+                            to="/services/$serviceId"
+                            params={{ serviceId: svc.id }}
+                            className="font-semibold no-underline hover:underline"
                           >
-                            yes
-                          </button>
-                          <button
-                            type="button"
-                            className="btn text-xs"
-                            aria-label="cancel delete service"
-                            onClick={() => setDeleteConfirm(null)}
-                          >
-                            no
-                          </button>
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn text-xs"
-                          onClick={() => {
-                            setDeleteError('')
-                            setDeleteConfirm(svc.id)
-                          }}
-                        >
-                          delete
-                        </button>
-                      )}
-                    </>
-                  ) : null}
-                </li>
-              )
-            })}
-          </ul>
+                            {svc.name}
+                          </Link>
+                        </td>
+                        <td>
+                          {status ? (
+                            <StatusBadge status={status} />
+                          ) : (
+                            <span className="text-faint">—</span>
+                          )}
+                        </td>
+                        <td className="text-faint" style={{ fontSize: 'var(--text-label)' }}>
+                          {svc.domains.length > 0
+                            ? svc.domains.join(', ')
+                            : `:${svc.internal_port}`}
+                        </td>
+                        {canOperateService() ? (
+                          <td>
+                            {canOperate(svc.project_id) ? (
+                              <span className="cluster" style={{ justifyContent: 'flex-end' }}>
+                                <button
+                                  className="btn btn-primary"
+                                  type="button"
+                                  onClick={() => deploy.mutate(svc)}
+                                  disabled={deploy.isPending}
+                                >
+                                  {deploy.isPending ? 'deploying...' : 'deploy'}
+                                </button>
+                                <button
+                                  className="btn"
+                                  type="button"
+                                  onClick={() => stop.mutate(svc.id)}
+                                  disabled={stop.isPending}
+                                >
+                                  stop
+                                </button>
+                                {deleteConfirm === svc.id ? (
+                                  <span className="inline-flex items-center gap-1">
+                                    <span className="text-[var(--violet)]">delete?</span>
+                                    <button
+                                      type="button"
+                                      className="btn btn-danger"
+                                      aria-label="confirm delete service"
+                                      onClick={() => remove.mutate(svc.id)}
+                                      disabled={remove.isPending}
+                                    >
+                                      yes
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn"
+                                      aria-label="cancel delete service"
+                                      onClick={() => setDeleteConfirm(null)}
+                                    >
+                                      no
+                                    </button>
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={() => {
+                                      setDeleteError('')
+                                      setDeleteConfirm(svc.id)
+                                    }}
+                                  >
+                                    delete
+                                  </button>
+                                )}
+                              </span>
+                            ) : null}
+                          </td>
+                        ) : null}
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
-      )}
+      </div>
     </main>
   )
 }

@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SetupRouteImport } from './routes/setup'
+import { Route as RegistriesRouteImport } from './routes/registries'
 import { Route as ObservabilityRouteImport } from './routes/observability'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as IngressRouteImport } from './routes/ingress'
@@ -20,7 +21,7 @@ import { Route as JobsIndexRouteImport } from './routes/jobs/index'
 import { Route as SettingsUsersRouteImport } from './routes/settings/users'
 import { Route as SettingsTokensRouteImport } from './routes/settings/tokens'
 import { Route as SettingsSessionsRouteImport } from './routes/settings/sessions'
-import { Route as SettingsCredentialsRouteImport } from './routes/settings/credentials'
+import { Route as SettingsOciCacheRouteImport } from './routes/settings/oci-cache'
 import { Route as ServicesServiceIdRouteImport } from './routes/services/$serviceId'
 import { Route as ProjectsProjectIdRouteImport } from './routes/projects/$projectId'
 import { Route as JobsJobIdRouteImport } from './routes/jobs/$jobId'
@@ -29,6 +30,11 @@ import { Route as DeploymentsDeploymentIdRouteImport } from './routes/deployment
 const SetupRoute = SetupRouteImport.update({
   id: '/setup',
   path: '/setup',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RegistriesRoute = RegistriesRouteImport.update({
+  id: '/registries',
+  path: '/registries',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ObservabilityRoute = ObservabilityRouteImport.update({
@@ -81,9 +87,9 @@ const SettingsSessionsRoute = SettingsSessionsRouteImport.update({
   path: '/settings/sessions',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SettingsCredentialsRoute = SettingsCredentialsRouteImport.update({
-  id: '/settings/credentials',
-  path: '/settings/credentials',
+const SettingsOciCacheRoute = SettingsOciCacheRouteImport.update({
+  id: '/settings/oci-cache',
+  path: '/settings/oci-cache',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ServicesServiceIdRoute = ServicesServiceIdRouteImport.update({
@@ -112,12 +118,13 @@ export interface FileRoutesByFullPath {
   '/ingress': typeof IngressRoute
   '/login': typeof LoginRoute
   '/observability': typeof ObservabilityRoute
+  '/registries': typeof RegistriesRoute
   '/setup': typeof SetupRoute
   '/deployments/$deploymentId': typeof DeploymentsDeploymentIdRoute
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
-  '/settings/credentials': typeof SettingsCredentialsRoute
+  '/settings/oci-cache': typeof SettingsOciCacheRoute
   '/settings/sessions': typeof SettingsSessionsRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/settings/users': typeof SettingsUsersRoute
@@ -130,12 +137,13 @@ export interface FileRoutesByTo {
   '/ingress': typeof IngressRoute
   '/login': typeof LoginRoute
   '/observability': typeof ObservabilityRoute
+  '/registries': typeof RegistriesRoute
   '/setup': typeof SetupRoute
   '/deployments/$deploymentId': typeof DeploymentsDeploymentIdRoute
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
-  '/settings/credentials': typeof SettingsCredentialsRoute
+  '/settings/oci-cache': typeof SettingsOciCacheRoute
   '/settings/sessions': typeof SettingsSessionsRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/settings/users': typeof SettingsUsersRoute
@@ -149,12 +157,13 @@ export interface FileRoutesById {
   '/ingress': typeof IngressRoute
   '/login': typeof LoginRoute
   '/observability': typeof ObservabilityRoute
+  '/registries': typeof RegistriesRoute
   '/setup': typeof SetupRoute
   '/deployments/$deploymentId': typeof DeploymentsDeploymentIdRoute
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
-  '/settings/credentials': typeof SettingsCredentialsRoute
+  '/settings/oci-cache': typeof SettingsOciCacheRoute
   '/settings/sessions': typeof SettingsSessionsRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/settings/users': typeof SettingsUsersRoute
@@ -169,12 +178,13 @@ export interface FileRouteTypes {
     | '/ingress'
     | '/login'
     | '/observability'
+    | '/registries'
     | '/setup'
     | '/deployments/$deploymentId'
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
-    | '/settings/credentials'
+    | '/settings/oci-cache'
     | '/settings/sessions'
     | '/settings/tokens'
     | '/settings/users'
@@ -187,12 +197,13 @@ export interface FileRouteTypes {
     | '/ingress'
     | '/login'
     | '/observability'
+    | '/registries'
     | '/setup'
     | '/deployments/$deploymentId'
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
-    | '/settings/credentials'
+    | '/settings/oci-cache'
     | '/settings/sessions'
     | '/settings/tokens'
     | '/settings/users'
@@ -205,12 +216,13 @@ export interface FileRouteTypes {
     | '/ingress'
     | '/login'
     | '/observability'
+    | '/registries'
     | '/setup'
     | '/deployments/$deploymentId'
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
-    | '/settings/credentials'
+    | '/settings/oci-cache'
     | '/settings/sessions'
     | '/settings/tokens'
     | '/settings/users'
@@ -224,12 +236,13 @@ export interface RootRouteChildren {
   IngressRoute: typeof IngressRoute
   LoginRoute: typeof LoginRoute
   ObservabilityRoute: typeof ObservabilityRoute
+  RegistriesRoute: typeof RegistriesRoute
   SetupRoute: typeof SetupRoute
   DeploymentsDeploymentIdRoute: typeof DeploymentsDeploymentIdRoute
   JobsJobIdRoute: typeof JobsJobIdRoute
   ProjectsProjectIdRoute: typeof ProjectsProjectIdRoute
   ServicesServiceIdRoute: typeof ServicesServiceIdRoute
-  SettingsCredentialsRoute: typeof SettingsCredentialsRoute
+  SettingsOciCacheRoute: typeof SettingsOciCacheRoute
   SettingsSessionsRoute: typeof SettingsSessionsRoute
   SettingsTokensRoute: typeof SettingsTokensRoute
   SettingsUsersRoute: typeof SettingsUsersRoute
@@ -245,6 +258,13 @@ declare module '@tanstack/react-router' {
       path: '/setup'
       fullPath: '/setup'
       preLoaderRoute: typeof SetupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/registries': {
+      id: '/registries'
+      path: '/registries'
+      fullPath: '/registries'
+      preLoaderRoute: typeof RegistriesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/observability': {
@@ -317,11 +337,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsSessionsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/settings/credentials': {
-      id: '/settings/credentials'
-      path: '/settings/credentials'
-      fullPath: '/settings/credentials'
-      preLoaderRoute: typeof SettingsCredentialsRouteImport
+    '/settings/oci-cache': {
+      id: '/settings/oci-cache'
+      path: '/settings/oci-cache'
+      fullPath: '/settings/oci-cache'
+      preLoaderRoute: typeof SettingsOciCacheRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/services/$serviceId': {
@@ -360,12 +380,13 @@ const rootRouteChildren: RootRouteChildren = {
   IngressRoute: IngressRoute,
   LoginRoute: LoginRoute,
   ObservabilityRoute: ObservabilityRoute,
+  RegistriesRoute: RegistriesRoute,
   SetupRoute: SetupRoute,
   DeploymentsDeploymentIdRoute: DeploymentsDeploymentIdRoute,
   JobsJobIdRoute: JobsJobIdRoute,
   ProjectsProjectIdRoute: ProjectsProjectIdRoute,
   ServicesServiceIdRoute: ServicesServiceIdRoute,
-  SettingsCredentialsRoute: SettingsCredentialsRoute,
+  SettingsOciCacheRoute: SettingsOciCacheRoute,
   SettingsSessionsRoute: SettingsSessionsRoute,
   SettingsTokensRoute: SettingsTokensRoute,
   SettingsUsersRoute: SettingsUsersRoute,

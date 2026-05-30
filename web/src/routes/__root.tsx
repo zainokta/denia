@@ -12,6 +12,8 @@ import { TanStackDevtools } from '@tanstack/react-devtools'
 import Footer from '../components/Footer'
 import Header from '../components/Header'
 import Sidebar from '../components/Sidebar'
+import { CommandPalette } from '../components/CommandPalette'
+import { ToastProvider } from '../components/Toast'
 
 import TanStackQueryDevtools from '../integrations/tanstack-query/devtools'
 
@@ -75,6 +77,13 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
     ],
     links: [
       {
+        rel: 'preload',
+        href: '/fonts/jetbrains-mono-var.woff2',
+        as: 'font',
+        type: 'font/woff2',
+        crossOrigin: 'anonymous',
+      },
+      {
         rel: 'stylesheet',
         href: appCss,
       },
@@ -100,6 +109,7 @@ function Chrome({ children }: { children: React.ReactNode }) {
           <Footer />
         </div>
       </div>
+      <CommandPalette />
     </div>
   )
 }
@@ -147,9 +157,11 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <a href="#main" className="skip-link">
           Skip to content
         </a>
-        <Chrome>
-          <BootstrapGate>{children}</BootstrapGate>
-        </Chrome>
+        <ToastProvider>
+          <Chrome>
+            <BootstrapGate>{children}</BootstrapGate>
+          </Chrome>
+        </ToastProvider>
         <TanStackDevtools
           config={{
             position: 'bottom-right',

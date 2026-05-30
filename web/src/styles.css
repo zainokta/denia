@@ -6,43 +6,86 @@
   Mono-forward, dark-primary, flat-by-default. Pink/Violet are signal, never decoration.
   Theme is driven by `html.dark` / `html.light` (set by ThemeToggle + inline init script).
   Default (no class) = dark, because dark is primary.
+
+  Webfonts are self-hosted (web/public/fonts, served same-origin by the Rust binary).
+  Mono = JetBrains Mono Variable (the UI voice); sans = IBM Plex Sans Variable (prose only).
+  Both variable, one file each, font-display: swap so text paints immediately.
 */
 
+@font-face {
+  font-family: "JetBrains Mono Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url("/fonts/jetbrains-mono-var.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "IBM Plex Sans Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 700;
+  src: url("/fonts/ibm-plex-sans-var.woff2") format("woff2");
+}
+
 @theme {
-  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo,
-    Consolas, monospace;
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono",
+    "Cascadia Code", Menlo, Consolas, monospace;
+  --font-sans: "IBM Plex Sans Variable", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
 }
 
 :root,
 html.dark {
-  /* Black-hole base, tinted toward violet */
+  /* Black-hole base, tinted toward violet. Tonal ramp: bg < surface < 2 < 3. */
   --bg: oklch(16% 0.012 315);
   --surface: oklch(21% 0.012 315);
   --surface-2: oklch(25% 0.013 315);
+  --surface-3: oklch(29% 0.013 315); /* nested rows / inset wells */
   --border: oklch(31% 0.012 315);
+  --border-strong: oklch(42% 0.014 315); /* emphasis hairline */
   --fg: oklch(92% 0.008 315);
   --fg-muted: oklch(70% 0.012 315);
+  --fg-faint: oklch(56% 0.012 315); /* tertiary: axis ticks, timestamps */
   /* Signal accents */
   --pink: oklch(74% 0.15 350); /* Stagecraft: steady / primary action */
   --violet: oklch(64% 0.15 305); /* Breakdown: fault / attention */
   --warn: oklch(80% 0.13 75);
   --ok: oklch(74% 0.13 150);
   color-scheme: dark;
+
+  /* Type scale: >=1.25 step contrast, mono-forward. Display clamps for hero rows. */
+  --text-label: 0.6875rem; /* 11px: kickers, column heads, chips */
+  --text-body: 0.875rem; /* 14px: table cells, helper text */
+  --text-ui: 0.9375rem; /* 15px: default body voice */
+  --text-title: 1.125rem; /* 18px: panel / section headers */
+  --text-display: clamp(1.6rem, 1.15rem + 1.7vw, 2.15rem); /* page titles */
+
+  /* Overlay shadow: allowed only on transient floats (Flat-By-Default Rule). */
+  --shadow-overlay: 0 10px 30px -14px oklch(0% 0 0 / 0.6);
+
+  /* Content-width scale. */
+  --w-narrow: 640px;
+  --w-base: 1080px;
+  --w-wide: 1320px;
 }
 
 html.light {
   --bg: oklch(97% 0.006 315);
   --surface: oklch(99.5% 0.004 315);
   --surface-2: oklch(94% 0.007 315);
+  --surface-3: oklch(90% 0.008 315);
   --border: oklch(86% 0.009 315);
+  --border-strong: oklch(72% 0.012 315);
   --fg: oklch(25% 0.013 315);
   --fg-muted: oklch(46% 0.014 315);
+  --fg-faint: oklch(58% 0.014 315);
   --pink: oklch(53% 0.17 350);
   --violet: oklch(48% 0.17 305);
   --warn: oklch(58% 0.14 75);
   --ok: oklch(50% 0.14 150);
   color-scheme: light;
+  --shadow-overlay: 0 10px 30px -16px oklch(0% 0 0 / 0.22);
 }
 
 * {
@@ -965,5 +1008,599 @@ a,
   *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+  }
+}
+
+/* ==========================================================================
+   Evolved layer: type helpers, layout rhythm, badges, data tables, charts,
+   log stream, states, toasts, command palette. All on the existing tokens;
+   color stays signal-only, surfaces stay flat at rest.
+   ========================================================================== */
+
+/* --- Type helpers --------------------------------------------------------- */
+.t-display {
+  font-family: var(--font-mono);
+  font-size: var(--text-display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.08;
+}
+.t-title {
+  font-family: var(--font-mono);
+  font-size: var(--text-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+.text-faint {
+  color: var(--fg-faint);
+}
+
+/* --- Content widths + rhythm --------------------------------------------- */
+.page-narrow {
+  width: min(var(--w-narrow), calc(100% - 2rem));
+  margin-inline: auto;
+}
+.page-wide {
+  width: min(var(--w-wide), calc(100% - 2rem));
+  margin-inline: auto;
+}
+/* Vertical rhythm tiers; varies spacing so pages aren't monotone. */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+.stack-lg {
+  display: flex;
+  flex-direction: column;
+  gap: 2.5rem;
+}
+.cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+.panel-pad {
+  padding: 1rem 1.1rem;
+}
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+/* --- Status badge (consolidates signal + label) --------------------------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.badge .signal {
+  width: 0.45rem;
+  height: 0.45rem;
+}
+/* State tints stay muted: the dot carries signal, the chip stays quiet. */
+.badge-steady {
+  border-color: color-mix(in oklab, var(--pink) 45%, var(--border));
+  color: color-mix(in oklab, var(--pink) 70%, var(--fg));
+}
+.badge-fault {
+  border-color: color-mix(in oklab, var(--violet) 45%, var(--border));
+  color: color-mix(in oklab, var(--violet) 72%, var(--fg));
+}
+.badge-ok {
+  border-color: color-mix(in oklab, var(--ok) 40%, var(--border));
+  color: color-mix(in oklab, var(--ok) 70%, var(--fg));
+}
+.badge-warn {
+  border-color: color-mix(in oklab, var(--warn) 45%, var(--border));
+  color: color-mix(in oklab, var(--warn) 72%, var(--fg));
+}
+
+/* --- Data table ----------------------------------------------------------- */
+.dtable {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: var(--text-body);
+}
+.dtable thead th {
+  text-align: left;
+  font-size: var(--text-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.dtable tbody td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.dtable tbody tr:last-child td {
+  border-bottom: 0;
+}
+.dtable tbody tr {
+  transition: background-color 150ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.dtable tbody tr:hover {
+  background: var(--surface-2);
+}
+.dtable td.num,
+.dtable th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* Sortable header button: keeps native semantics + aria-sort on the th. */
+.dtable th .sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: 0;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+.dtable th[aria-sort="ascending"] .sort,
+.dtable th[aria-sort="descending"] .sort {
+  color: var(--fg);
+}
+
+/* --- Meter bar (inline usage) -------------------------------------------- */
+.meter {
+  position: relative;
+  height: 0.4rem;
+  border-radius: 9999px;
+  background: var(--surface-3);
+  overflow: hidden;
+  min-width: 4rem;
+}
+.meter-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--pink) 60%, var(--surface));
+}
+.meter-fill.is-warn {
+  background: color-mix(in oklab, var(--warn) 60%, var(--surface));
+}
+.meter-fill.is-fault {
+  background: color-mix(in oklab, var(--violet) 60%, var(--surface));
+}
+
+/* --- Empty state ---------------------------------------------------------- */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.7rem;
+  text-align: center;
+  padding: 2.5rem 1rem;
+  color: var(--fg-muted);
+}
+.empty-icon {
+  color: var(--fg-faint);
+}
+.empty-title {
+  font-family: var(--font-mono);
+  font-size: var(--text-ui);
+  color: var(--fg);
+}
+.empty-hint {
+  font-size: var(--text-body);
+  max-width: 42ch;
+  line-height: 1.55;
+}
+
+/* --- Skeleton (shimmer) --------------------------------------------------- */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, var(--fg) 7%, transparent),
+    transparent
+  );
+  animation: skeleton-shimmer 1.25s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* --- Live-data flash (row updated this tick) ----------------------------- */
+.flash-update {
+  animation: flash-update 700ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes flash-update {
+  0% {
+    background: color-mix(in oklab, var(--pink) 16%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+/* --- Inline spinner (button-busy) ----------------------------------------- */
+.spin {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  border: 1.5px solid color-mix(in oklab, var(--fg) 30%, transparent);
+  border-top-color: var(--fg);
+  border-radius: 9999px;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+/* --- Toasts (aria-live, never steals focus) ------------------------------ */
+.toast-host {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-width: min(24rem, calc(100vw - 2rem));
+}
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.65rem 0.8rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-body);
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-overlay);
+  animation: toast-in 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.toast.is-error {
+  border-color: color-mix(in oklab, var(--violet) 55%, var(--border));
+}
+.toast.is-ok {
+  border-color: color-mix(in oklab, var(--ok) 50%, var(--border));
+}
+.toast-close {
+  margin-left: auto;
+  background: 0;
+  border: 0;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+}
+.toast-close:hover {
+  color: var(--fg);
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* --- Confirm popover (destructive actions; not modal-first) -------------- */
+.confirm-pop {
+  position: absolute;
+  z-index: 70;
+  width: max-content;
+  max-width: 18rem;
+  padding: 0.75rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-overlay);
+}
+
+/* --- Log stream ----------------------------------------------------------- */
+.logstream {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.logstream-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.logstream-status {
+  margin-left: auto;
+}
+.logstream-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.5rem 0.6rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-body);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: var(--logstream-h, 26rem);
+  min-height: 8rem;
+}
+.logstream-line {
+  display: block;
+}
+.logstream-line .ln {
+  color: var(--fg-faint);
+  user-select: none;
+  display: inline-block;
+  min-width: 3.5ch;
+  margin-right: 1ch;
+  text-align: right;
+}
+
+/* --- Charts (hand-rolled SVG) -------------------------------------------- */
+.chart {
+  display: block;
+  width: 100%;
+  overflow: visible;
+}
+.chart-grid-line {
+  stroke: var(--border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  opacity: 0.6;
+}
+.chart-axis {
+  fill: var(--fg-faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+.chart-area {
+  stroke: none;
+}
+.chart-line {
+  fill: none;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.chart-cursor {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.chart-dot {
+  fill: var(--bg);
+  stroke-width: 1.5;
+}
+.spark {
+  display: inline-block;
+  vertical-align: middle;
+}
+.gauge-track {
+  fill: none;
+  stroke: var(--surface-3);
+}
+.gauge-fill {
+  fill: none;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 400ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* --- Command palette ------------------------------------------------------ */
+.cmdk-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  background: color-mix(in oklab, var(--bg) 55%, transparent);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+}
+.cmdk {
+  width: min(34rem, calc(100% - 2rem));
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-overlay);
+  overflow: hidden;
+}
+.cmdk-input {
+  width: 100%;
+  padding: 0.8rem 0.9rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-ui);
+  color: var(--fg);
+  background: var(--surface);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  outline: none;
+}
+.cmdk-list {
+  max-height: 22rem;
+  overflow-y: auto;
+  padding: 0.35rem;
+}
+.cmdk-group-label {
+  padding: 0.5rem 0.6rem 0.25rem;
+}
+.cmdk-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: var(--text-body);
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.cmdk-item .meta {
+  margin-left: auto;
+  color: var(--fg-faint);
+  font-size: var(--text-label);
+}
+.cmdk-item.is-active,
+.cmdk-item:hover {
+  background: color-mix(in oklab, var(--pink) 12%, var(--surface));
+  color: var(--fg);
+}
+.cmdk-empty {
+  padding: 1.25rem 0.6rem;
+  text-align: center;
+  color: var(--fg-muted);
+  font-size: var(--text-body);
+}
+
+/* --- Tabs (shared) -------------------------------------------------------- */
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  position: relative;
+  padding: 0.5rem 0.8rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-body);
+  font-weight: 600;
+  color: var(--fg-muted);
+  background: 0;
+  border: 0;
+  cursor: pointer;
+}
+.tab::after {
+  content: "";
+  position: absolute;
+  left: 0.4rem;
+  right: 0.4rem;
+  bottom: -1px;
+  height: 2px;
+  background: var(--pink);
+  transform: scaleX(0);
+  transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.tab:hover {
+  color: var(--fg);
+}
+.tab.is-active {
+  color: var(--fg);
+}
+.tab.is-active::after {
+  transform: scaleX(1);
+}
+
+/* --- Key/value editor row (env, shared_env) ------------------------------ */
+.kv-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+/* --- Modal dialog (focused task behind an explicit action) --------------- */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 160;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 8vh 1rem 1rem;
+  overflow-y: auto;
+  background: color-mix(in oklab, var(--bg) 58%, transparent);
+  animation: modal-fade 160ms ease-out;
+}
+.modal {
+  width: min(40rem, 100%);
+  max-height: calc(100dvh - 12vh);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-overlay);
+  animation: modal-rise 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1.1rem;
+  border-bottom: 1px solid var(--border);
+}
+.modal-body {
+  padding: 1.1rem;
+  overflow-y: auto;
+}
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  padding: 0.85rem 1.1rem;
+  border-top: 1px solid var(--border);
+}
+@keyframes modal-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes modal-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
   }
 }

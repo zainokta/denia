@@ -295,6 +295,8 @@ const mockApi = (success = true) =>
     updateRegistry: ((_pid: string, _rid: string, _input: never) =>
       emptyApi()) as never,
     deleteRegistry: ((_pid: string, _rid: string) => Effect.void) as never,
+    getOciCache: emptyApi() as never,
+    runOciCacheGc: emptyApi() as never,
   })
 
 const FIXTURE_JOB = {
@@ -445,6 +447,8 @@ describe('ApiClient jobs', () => {
     updateRegistry: ((_pid: string, _rid: string, _input: never) =>
       emptyApi()) as never,
     deleteRegistry: ((_pid: string, _rid: string) => Effect.void) as never,
+    getOciCache: emptyApi() as never,
+    runOciCacheGc: emptyApi() as never,
   })
 
   it.effect('jobs methods exist on ApiClient', () =>
@@ -768,6 +772,8 @@ const mockIngressApi = () =>
     updateRegistry: ((_pid: string, _rid: string, _input: never) =>
       emptyApi()) as never,
     deleteRegistry: ((_pid: string, _rid: string) => Effect.void) as never,
+    getOciCache: emptyApi() as never,
+    runOciCacheGc: emptyApi() as never,
   })
 
 describe('Ingress ApiClient methods', () => {
@@ -912,6 +918,8 @@ describe('putService', () => {
           updateRegistry: ((_pid: string, _rid: string, _input: never) =>
             emptyApi()) as never,
           deleteRegistry: ((_pid: string, _rid: string) => Effect.void) as never,
+          getOciCache: emptyApi() as never,
+          runOciCacheGc: emptyApi() as never,
         }),
       ),
     ),

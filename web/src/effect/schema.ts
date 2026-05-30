@@ -362,3 +362,30 @@ export class RegistryInput extends Schema.Class<RegistryInput>('RegistryInput')(
   password: Schema.optional(Schema.String),
   token: Schema.optional(Schema.String),
 }) {}
+
+// OCI layer cache (ADR-022). Mirrors src/api/oci.rs::CacheStatusView. `last_gc_at`
+// is a chrono DateTime<Utc> serialized as an RFC3339 string.
+export class OciCacheStatus extends Schema.Class<OciCacheStatus>('OciCacheStatus')({
+  entries: Schema.Number,
+  total_bytes: Schema.Number,
+  oldest_entry_age_secs: Schema.NullOr(Schema.Number),
+  last_gc_at: Schema.NullOr(Schema.String),
+  last_gc_deleted_bytes: Schema.Number,
+  last_gc_deleted_entries: Schema.Number,
+}) {}
+
+// POST /v1/oci/cache/gc — CacheStatusView fields are #[serde(flatten)]ed in, so
+// the GC run shape is the status fields plus the sweep report counters.
+export class OciCacheGcRun extends Schema.Class<OciCacheGcRun>('OciCacheGcRun')({
+  entries: Schema.Number,
+  total_bytes: Schema.Number,
+  oldest_entry_age_secs: Schema.NullOr(Schema.Number),
+  last_gc_at: Schema.NullOr(Schema.String),
+  last_gc_deleted_bytes: Schema.Number,
+  last_gc_deleted_entries: Schema.Number,
+  deleted_entries: Schema.Number,
+  deleted_bytes: Schema.Number,
+  scanned_entries: Schema.Number,
+  kept_in_use_entries: Schema.Number,
+  kept_recent_entries: Schema.Number,
+}) {}

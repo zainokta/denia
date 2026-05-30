@@ -6,17 +6,37 @@ import {
 } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import { Boxes, Globe, KeyRound } from 'lucide-react'
 import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
-import { StatusSignal } from '#/components/StatusSignal'
-import { DeployPhase } from '#/components/DeployPhase'
+import { StatusBadge } from '#/components/StatusBadge'
 import { TlsToggle } from '#/components/TlsToggle'
 import { ServiceForm } from '#/components/ServiceForm'
 import { Tabs } from '#/components/Tabs'
+import { AreaChart } from '#/components/Charts'
+import { EmptyState } from '#/components/EmptyState'
+import { SkeletonRows } from '#/components/Skeleton'
+import { ErrorPanel, InlineError, errorMessage } from '#/components/ErrorPanel'
+import { useActionToasts } from '#/components/Toast'
+import { Num } from '#/components/Num'
 import { useAuth, can } from '#/hooks/useAuth'
 import { useServiceLogs } from '#/hooks/useServiceLogs'
-import type { Deployment, Service, ServiceInput } from '#/effect/schema'
+import {
+  formatBytes,
+  formatClock,
+  formatDuration,
+  formatMillis,
+  formatPercent,
+  formatRelative,
+  shortId,
+} from '#/lib/format'
+import type {
+  Deployment,
+  MetricSnapshot,
+  Service,
+  ServiceInput,
+} from '#/effect/schema'
 
 const getService = (id: string) =>
   Effect.gen(function* () {
@@ -105,12 +125,19 @@ export const Route = createFileRoute('/services/$serviceId')({
   component: ServiceDetail,
 })
 
+function statusFor(status: number): string {
+  if (status >= 500) return 'Failed'
+  if (status >= 400) return 'Pending'
+  return 'Healthy'
+}
+
 export function ServiceDetail() {
   const params = useParams({ from: '/services/$serviceId' })
   const id = params.serviceId
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const { isSuperAdmin, roleForActiveProject } = useAuth()
+  const toast = useActionToasts()
   const [activeTab, setActiveTab] = useState('overview')
   const [editing, setEditing] = useState(false)
   const [editError, setEditError] = useState('')
@@ -120,7 +147,12 @@ export function ServiceDetail() {
   const [domainDeleteConfirm, setDomainDeleteConfirm] = useState<string | null>(null)
   const [domainDeleteError, setDomainDeleteError] = useState('')
 
-  const { data: service } = useQuery({
+  const {
+    data: service,
+    isLoading: serviceLoading,
+    isError: serviceError,
+    error: serviceErr,
+  } = useQuery({
     queryKey: ['services', id],
     queryFn: () => runQuery(getService(id)),
   })
@@ -143,7 +175,7 @@ export function ServiceDetail() {
 
   const {
     data: deployments = [],
-    isFetching: deploymentsFetching,
+    isLoading: deploymentsLoading,
   } = useQuery({
     queryKey: ['services', id, 'deployments'],
     queryFn: () => runQuery(getDeployments(id)),
@@ -161,14 +193,14 @@ export function ServiceDetail() {
     activeTab === 'logs',
   )
 
-  const { data: metrics = [] } = useQuery({
+  const { data: metrics = [], isLoading: metricsLoading } = useQuery({
     queryKey: ['services', id, 'metrics'],
     queryFn: () => runQuery(getMetrics(id)),
-    refetchInterval: 3000,
+    refetchInterval: 5000,
     refetchIntervalInBackground: false,
   })
 
-  const { data: requests = [] } = useQuery({
+  const { data: requests = [], isLoading: requestsLoading } = useQuery({
     queryKey: ['services', id, 'requests'],
     queryFn: () => runQuery(getRequests(id)),
     refetchInterval: 5000,
@@ -205,7 +237,9 @@ export function ServiceDetail() {
       queryClient.invalidateQueries({
         queryKey: ['services', id, 'domains'],
       })
+      toast.ok('Domain added')
     },
+    onError: (err: unknown) => toast.err(errorMessage(err)),
   })
 
   const verifyMutation = useMutation({
@@ -214,7 +248,9 @@ export function ServiceDetail() {
       queryClient.invalidateQueries({
         queryKey: ['services', id, 'domains'],
       })
+      toast.ok('Verification triggered')
     },
+    onError: (err: unknown) => toast.err(errorMessage(err)),
   })
 
   const deleteDomainMutation = useMutation({
@@ -225,11 +261,13 @@ export function ServiceDetail() {
       queryClient.invalidateQueries({
         queryKey: ['services', id, 'domains'],
       })
+      toast.ok('Domain removed')
     },
     onError: (error: unknown) => {
-      const msg = error instanceof Error ? error.message : 'Failed to delete'
+      const msg = errorMessage(error)
       setDomainDeleteError(msg)
       setDomainDeleteConfirm(null)
+      toast.err(msg)
     },
   })
 
@@ -239,7 +277,9 @@ export function ServiceDetail() {
       queryClient.invalidateQueries({
         queryKey: ['services', id, 'deployments'],
       })
+      toast.ok('Deployment started')
     },
+    onError: (err: unknown) => toast.err(errorMessage(err)),
   })
 
   const stop = useMutation({
@@ -248,7 +288,9 @@ export function ServiceDetail() {
       queryClient.invalidateQueries({
         queryKey: ['services', id, 'deployments'],
       })
+      toast.ok('Service stopped')
     },
+    onError: (err: unknown) => toast.err(errorMessage(err)),
   })
 
   const update = useMutation({
@@ -258,10 +300,12 @@ export function ServiceDetail() {
       setEditError('')
       queryClient.invalidateQueries({ queryKey: ['services', id] })
       queryClient.invalidateQueries({ queryKey: ['services'] })
+      toast.ok('Service updated')
     },
     onError: (error: unknown) => {
-      const msg = error instanceof Error ? error.message : 'Update failed'
+      const msg = errorMessage(error)
       setEditError(msg)
+      toast.err(msg)
     },
   })
 
@@ -269,12 +313,14 @@ export function ServiceDetail() {
     mutationFn: () => runQuery(deleteService(id)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['services'] })
+      toast.ok('Service deleted')
       navigate({ to: '/services' })
     },
     onError: (error: unknown) => {
-      const msg = error instanceof Error ? error.message : 'Delete failed'
+      const msg = errorMessage(error)
       setDeleteError(msg)
       setDeleteConfirm(false)
+      toast.err(msg)
     },
   })
 
@@ -291,21 +337,21 @@ export function ServiceDetail() {
   ]
 
   return (
-    <main className="page-wrap px-4 pb-12 pt-12">
+    <main className="page-wrap px-4 pb-16 pt-10">
       <p className="kicker mb-3">
-        service{' '}
-        <Link to="/services" className="text-[var(--fg-muted)]">
-          &larr; back
+        <Link to="/services" className="text-[var(--fg-muted)] no-underline hover:underline">
+          &larr; services
         </Link>
       </p>
-      <div className="mb-6 flex flex-wrap items-center gap-3">
-        <h1 className="text-2xl font-semibold tracking-tight text-[var(--fg)]">
-          {service?.name ?? id}
-        </h1>
+      <header className="panel-head" style={{ marginBottom: '1.5rem' }}>
+        <div>
+          <p className="kicker">service</p>
+          <h1 className="t-display">{service?.name ?? id}</h1>
+        </div>
         {canOperate ? (
-          <>
+          <div className="cluster">
             <button
-              className="btn btn-primary text-xs"
+              className="btn btn-primary"
               type="button"
               onClick={() => service && deploy.mutate(service)}
               disabled={deploy.isPending || !service}
@@ -313,7 +359,7 @@ export function ServiceDetail() {
               {deploy.isPending ? 'deploying...' : 'deploy'}
             </button>
             <button
-              className="btn text-xs"
+              className="btn"
               type="button"
               onClick={() => stop.mutate()}
               disabled={stop.isPending}
@@ -321,11 +367,11 @@ export function ServiceDetail() {
               stop
             </button>
             {deleteConfirm ? (
-              <span className="inline-flex items-center gap-1 text-xs">
+              <span className="inline-flex items-center gap-1">
                 <span className="text-[var(--violet)]">delete?</span>
                 <button
                   type="button"
-                  className="btn text-xs"
+                  className="btn btn-danger"
                   aria-label="confirm delete service"
                   onClick={() => remove.mutate()}
                   disabled={remove.isPending}
@@ -334,7 +380,7 @@ export function ServiceDetail() {
                 </button>
                 <button
                   type="button"
-                  className="btn text-xs"
+                  className="btn"
                   aria-label="cancel delete service"
                   onClick={() => setDeleteConfirm(false)}
                 >
@@ -344,7 +390,7 @@ export function ServiceDetail() {
             ) : (
               <button
                 type="button"
-                className="btn text-xs"
+                className="btn"
                 onClick={() => {
                   setDeleteError('')
                   setDeleteConfirm(true)
@@ -353,15 +399,25 @@ export function ServiceDetail() {
                 delete
               </button>
             )}
-          </>
+            {service ? <TlsToggle service={service} /> : null}
+          </div>
+        ) : service ? (
+          <TlsToggle service={service} />
         ) : null}
-        {service ? <TlsToggle service={service} /> : null}
-      </div>
+      </header>
 
       {deleteError ? (
-        <div className="panel mb-4 p-3 text-xs text-[var(--fg)]">
-          <span className="signal signal-fault mr-2 inline-block align-middle" />
-          {deleteError}
+        <div style={{ marginBottom: '1rem' }}>
+          <InlineError message={deleteError} />
+        </div>
+      ) : null}
+
+      {serviceError && !service ? (
+        <div style={{ marginBottom: '1rem' }}>
+          <ErrorPanel
+            title="Could not load service"
+            message={errorMessage(serviceErr)}
+          />
         </div>
       ) : null}
 
@@ -369,83 +425,86 @@ export function ServiceDetail() {
         {(active) => {
           if (active === 'overview') {
             return (
-              <div className="panel overflow-hidden">
-                <ul className="m-0 list-none">
-                  <li className="flex items-center gap-3 px-4 py-2.5 text-sm border-b border-[var(--border)]">
-                    <span className="kicker w-32">name</span>
-                    <span className="text-[var(--fg)]">
-                      {service?.name ?? '—'}
-                    </span>
-                  </li>
-                  <li className="flex items-center gap-3 px-4 py-2.5 text-sm border-b border-[var(--border)]">
-                    <span className="kicker w-32">project</span>
-                    <span className="tnum text-[var(--fg)]">
-                      {service?.project_id ?? '—'}
-                    </span>
-                  </li>
-                  <li className="flex items-center gap-3 px-4 py-2.5 text-sm border-b border-[var(--border)]">
-                    <span className="kicker w-32">internal port</span>
-                    <span className="tnum text-[var(--fg)]">
-                      {service ? service.internal_port : '—'}
-                    </span>
-                  </li>
-                  <li className="flex items-center gap-3 px-4 py-2.5 text-sm border-b border-[var(--border)]">
-                    <span className="kicker w-32">tls</span>
-                    <span className="text-[var(--fg)]">
-                      {service?.tls_enabled ? 'enabled' : 'disabled'}
-                    </span>
-                  </li>
-                  <li className="flex items-center gap-3 px-4 py-2.5 text-sm border-b border-[var(--border)]">
-                    <span className="kicker w-32">autoscale</span>
-                    <span className="text-[var(--fg)]">
-                      {service?.autoscale
-                        ? [
-                            `${service.autoscale.min_replicas}–${service.autoscale.max_replicas} replicas`,
-                            `${service.autoscale.target_cpu_pct}% cpu`,
-                            ...(service.autoscale.target_mem_pct != null
-                              ? [`${service.autoscale.target_mem_pct}% mem`]
-                              : []),
-                            ...(service.autoscale.min_replicas === 0
-                              ? ['scale-to-zero']
-                              : []),
-                          ].join(' · ')
-                        : 'disabled'}
-                    </span>
-                  </li>
-                  <li className="flex items-center gap-3 px-4 py-2.5 text-sm">
-                    <span className="kicker w-32">status</span>
-                    {newestDeployment ? (
-                      <DeployPhase status={newestDeployment.status} />
-                    ) : (
-                      <span className="text-[var(--fg-muted)]">
-                        no deployments yet
-                      </span>
-                    )}
-                  </li>
-                </ul>
+              <div className="stack-lg">
+                <div className="panel panel-pad">
+                  <dl className="flex flex-col gap-3" style={{ margin: 0 }}>
+                    <KvRow label="name" value={service?.name ?? '—'} />
+                    <KvRow
+                      label="project"
+                      value={
+                        service ? (
+                          <Num title={service.project_id}>
+                            {shortId(service.project_id)}
+                          </Num>
+                        ) : (
+                          '—'
+                        )
+                      }
+                    />
+                    <KvRow
+                      label="internal port"
+                      value={service ? <Num>{service.internal_port}</Num> : '—'}
+                    />
+                    <KvRow
+                      label="tls"
+                      value={service?.tls_enabled ? 'enabled' : 'disabled'}
+                    />
+                    <KvRow
+                      label="autoscale"
+                      value={
+                        service?.autoscale
+                          ? [
+                              `${service.autoscale.min_replicas}–${service.autoscale.max_replicas} replicas`,
+                              `${service.autoscale.target_cpu_pct}% cpu`,
+                              ...(service.autoscale.target_mem_pct != null
+                                ? [`${service.autoscale.target_mem_pct}% mem`]
+                                : []),
+                              ...(service.autoscale.min_replicas === 0
+                                ? ['scale-to-zero']
+                                : []),
+                            ].join(' · ')
+                          : 'disabled'
+                      }
+                    />
+                    <KvRow
+                      label="status"
+                      value={
+                        newestDeployment ? (
+                          <StatusBadge status={newestDeployment.status} />
+                        ) : (
+                          <span className="text-faint">no deployments yet</span>
+                        )
+                      }
+                    />
+                  </dl>
+                </div>
+
+                <AutoscalePanel autoscale={service?.autoscale ?? null} />
               </div>
             )
           }
 
           if (active === 'source') {
             return (
-              <div>
-                {service ? (
+              <div className="stack">
+                {serviceLoading && !service ? (
+                  <SkeletonRows rows={4} />
+                ) : service ? (
                   <SourceSummary
                     source={service.source}
                     registries={registries}
                   />
                 ) : (
-                  <p className="text-sm text-[var(--fg-muted)]">Loading…</p>
+                  <EmptyState title="Source unavailable" hint="The service could not be loaded." />
                 )}
                 {canOperate && service ? (
-                  <div className="mt-4">
+                  <div>
                     {editing ? (
                       <>
-                        <div className="mb-3 flex items-center gap-3">
+                        <div className="cluster" style={{ marginBottom: '0.75rem' }}>
                           <button
                             type="button"
-                            className="btn text-xs"
+                            className="btn"
                             onClick={() => {
                               setEditing(false)
                               setEditError('')
@@ -454,7 +513,7 @@ export function ServiceDetail() {
                             cancel
                           </button>
                         </div>
-                        <div className="panel p-4">
+                        <div className="panel panel-pad">
                           <ServiceForm
                             projects={projects.map((p) => ({
                               id: p.id,
@@ -477,7 +536,7 @@ export function ServiceDetail() {
                     ) : (
                       <button
                         type="button"
-                        className="btn btn-primary text-xs"
+                        className="btn btn-primary"
                         onClick={() => {
                           setEditError('')
                           setEditing(true)
@@ -513,74 +572,57 @@ export function ServiceDetail() {
 
           if (active === 'environment') {
             return service && service.env.length > 0 ? (
-              <div className="panel overflow-x-auto">
-                <table className="w-full text-left text-sm">
+              <div className="panel overflow-hidden">
+                <table className="dtable">
                   <thead>
-                    <tr className="border-b border-[var(--border)] text-xs text-[var(--fg-muted)]">
-                      <th className="px-4 py-2 font-semibold">key</th>
-                      <th className="px-4 py-2 font-semibold">value</th>
+                    <tr>
+                      <th>key</th>
+                      <th>value</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {service.env.map(([key, value], i) => (
-                      <tr
-                        key={key}
-                        className={
-                          i > 0 ? 'border-t border-[var(--border)]' : ''
-                        }
-                      >
-                        <td className="px-4 py-2 text-xs font-mono text-[var(--fg)]">
-                          {key}
-                        </td>
-                        <td className="px-4 py-2 text-xs font-mono text-[var(--fg)] break-all">
-                          {value}
-                        </td>
+                    {service.env.map(([key, value]) => (
+                      <tr key={key}>
+                        <td className="font-mono">{key}</td>
+                        <td className="font-mono break-all">{value}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
             ) : (
-              <p className="text-sm text-[var(--fg-muted)]">
-                No environment variables.
-              </p>
+              <div className="panel">
+                <EmptyState
+                  icon={<KeyRound size={22} />}
+                  title="No environment variables"
+                  hint="Variables set on this service appear here. Edit the service to add some."
+                />
+              </div>
             )
           }
 
           if (active === 'deployments') {
             return (
-              <div>
-                <p className="kicker mb-2">
+              <div className="stack">
+                <p className="kicker">
                   deployments{' '}
-                  {deploymentsFetching ? (
-                    <span className="text-[var(--fg-muted)]">fetching…</span>
-                  ) : (
-                    <span className="text-[var(--fg-muted)]">
-                      {deployments.length}
-                    </span>
-                  )}
+                  <span className="text-faint tnum">{deployments.length}</span>
                 </p>
 
-                {newestDeployment ? (
-                  <div className="mb-4">
-                    <DeployPhase status={newestDeployment.status} />
-                  </div>
-                ) : null}
-
                 {newestDeployment && newestDeployment.artifact ? (
-                  <p className="mb-3 flex flex-wrap items-center gap-2 text-xs">
-                    <span className="text-[var(--fg-muted)]">artifact:</span>
-                    <code className="tnum text-[var(--fg)]">
+                  <p className="cluster" style={{ fontSize: 'var(--text-label)' }}>
+                    <span className="text-faint">artifact</span>
+                    <code className="tnum">
                       {newestDeployment.artifact.digest.slice(0, 12)}
                     </code>
-                    <span className="text-[var(--fg-muted)]">
+                    <span className="text-faint">
                       {newestDeployment.artifact.kind === 'OciImage'
                         ? 'image'
                         : 'bundle'}
                     </span>
                   </p>
                 ) : newestDeployment ? (
-                  <p className="mb-3 text-xs text-[var(--fg-muted)]">
+                  <p className="text-faint" style={{ fontSize: 'var(--text-label)' }}>
                     artifact:{' '}
                     {newestDeployment.status === 'Failed' ||
                     newestDeployment.status === 'Stopped'
@@ -589,33 +631,48 @@ export function ServiceDetail() {
                   </p>
                 ) : null}
 
-                {newestFirst.length === 0 ? (
-                  <p className="text-sm text-[var(--fg-muted)]">
-                    No deployments yet.
-                  </p>
+                {deploymentsLoading && newestFirst.length === 0 ? (
+                  <SkeletonRows rows={3} />
+                ) : newestFirst.length === 0 ? (
+                  <div className="panel">
+                    <EmptyState
+                      icon={<Boxes size={22} />}
+                      title="No deployments yet"
+                      hint="Deploy this service to see build and runtime history here."
+                    />
+                  </div>
                 ) : (
                   <div className="panel overflow-hidden">
-                    <ul className="m-0 list-none">
-                      {newestFirst.map((d, i) => (
-                        <li
-                          key={d.id}
-                          className={
-                            i > 0 ? 'border-t border-[var(--border)]' : ''
-                          }
-                        >
-                          <Link
-                            to="/deployments/$deploymentId"
-                            params={{ deploymentId: d.id }}
-                            className="flex items-center gap-4 px-4 py-3 text-sm hover:bg-[var(--bg-elev)]"
-                          >
-                            <StatusSignal status={d.status} />
-                            <span className="tnum text-xs text-[var(--fg-muted)]">
-                              {d.created_at}
-                            </span>
-                          </Link>
-                        </li>
-                      ))}
-                    </ul>
+                    <table className="dtable">
+                      <thead>
+                        <tr>
+                          <th>status</th>
+                          <th>id</th>
+                          <th>created</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {newestFirst.map((d) => (
+                          <tr key={d.id}>
+                            <td>
+                              <Link
+                                to="/deployments/$deploymentId"
+                                params={{ deploymentId: d.id }}
+                                className="no-underline"
+                              >
+                                <StatusBadge status={d.status} />
+                              </Link>
+                            </td>
+                            <td>
+                              <Num className="text-faint">{shortId(d.id)}</Num>
+                            </td>
+                            <td className="text-faint">
+                              <Num>{formatRelative(d.created_at, Date.now())}</Num>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 )}
               </div>
@@ -624,27 +681,31 @@ export function ServiceDetail() {
 
           if (active === 'logs') {
             return (
-              <>
-                <div className="mb-2 flex items-center gap-2 text-xs">
+              <div className="stack">
+                <div className="cluster" style={{ fontSize: 'var(--text-label)' }}>
                   {logsError ? (
-                    <span className="text-[var(--violet)]">
-                      <span className="signal signal-fault mr-2 inline-block align-middle" />
-                      {logsError}
-                    </span>
+                    <InlineError message={logsError} />
                   ) : (
                     <>
-                      <span className="signal signal-steady" />
+                      <span className="signal signal-steady" aria-hidden="true" />
                       <span className="kicker">live</span>
-                      <span className="tnum text-[var(--fg-muted)]">
+                      <span className="text-faint tnum">
                         {logs.length} line{logs.length === 1 ? '' : 's'}
                       </span>
                     </>
                   )}
                 </div>
                 {logs.length === 0 ? (
-                  <p className="text-sm text-[var(--fg-muted)]">
-                    {logsError ? 'Stream unavailable.' : 'Waiting for logs...'}
-                  </p>
+                  <div className="panel">
+                    <EmptyState
+                      title={logsError ? 'Stream unavailable' : 'Waiting for logs'}
+                      hint={
+                        logsError
+                          ? 'The log stream could not be reached.'
+                          : 'Lines appear here as the workload produces them.'
+                      }
+                    />
+                  </div>
                 ) : (
                   <div className="panel overflow-hidden">
                     <ul className="m-0 list-none">
@@ -655,7 +716,7 @@ export function ServiceDetail() {
                             i > 0 ? 'border-t border-[var(--border)]' : ''
                           }`}
                         >
-                          <span className="tnum flex-shrink-0 text-[var(--fg-muted)]">
+                          <span className="tnum flex-shrink-0 text-[var(--fg-faint)]">
                             {String(i + 1).padStart(3, '0')}
                           </span>
                           <code className="flex-1 whitespace-pre-wrap break-all font-mono text-[var(--fg)]">
@@ -666,113 +727,258 @@ export function ServiceDetail() {
                     </ul>
                   </div>
                 )}
-              </>
+              </div>
             )
           }
 
           // metrics
           return (
-            <div>
-              <p className="kicker mb-2">recent requests</p>
-              {requests.length === 0 ? (
-                <p className="mb-8 text-sm text-[var(--fg-muted)]">
-                  No recent requests.
-                </p>
-              ) : (
-                <div className="panel mb-8 overflow-x-auto">
-                  <table className="w-full text-left text-sm">
-                    <thead>
-                      <tr className="border-b border-[var(--border)] text-xs text-[var(--fg-muted)]">
-                        <th className="px-4 py-2 font-semibold">time</th>
-                        <th className="px-4 py-2 font-semibold">method</th>
-                        <th className="px-4 py-2 font-semibold">path</th>
-                        <th className="px-4 py-2 font-semibold tnum">status</th>
-                        <th className="px-4 py-2 font-semibold tnum">bytes</th>
-                        <th className="px-4 py-2 font-semibold tnum">
-                          duration
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {requests.map((entry, i) => (
-                        <tr
-                          key={`${entry.recorded_at}-${i}`}
-                          className={
-                            i > 0 ? 'border-t border-[var(--border)]' : ''
-                          }
-                        >
-                          <td className="px-4 py-2 text-xs text-[var(--fg-muted)] tnum">
-                            {entry.recorded_at}
-                          </td>
-                          <td className="px-4 py-2 text-xs text-[var(--fg)]">
-                            {entry.method}
-                          </td>
-                          <td className="px-4 py-2 text-xs text-[var(--fg)] break-all">
-                            {entry.path}
-                          </td>
-                          <td className="px-4 py-2 tnum text-xs text-[var(--fg)]">
-                            {entry.status}
-                          </td>
-                          <td className="px-4 py-2 tnum text-xs text-[var(--fg-muted)]">
-                            {entry.bytes === null
-                              ? '—'
-                              : formatBytes(entry.bytes)}
-                          </td>
-                          <td className="px-4 py-2 tnum text-xs text-[var(--fg-muted)]">
-                            {entry.duration_ms === null
-                              ? '—'
-                              : `${entry.duration_ms}ms`}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+            <div className="stack-lg">
+              <MetricsCharts metrics={metrics} loading={metricsLoading} />
 
-              <p className="kicker mb-2">metrics</p>
-              {metrics.length === 0 ? (
-                <p className="text-sm text-[var(--fg-muted)]">
-                  No metrics available.
-                </p>
-              ) : (
-                <div className="panel overflow-x-auto">
-                  <table className="w-full text-left text-sm">
-                    <thead>
-                      <tr className="border-b border-[var(--border)] text-xs text-[var(--fg-muted)]">
-                        <th className="px-4 py-2 font-semibold">timestamp</th>
-                        <th className="px-4 py-2 font-semibold tnum">cpu %</th>
-                        <th className="px-4 py-2 font-semibold tnum">memory</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {metrics.map((m, i) => (
-                        <tr
-                          key={`${m.recorded_at}-${i}`}
-                          className={
-                            i > 0 ? 'border-t border-[var(--border)]' : ''
-                          }
-                        >
-                          <td className="px-4 py-2 text-xs text-[var(--fg-muted)]">
-                            {m.recorded_at}
-                          </td>
-                          <td className="px-4 py-2 tnum text-xs text-[var(--fg)]">
-                            {(m.cpu_percent * 100).toFixed(1)}%
-                          </td>
-                          <td className="px-4 py-2 tnum text-xs text-[var(--fg)]">
-                            {formatBytes(m.memory_bytes)}
-                          </td>
+              <section className="stack">
+                <p className="kicker">access log</p>
+                {requestsLoading && requests.length === 0 ? (
+                  <SkeletonRows rows={4} />
+                ) : requests.length === 0 ? (
+                  <div className="panel">
+                    <EmptyState
+                      icon={<Globe size={22} />}
+                      title="No recent requests"
+                      hint="Inbound requests proxied to this service appear here."
+                    />
+                  </div>
+                ) : (
+                  <div className="panel overflow-hidden">
+                    <table className="dtable">
+                      <thead>
+                        <tr>
+                          <th>method</th>
+                          <th>path</th>
+                          <th>status</th>
+                          <th className="num">bytes</th>
+                          <th className="num">duration</th>
+                          <th className="num">time</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+                      </thead>
+                      <tbody>
+                        {requests.map((entry, i) => (
+                          <tr key={`${entry.recorded_at}-${i}`}>
+                            <td className="font-mono">{entry.method}</td>
+                            <td className="font-mono break-all">{entry.path}</td>
+                            <td>
+                              <StatusBadge
+                                status={statusFor(entry.status)}
+                                label={String(entry.status)}
+                              />
+                            </td>
+                            <td className="num text-faint">
+                              <Num>
+                                {entry.bytes === null ? '—' : formatBytes(entry.bytes)}
+                              </Num>
+                            </td>
+                            <td className="num text-faint">
+                              <Num>
+                                {entry.duration_ms === null
+                                  ? '—'
+                                  : formatMillis(entry.duration_ms)}
+                              </Num>
+                            </td>
+                            <td className="num text-faint">
+                              <Num>{formatRelative(entry.recorded_at, Date.now())}</Num>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
             </div>
           )
         }}
       </Tabs>
     </main>
+  )
+}
+
+// Definition row: a fixed-width kicker label beside a tabular value. Mirrors
+// the Dashboard `Detail` idiom (flat, no nested card, columns line up).
+function KvRow({
+  label,
+  value,
+}: {
+  label: string
+  value: React.ReactNode
+}) {
+  return (
+    <div className="flex items-baseline gap-4">
+      <dt className="kicker" style={{ minWidth: '11rem', flexShrink: 0 }}>
+        {label}
+      </dt>
+      <dd className="tnum" style={{ margin: 0 }}>
+        {value}
+      </dd>
+    </div>
+  )
+}
+
+function AutoscalePanel({
+  autoscale,
+}: {
+  autoscale: Service['autoscale'] | null | undefined
+}) {
+  if (!autoscale) {
+    return (
+      <div className="panel panel-pad">
+        <p className="kicker" style={{ marginBottom: '0.6rem' }}>
+          autoscaling
+        </p>
+        <p className="text-faint">Autoscaling disabled (single replica).</p>
+      </div>
+    )
+  }
+  return (
+    <div className="panel panel-pad">
+      <p className="kicker" style={{ marginBottom: '0.6rem' }}>
+        autoscaling
+      </p>
+      <dl className="flex flex-col gap-3" style={{ margin: 0 }}>
+        <KvRow
+          label="replicas"
+          value={
+            <Num>
+              {autoscale.min_replicas}–{autoscale.max_replicas}
+            </Num>
+          }
+        />
+        <KvRow
+          label="target cpu"
+          value={<Num>{formatPercent(autoscale.target_cpu_pct, 0)}</Num>}
+        />
+        <KvRow
+          label="target mem"
+          value={
+            autoscale.target_mem_pct != null ? (
+              <Num>{formatPercent(autoscale.target_mem_pct, 0)}</Num>
+            ) : (
+              <span className="text-faint">—</span>
+            )
+          }
+        />
+        <KvRow
+          label="scale-down cooldown"
+          value={<Num>{formatDuration(autoscale.scale_down_cooldown_s)}</Num>}
+        />
+        <KvRow
+          label="idle timeout"
+          value={<Num>{formatDuration(autoscale.idle_timeout_s)}</Num>}
+        />
+        {autoscale.min_replicas === 0 ? (
+          <KvRow
+            label="scale to zero"
+            value={<span className="badge badge-steady">enabled</span>}
+          />
+        ) : null}
+      </dl>
+    </div>
+  )
+}
+
+function MetricsCharts({
+  metrics,
+  loading,
+}: {
+  metrics: ReadonlyArray<MetricSnapshot>
+  loading: boolean
+}) {
+  if (loading && metrics.length === 0) {
+    return <SkeletonRows rows={4} />
+  }
+  if (metrics.length === 0) {
+    return (
+      <div className="panel">
+        <EmptyState
+          title="No metrics yet"
+          hint="CPU and memory samples appear here once the workload is running."
+        />
+      </div>
+    )
+  }
+
+  const xLabels = metrics.map((m) => formatClock(m.recorded_at))
+  // cpu_percent is a 0..1 fraction on the wire; render as whole percent.
+  const cpuValues = metrics.map((m) => m.cpu_percent * 100)
+  const memValues = metrics.map((m) => m.memory_bytes)
+  const latest = metrics[metrics.length - 1]
+
+  return (
+    <div className="stack-lg">
+      <section className="stack">
+        <div className="panel-head">
+          <p className="kicker">cpu</p>
+          <span className="t-title tnum">
+            {formatPercent(latest.cpu_percent * 100, 1)}
+          </span>
+        </div>
+        <div className="panel panel-pad">
+          <AreaChart
+            series={[
+              { label: 'cpu', color: 'var(--pink)', values: cpuValues },
+            ]}
+            xLabels={xLabels}
+            yFormat={(v) => formatPercent(v, 0)}
+          />
+        </div>
+      </section>
+
+      <section className="stack">
+        <div className="panel-head">
+          <p className="kicker">memory</p>
+          <span className="t-title tnum">{formatBytes(latest.memory_bytes)}</span>
+        </div>
+        <div className="panel panel-pad">
+          <AreaChart
+            series={[
+              { label: 'memory', color: 'var(--violet)', values: memValues },
+            ]}
+            xLabels={xLabels}
+            yFormat={(v) => formatBytes(v)}
+          />
+        </div>
+      </section>
+
+      {/* Tabular samples back the charts with exact figures. */}
+      <section className="stack">
+        <p className="kicker">samples</p>
+        <div className="panel overflow-hidden">
+          <table className="dtable">
+            <thead>
+              <tr>
+                <th>time</th>
+                <th className="num">cpu</th>
+                <th className="num">memory</th>
+              </tr>
+            </thead>
+            <tbody>
+              {metrics.map((m, i) => (
+                <tr key={`${m.recorded_at}-${i}`}>
+                  <td className="text-faint">
+                    <Num>{formatClock(m.recorded_at)}</Num>
+                  </td>
+                  <td className="num">
+                    <Num>{formatPercent(m.cpu_percent * 100, 1)}</Num>
+                  </td>
+                  <td className="num">
+                    <Num>{formatBytes(m.memory_bytes)}</Num>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   )
 }
 
@@ -829,36 +1035,20 @@ function SourceSummary({
 
   return (
     <div className="panel overflow-hidden">
-      <ul className="m-0 list-none">
-        {rows.map(([label, value], i) => (
-          <li
-            key={label}
-            className={`flex items-center gap-3 px-4 py-2.5 text-sm ${
-              i > 0 ? 'border-t border-[var(--border)]' : ''
-            }`}
-          >
-            <span className="kicker w-32">{label}</span>
-            <span className="font-mono text-[var(--fg)] break-all">
-              {value}
-            </span>
-          </li>
-        ))}
-      </ul>
+      <table className="dtable">
+        <tbody>
+          {rows.map(([label, value]) => (
+            <tr key={label}>
+              <td className="kicker" style={{ width: '10rem' }}>
+                {label}
+              </td>
+              <td className="font-mono break-all">{value}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
-}
-
-function domainSignalClass(status: string): string {
-  switch (status) {
-    case 'verified':
-      return 'signal signal-steady'
-    case 'pending':
-      return 'signal signal-warn'
-    case 'failed':
-      return 'signal signal-fault'
-    default:
-      return 'signal'
-  }
 }
 
 interface DomainsSectionProps {
@@ -896,98 +1086,100 @@ function DomainsSection({
   deleteError,
 }: DomainsSectionProps) {
   return (
-    <div>
-      <p className="kicker mb-2">
-        domains{' '}
-        <span className="text-[var(--fg-muted)]">{domains.length}</span>
+    <div className="stack">
+      <p className="kicker">
+        domains <span className="text-faint tnum">{domains.length}</span>
       </p>
 
-      {deleteError ? (
-        <div className="panel mb-3 p-3 text-xs text-[var(--fg)]">
-          <span className="signal signal-fault mr-2 inline-block align-middle" />
-          {deleteError}
-        </div>
-      ) : null}
+      {deleteError ? <InlineError message={deleteError} /> : null}
 
       {domains.length === 0 ? (
-        <p className="mb-3 text-sm text-[var(--fg-muted)]">
-          No domains configured.
-        </p>
+        <div className="panel">
+          <EmptyState
+            icon={<Globe size={22} />}
+            title="No domains configured"
+            hint="Add a hostname below to route traffic to this service."
+          />
+        </div>
       ) : (
-        <div className="panel mb-3 overflow-hidden">
-          <ul className="m-0 list-none">
-            {domains.map((d, i) => (
-              <li
-                key={d.id}
-                className={`flex items-center gap-4 px-4 py-2.5 text-sm ${
-                  i > 0 ? 'border-t border-[var(--border)]' : ''
-                }`}
-              >
-                <span
-                  className={domainSignalClass(d.status)}
-                  aria-hidden="true"
-                />
-                <span className="font-semibold text-[var(--fg)]">
-                  {d.hostname}
-                </span>
-                <span className="kicker">{d.status}</span>
-                {d.last_error ? (
-                  <span className="text-xs text-[var(--violet)] ml-auto truncate max-w-60">
-                    {d.last_error}
-                  </span>
-                ) : null}
+        <div className="panel overflow-hidden">
+          <table className="dtable">
+            <thead>
+              <tr>
+                <th>hostname</th>
+                <th>status</th>
+                <th aria-label="actions" />
+              </tr>
+            </thead>
+            <tbody>
+              {domains.map((d) => (
+                <tr key={d.id}>
+                  <td className="font-mono break-all">{d.hostname}</td>
+                  <td>
+                    <span className="cluster">
+                      <StatusBadge kind="domain" status={d.status} />
+                      {d.last_error ? (
+                        <span className="text-[var(--violet)] truncate max-w-60" style={{ fontSize: 'var(--text-label)' }}>
+                          {d.last_error}
+                        </span>
+                      ) : null}
+                    </span>
+                  </td>
+                  <td>
+                    <span className="cluster" style={{ justifyContent: 'flex-end' }}>
+                      {d.status === 'pending' || d.status === 'failed' ? (
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => onVerify(d.id)}
+                          disabled={verifyPending}
+                        >
+                          {verifyPending ? 'verifying...' : 'verify'}
+                        </button>
+                      ) : null}
 
-                {d.status === 'pending' || d.status === 'failed' ? (
-                  <button
-                    type="button"
-                    className="btn text-xs ml-auto"
-                    onClick={() => onVerify(d.id)}
-                    disabled={verifyPending}
-                  >
-                    {verifyPending ? 'verifying...' : 'verify'}
-                  </button>
-                ) : null}
-
-                {deleteConfirm === d.id ? (
-                  <span className="inline-flex items-center gap-1 text-xs">
-                    <span className="text-[var(--violet)]">remove?</span>
-                    <button
-                      type="button"
-                      className="btn text-xs"
-                      aria-label="confirm remove domain"
-                      onClick={() => {
-                        onDelete(d.id)
-                      }}
-                      disabled={deletePending}
-                    >
-                      yes
-                    </button>
-                    <button
-                      type="button"
-                      className="btn text-xs"
-                      aria-label="cancel remove domain"
-                      onClick={() => onDeleteConfirm(null)}
-                    >
-                      no
-                    </button>
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn text-xs ml-auto"
-                    onClick={() => onDeleteConfirm(d.id)}
-                  >
-                    delete
-                  </button>
-                )}
-              </li>
-            ))}
-          </ul>
+                      {deleteConfirm === d.id ? (
+                        <span className="inline-flex items-center gap-1">
+                          <span className="text-[var(--violet)]">remove?</span>
+                          <button
+                            type="button"
+                            className="btn btn-danger"
+                            aria-label="confirm remove domain"
+                            onClick={() => onDelete(d.id)}
+                            disabled={deletePending}
+                          >
+                            yes
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            aria-label="cancel remove domain"
+                            onClick={() => onDeleteConfirm(null)}
+                          >
+                            no
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => onDeleteConfirm(d.id)}
+                        >
+                          delete
+                        </button>
+                      )}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
       <form
-        className="flex flex-wrap items-end gap-2"
+        className="cluster"
+        style={{ alignItems: 'flex-end' }}
         onSubmit={(e) => {
           e.preventDefault()
           const trimmed = hostname.trim()
@@ -1005,7 +1197,7 @@ function DomainsSection({
         />
         <button
           type="submit"
-          className="btn btn-primary text-xs"
+          className="btn btn-primary"
           disabled={addPending || hostname.trim().length === 0}
         >
           {addPending ? 'adding...' : 'add domain'}
@@ -1013,11 +1205,4 @@ function DomainsSection({
       </form>
     </div>
   )
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(1)} GiB`
-  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MiB`
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`
-  return `${bytes} B`
 }
