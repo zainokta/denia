@@ -21,7 +21,7 @@ import { ErrorPanel, InlineError, errorMessage } from '#/components/ErrorPanel'
 import { useActionToasts } from '#/components/Toast'
 import { Num } from '#/components/Num'
 import { useAuth, can } from '#/hooks/useAuth'
-import { useServiceLogs } from '#/hooks/useServiceLogs'
+import { LogStream } from '#/components/LogStream'
 import {
   formatBytes,
   formatClock,
@@ -187,11 +187,6 @@ export function ServiceDetail() {
     deployments.length > 0
       ? deployments.reduce((a, b) => (a.id > b.id ? a : b))
       : undefined
-
-  const { lines: logs, error: logsError } = useServiceLogs(
-    id,
-    activeTab === 'logs',
-  )
 
   const { data: metrics = [], isLoading: metricsLoading } = useQuery({
     queryKey: ['services', id, 'metrics'],
@@ -687,51 +682,12 @@ export function ServiceDetail() {
           if (active === 'logs') {
             return (
               <div className="stack">
-                <div className="cluster" style={{ fontSize: 'var(--text-label)' }}>
-                  {logsError ? (
-                    <InlineError message={logsError} />
-                  ) : (
-                    <>
-                      <span className="signal signal-steady" aria-hidden="true" />
-                      <span className="kicker">live</span>
-                      <span className="text-faint tnum">
-                        {logs.length} line{logs.length === 1 ? '' : 's'}
-                      </span>
-                    </>
-                  )}
-                </div>
-                {logs.length === 0 ? (
-                  <div className="panel">
-                    <EmptyState
-                      title={logsError ? 'Stream unavailable' : 'Waiting for logs'}
-                      hint={
-                        logsError
-                          ? 'The log stream could not be reached.'
-                          : 'Lines appear here as the workload produces them.'
-                      }
-                    />
-                  </div>
-                ) : (
-                  <div className="panel overflow-hidden">
-                    <ul className="m-0 list-none">
-                      {logs.map((line, i) => (
-                        <li
-                          key={`${i}:${line}`}
-                          className={`flex gap-4 px-4 py-1.5 text-xs ${
-                            i > 0 ? 'border-t border-[var(--border)]' : ''
-                          }`}
-                        >
-                          <span className="tnum flex-shrink-0 text-[var(--fg-faint)]">
-                            {String(i + 1).padStart(3, '0')}
-                          </span>
-                          <code className="flex-1 whitespace-pre-wrap break-all font-mono text-[var(--fg)]">
-                            {line}
-                          </code>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
+                <LogStream
+                  path={`/v1/services/${id}/logs/stream`}
+                  title="logs"
+                  showLineNumbers
+                  height="32rem"
+                />
               </div>
             )
           }
