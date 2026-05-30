@@ -209,6 +209,25 @@ pub(super) fn clear_promoted_deployment_q(
     Ok(())
 }
 
+/// Demote every `Healthy` deployment that is not the currently-promoted one to
+/// `Inactive`, so each service shows exactly one live deployment. Used by
+/// migration 11 to backfill data created before demote-on-promote existed, and
+/// safe to call repeatedly (idempotent). Returns the number of rows demoted.
+pub(super) fn demote_stale_healthy_deployments_q(conn: &Connection) -> Result<usize, RepoError> {
+    let healthy = serde_json::to_string(&DeploymentStatus::Healthy)?;
+    let inactive = serde_json::to_string(&DeploymentStatus::Inactive)?;
+    let demoted = conn.execute(
+        r#"
+        UPDATE deployments
+        SET status = ?1
+        WHERE status = ?2
+          AND id NOT IN (SELECT deployment_id FROM promoted_deployments)
+        "#,
+        params![inactive, healthy],
+    )?;
+    Ok(demoted)
+}
+
 pub(super) fn put_artifact_q(
     conn: &Connection,
     artifact: ArtifactRecord,
@@ -576,5 +595,50 @@ mod tests {
         assert_eq!(status(a.id), DeploymentStatus::Inactive);
         assert_eq!(status(b.id), DeploymentStatus::Healthy);
         assert_eq!(store.promoted_deployment(svc).unwrap(), Some(b.id));
+    }
+
+    #[test]
+    fn backfill_demotes_every_non_promoted_healthy_row() {
+        // Simulate pre-fix data: several `Healthy` rows with one promoted but no
+        // demotion ever applied (promoted row written raw, bypassing the
+        // demote-on-promote path).
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        let svc = Uuid::now_v7();
+
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let d = store
+                .create_deployment(DeploymentRequest::external_image(svc, "img"))
+                .unwrap();
+            store
+                .update_deployment_status(d.id, DeploymentStatus::Healthy)
+                .unwrap();
+            ids.push(d.id);
+        }
+
+        {
+            let conn = store.connection().unwrap();
+            conn.execute(
+                "INSERT INTO promoted_deployments (service_id, deployment_id) VALUES (?1, ?2)",
+                params![svc.to_string(), ids[2].to_string()],
+            )
+            .unwrap();
+            let demoted = demote_stale_healthy_deployments_q(&conn).unwrap();
+            assert_eq!(demoted, 2);
+        }
+
+        let status = |id: Uuid| {
+            store
+                .list_deployments(svc)
+                .unwrap()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap()
+                .status
+        };
+        assert_eq!(status(ids[0]), DeploymentStatus::Inactive);
+        assert_eq!(status(ids[1]), DeploymentStatus::Inactive);
+        assert_eq!(status(ids[2]), DeploymentStatus::Healthy);
     }
 }
