@@ -655,13 +655,18 @@ export function ServiceDetail() {
                         {newestFirst.map((d) => (
                           <tr key={d.id}>
                             <td>
-                              <Link
-                                to="/deployments/$deploymentId"
-                                params={{ deploymentId: d.id }}
-                                className="no-underline"
-                              >
-                                <StatusBadge status={d.status} />
-                              </Link>
+                              <span className="cluster" style={{ gap: '0.5rem' }}>
+                                <Link
+                                  to="/deployments/$deploymentId"
+                                  params={{ deploymentId: d.id }}
+                                  className="no-underline"
+                                >
+                                  <StatusBadge status={d.status} />
+                                </Link>
+                                {d.status === 'Healthy' ? (
+                                  <span className="badge badge-ok">current</span>
+                                ) : null}
+                              </span>
                             </td>
                             <td>
                               <Num className="text-faint">{shortId(d.id)}</Num>

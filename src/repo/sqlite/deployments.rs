@@ -160,6 +160,15 @@ pub(super) fn promote_deployment_q(
     service_id: Uuid,
     deployment_id: Uuid,
 ) -> Result<(), RepoError> {
+    // Demote the outgoing promoted deployment (if any) so history shows exactly
+    // one live (`Healthy`) row per service. Guard `prev != deployment_id` so a
+    // re-promotion of the same deployment (e.g. boot autostart `restart_promoted`)
+    // stays `Healthy` instead of marking itself superseded.
+    if let Some(prev) = promoted_deployment_q(conn, service_id)?
+        && prev != deployment_id
+    {
+        update_deployment_status_q(conn, prev, DeploymentStatus::Inactive)?;
+    }
     conn.execute(
         r#"
             INSERT INTO promoted_deployments (service_id, deployment_id)
@@ -524,5 +533,48 @@ mod tests {
         assert_eq!(by_id(d_pending.id), DeploymentStatus::Failed);
         assert_eq!(by_id(d_starting.id), DeploymentStatus::Failed);
         assert_eq!(by_id(d_healthy.id), DeploymentStatus::Healthy);
+    }
+
+    #[test]
+    fn promote_deactivates_previous_and_is_idempotent_for_same_id() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        let svc = Uuid::now_v7();
+
+        let a = store
+            .create_deployment(DeploymentRequest::external_image(svc, "img"))
+            .unwrap();
+        store
+            .update_deployment_status(a.id, DeploymentStatus::Healthy)
+            .unwrap();
+        store.promote_deployment(svc, a.id).unwrap();
+
+        // Re-promoting the SAME deployment (e.g. boot autostart) must not
+        // supersede it.
+        store.promote_deployment(svc, a.id).unwrap();
+        let status = |id: Uuid| {
+            store
+                .list_deployments(svc)
+                .unwrap()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap()
+                .status
+        };
+        assert_eq!(status(a.id), DeploymentStatus::Healthy);
+        assert_eq!(store.promoted_deployment(svc).unwrap(), Some(a.id));
+
+        // Promoting a NEW deployment deactivates the previous one.
+        let b = store
+            .create_deployment(DeploymentRequest::external_image(svc, "img"))
+            .unwrap();
+        store
+            .update_deployment_status(b.id, DeploymentStatus::Healthy)
+            .unwrap();
+        store.promote_deployment(svc, b.id).unwrap();
+
+        assert_eq!(status(a.id), DeploymentStatus::Inactive);
+        assert_eq!(status(b.id), DeploymentStatus::Healthy);
+        assert_eq!(store.promoted_deployment(svc).unwrap(), Some(b.id));
     }
 }
