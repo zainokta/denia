@@ -388,5 +388,15 @@ pub fn run_migrations(pool: &SqlitePool) -> Result<(), RepoError> {
         connection.execute("INSERT INTO schema_version (version) VALUES (10)", [])?;
     }
 
+    if current < 11 {
+        // Backfill: before demote-on-promote existed, every successful deploy
+        // left its row `Healthy` forever, so services accumulated many green
+        // rows. Demote every non-promoted `Healthy` deployment to `Inactive`
+        // so each service shows exactly one live (promoted) deployment.
+        super::deployments::demote_stale_healthy_deployments_q(&connection)?;
+        connection.execute("DELETE FROM schema_version", [])?;
+        connection.execute("INSERT INTO schema_version (version) VALUES (11)", [])?;
+    }
+
     Ok(())
 }
