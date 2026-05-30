@@ -22,6 +22,8 @@ import {
   Node,
   NodeSnapshot,
   Nodes,
+  OciCacheGcRun,
+  OciCacheStatus,
   Project,
   ProjectInput,
   ProjectMember,
@@ -239,6 +241,8 @@ export class ApiClient extends Context.Service<
       projectId: string,
       registryId: string,
     ) => Effect.Effect<void, ApiError>
+    readonly getOciCache: Effect.Effect<OciCacheStatus, ApiError | DecodeError>
+    readonly runOciCacheGc: Effect.Effect<OciCacheGcRun, ApiError | DecodeError>
   }
 >()('ApiClient') {}
 
@@ -867,6 +871,20 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseDeleteResponse(response)
       })
 
+    const getOciCache = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/oci/cache'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, OciCacheStatus)
+    })
+
+    const runOciCacheGc = Effect.gen(function* () {
+      const response = yield* http
+        .post(url('/v1/oci/cache/gc'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, OciCacheGcRun)
+    })
+
     return {
       listNodes,
       login,
@@ -920,6 +938,8 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       createRegistry,
       updateRegistry,
       deleteRegistry,
+      getOciCache,
+      runOciCacheGc,
     }
   }),
 )

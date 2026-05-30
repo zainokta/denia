@@ -22,12 +22,26 @@ const devBootstrapToken =
     ? asString(import.meta.env.VITE_DENIA_TOKEN)
     : undefined
 
-export const AppConfigLive = Layer.succeed(AppConfig)({
-  baseUrl:
+// Resolved control-plane origin. Empty string => same-origin (prod) or the
+// Vite dev proxy (`/v1` -> 127.0.0.1:7180). Exported so the SSE log-stream
+// hook (which bypasses the Effect HTTP client to read an infinite body)
+// shares one source of truth with `AppConfigLive`.
+export function getApiBaseUrl(): string {
+  return (
     asString(
       typeof import.meta !== 'undefined'
         ? import.meta.env.VITE_DENIA_API_URL
         : undefined,
-    ) ?? '',
-  getAuthToken: () => getToken() ?? devBootstrapToken,
+    ) ?? ''
+  )
+}
+
+// Bearer token for direct fetch() calls (log stream). Mirrors AppConfig.getAuthToken.
+export function getApiAuthToken(): string | undefined {
+  return getToken() ?? devBootstrapToken
+}
+
+export const AppConfigLive = Layer.succeed(AppConfig)({
+  baseUrl: getApiBaseUrl(),
+  getAuthToken: getApiAuthToken,
 })

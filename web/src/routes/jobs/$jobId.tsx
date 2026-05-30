@@ -1,10 +1,20 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useState } from 'react'
 import { Effect } from 'effect'
+import { ChevronDown, ChevronRight, Play, Timer } from 'lucide-react'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
-import { RunStatusSignal } from '#/components/RunStatusSignal'
+import type { JobRun } from '#/effect/schema'
 import { useAuth, can } from '#/hooks/useAuth'
+import { StatusBadge } from '#/components/StatusBadge'
+import { EmptyState } from '#/components/EmptyState'
+import { ErrorPanel, errorMessage } from '#/components/ErrorPanel'
+import { SkeletonRows } from '#/components/Skeleton'
+import { ConfirmButton } from '#/components/ConfirmButton'
+import { useActionToasts } from '#/components/Toast'
+import { Num } from '#/components/Num'
+import { formatDateTime, formatDuration, formatRelative } from '#/lib/format'
 
 const getJob = (id: string) =>
   Effect.gen(function* () {
@@ -49,21 +59,33 @@ function isActive(status: string): boolean {
   return status === 'Pending' || status === 'Running'
 }
 
+// Run duration in seconds when both endpoints are known, else null.
+function runSeconds(run: JobRun): number | null {
+  if (!run.started_at || !run.finished_at) return null
+  const start = Date.parse(run.started_at)
+  const end = Date.parse(run.finished_at)
+  if (Number.isNaN(start) || Number.isNaN(end)) return null
+  return Math.max(0, (end - start) / 1000)
+}
+
 export const Route = createFileRoute('/jobs/$jobId')({
   component: JobDetail,
 })
 
 export function JobDetail() {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const auth = useAuth()
+  const toast = useActionToasts()
   const { jobId } = Route.useParams()
+  const [expanded, setExpanded] = useState<string | null>(null)
 
   const { data: job, isLoading, isError, error } = useQuery({
     queryKey: ['jobs', jobId],
     queryFn: () => runQuery(getJob(jobId)),
   })
 
-  const { data: runs = [] } = useQuery({
+  const { data: runs = [], isLoading: runsLoading } = useQuery({
     queryKey: ['jobs', jobId, 'runs'],
     queryFn: () => runQuery(listJobRuns(jobId)),
     refetchInterval: () => {
@@ -73,205 +95,388 @@ export function JobDetail() {
     },
   })
 
-  const userRole = job
-    ? auth.roleForActiveProject(job.project_id)
-    : undefined
+  const userRole = job ? auth.roleForActiveProject(job.project_id) : undefined
   const canOperate = userRole ? can('operator', userRole) : false
 
   const runMutation = useMutation({
     mutationFn: () => runQuery(runJob(jobId)),
     onSuccess: () => {
+      toast.ok('Run enqueued.')
       queryClient.invalidateQueries({ queryKey: ['jobs', jobId, 'runs'] })
       if (job) {
         queryClient.invalidateQueries({ queryKey: ['jobs', job.project_id] })
       }
     },
+    onError: (err: unknown) => toast.err(errorMessage(err)),
   })
 
   const deleteMutation = useMutation({
     mutationFn: () => runQuery(deleteJob(jobId)),
     onSuccess: () => {
+      toast.ok('Job deleted.')
       if (job) {
         queryClient.invalidateQueries({ queryKey: ['jobs', job.project_id] })
       }
+      navigate({ to: '/jobs' })
     },
+    onError: (err: unknown) => toast.err(errorMessage(err)),
   })
 
   if (isLoading) {
     return (
-      <main className="page-wrap px-4 pb-12 pt-12">
-        <p className="text-[var(--fg-muted)]">loading...</p>
-      </main>
+      <div className="page-wrap px-4 pb-16 pt-10">
+        <p className="kicker mb-3">
+          <Link to="/jobs" className="text-faint">
+            &larr; jobs
+          </Link>
+        </p>
+        <SkeletonRows rows={4} />
+      </div>
     )
   }
 
   if (isError || !job) {
     return (
-      <main className="page-wrap px-4 pb-12 pt-12">
-        <p className="text-sm signal-fault">
-          {error instanceof Error ? error.message : 'Job not found'}
+      <div className="page-wrap px-4 pb-16 pt-10">
+        <p className="kicker mb-3">
+          <Link to="/jobs" className="text-faint">
+            &larr; jobs
+          </Link>
         </p>
-        <a href="/jobs" className="btn mt-4 text-xs">
-          &larr; back to jobs
-        </a>
-      </main>
+        <ErrorPanel
+          title="Job not found"
+          message={isError ? errorMessage(error) : 'This job no longer exists.'}
+        />
+      </div>
     )
   }
 
+  const hint = job.schedule ? cronHint(job.schedule) : null
+
   return (
-    <main className="page-wrap px-4 pb-12 pt-12">
+    <div className="page-wrap px-4 pb-16 pt-10">
       <p className="kicker mb-3">
-        job{' '}
-        <a href="/jobs" className="text-[var(--fg-muted)]">
-          &larr; back
-        </a>
+        <Link to="/jobs" className="text-faint">
+          &larr; jobs
+        </Link>
       </p>
-      <div className="mb-6 flex flex-wrap items-center gap-3">
-        <h1 className="text-2xl font-semibold tracking-tight text-[var(--fg)]">
-          {job.name}
-        </h1>
-        {canOperate && (
-          <>
+
+      <header className="panel-head" style={{ marginBottom: '1.5rem' }}>
+        <div>
+          <p className="kicker">job</p>
+          <h1 className="t-display">{job.name}</h1>
+        </div>
+        {canOperate ? (
+          <div className="cluster">
             <button
-              className="btn btn-primary text-xs"
               type="button"
+              className="btn btn-primary"
               onClick={() => runMutation.mutate()}
               disabled={runMutation.isPending}
             >
-              {runMutation.isPending ? 'running...' : 'run now'}
+              {runMutation.isPending ? (
+                <span className="spin" aria-hidden="true" />
+              ) : (
+                <Play size={14} aria-hidden="true" />
+              )}
+              Run now
             </button>
-            <button
-              className="btn text-xs"
-              type="button"
-              onClick={() => {
-                if (confirm('Delete this job and all its runs?')) {
-                  deleteMutation.mutate()
-                }
-              }}
-              disabled={deleteMutation.isPending}
-            >
-              {deleteMutation.isPending ? 'deleting...' : 'delete'}
-            </button>
-          </>
-        )}
-      </div>
-
-      {runMutation.isError && (
-        <p className="text-sm signal-fault mb-4">
-          {(runMutation.error as Error)?.message ?? 'Run failed'}
-        </p>
-      )}
-
-      {deleteMutation.isError && (
-        <p className="text-sm signal-fault mb-4">
-          {(deleteMutation.error as Error)?.message ?? 'Delete failed'}
-        </p>
-      )}
-
-      <section className="panel mb-8 p-4 space-y-2">
-        <p className="kicker m-0">schedule</p>
-        <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
-          <span>
-            <span className="text-[var(--fg-muted)]">source:</span>{' '}
-            {sourceDisplay(job.source)}
-          </span>
-          {job.command && (
-            <span>
-              <span className="text-[var(--fg-muted)]">command:</span>{' '}
-              <code>{job.command.join(' ')}</code>
-            </span>
-          )}
-          <span>
-            <span className="text-[var(--fg-muted)]">schedule:</span>{' '}
-            {job.schedule || 'manual only'}
-            {job.schedule && cronHint(job.schedule) && (
-              <span className="ml-1 opacity-60">
-                ({cronHint(job.schedule)})
-              </span>
-            )}
-          </span>
-          {job.next_run_at && (
-            <span className="tnum">
-              <span className="text-[var(--fg-muted)]">next run:</span>{' '}
-              {new Date(job.next_run_at).toLocaleString()}
-            </span>
-          )}
-          <span className="tnum">
-            <span className="text-[var(--fg-muted)]">max retries:</span>{' '}
-            {job.max_retries}
-          </span>
-        </div>
-      </section>
-
-      {job.env.length > 0 && (
-        <section className="panel mb-8 overflow-hidden">
-          <p className="kicker border-b border-[var(--border)] px-4 py-2.5">
-            environment
-          </p>
-          <ul className="m-0 list-none">
-            {job.env.map(([k, v], i) => (
-              <li
-                key={k}
-                className={`flex gap-4 px-4 py-1.5 text-xs font-mono ${
-                  i > 0 ? 'border-t border-[var(--border)]' : ''
-                }`}
-              >
-                <span className="text-[var(--fg)]">{k}=</span>
-                <span className="text-[var(--fg-muted)]">{v}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      <section className="mb-8">
-        <p className="kicker mb-2">
-          run history{' '}
-          <span className="text-[var(--fg-muted)]">{runs.length}</span>
-        </p>
-        {runs.length === 0 ? (
-          <p className="text-sm text-[var(--fg-muted)]">No runs yet.</p>
-        ) : (
-          <div className="panel overflow-hidden">
-            <ul className="m-0 list-none">
-              {runs.map((run, i) => (
-                <li
-                  key={run.id}
-                  className={`flex items-center gap-4 px-4 py-3 text-sm ${
-                    i > 0 ? 'border-t border-[var(--border)]' : ''
-                  }`}
-                >
-                  <RunStatusSignal status={run.status} />
-                  <span className="tnum text-xs text-[var(--fg-muted)]">
-                    #{run.attempt}
-                  </span>
-                  {run.exit_code !== null && (
-                    <span
-                      className={`tnum text-xs ${
-                        run.exit_code === 0
-                          ? 'text-[var(--ok)]'
-                          : 'text-[var(--violet)]'
-                      }`}
-                    >
-                      exit {run.exit_code}
-                    </span>
-                  )}
-                  {run.started_at && (
-                    <span className="tnum text-xs text-[var(--fg-muted)]">
-                      {new Date(run.started_at).toLocaleString()}
-                    </span>
-                  )}
-                  {run.finished_at && (
-                    <span className="tnum text-xs text-[var(--fg-muted)]">
-                      &rarr; {new Date(run.finished_at).toLocaleString()}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ul>
+            <ConfirmButton
+              label="Delete"
+              confirmLabel="Delete job"
+              message="Delete this job and all of its runs? This cannot be undone."
+              onConfirm={() => deleteMutation.mutate()}
+              busy={deleteMutation.isPending}
+              align="right"
+            />
           </div>
-        )}
-      </section>
-    </main>
+        ) : null}
+      </header>
+
+      <div className="stack-lg">
+        <section>
+          <p className="kicker" style={{ marginBottom: '0.9rem' }}>
+            configuration
+          </p>
+          <div className="panel panel-pad">
+            <dl className="flex flex-col gap-3" style={{ margin: 0 }}>
+              <Detail label="source" value={sourceDisplay(job.source)} mono />
+              <Detail
+                label="command"
+                value={job.command ? job.command.join(' ') : 'image default'}
+                mono
+              />
+              <Detail
+                label="schedule"
+                value={
+                  job.schedule ? (
+                    <span className="cluster" style={{ gap: '0.4rem' }}>
+                      <Timer
+                        size={13}
+                        aria-hidden="true"
+                        style={{ color: 'var(--fg-faint)' }}
+                      />
+                      <code className="tnum">{job.schedule}</code>
+                      {hint ? <span className="text-faint">{hint}</span> : null}
+                    </span>
+                  ) : (
+                    <span className="text-faint">manual only</span>
+                  )
+                }
+              />
+              <Detail
+                label="max retries"
+                value={<Num>{job.max_retries}</Num>}
+              />
+              {job.next_run_at ? (
+                <Detail
+                  label="next run"
+                  value={
+                    <Num title={formatDateTime(job.next_run_at)}>
+                      {formatRelative(job.next_run_at, Date.now())}
+                    </Num>
+                  }
+                />
+              ) : null}
+              <Detail
+                label="created"
+                value={
+                  <Num title={formatDateTime(job.created_at)}>
+                    {formatRelative(job.created_at, Date.now())}
+                  </Num>
+                }
+              />
+            </dl>
+            <p className="field-help" style={{ marginTop: '0.9rem' }}>
+              Jobs are immutable; recreate to change configuration.
+            </p>
+          </div>
+        </section>
+
+        {job.env.length > 0 ? (
+          <section>
+            <p className="kicker" style={{ marginBottom: '0.9rem' }}>
+              environment
+            </p>
+            <div className="panel overflow-hidden">
+              <table className="dtable">
+                <thead>
+                  <tr>
+                    <th>key</th>
+                    <th>value</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {job.env.map(([k, v]) => (
+                    <tr key={k}>
+                      <td>
+                        <code className="tnum">{k}</code>
+                      </td>
+                      <td className="text-faint">
+                        <code className="tnum">{v}</code>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        ) : null}
+
+        <section>
+          <div className="panel-head">
+            <p className="kicker">run history</p>
+            {runs.length > 0 ? (
+              <span className="badge">
+                <Num>{runs.length}</Num> {runs.length === 1 ? 'run' : 'runs'}
+              </span>
+            ) : null}
+          </div>
+          {runsLoading ? (
+            <SkeletonRows rows={3} />
+          ) : runs.length === 0 ? (
+            <div className="panel">
+              <EmptyState
+                icon={<Play size={20} />}
+                title="No runs yet"
+                hint={
+                  canOperate
+                    ? 'Trigger a run with "Run now", or wait for the schedule to fire.'
+                    : 'Runs will appear here once this job executes.'
+                }
+              />
+            </div>
+          ) : (
+            <div className="panel overflow-hidden">
+              <table className="dtable">
+                <thead>
+                  <tr>
+                    <th style={{ width: '2rem' }} aria-label="expand" />
+                    <th className="num">attempt</th>
+                    <th>status</th>
+                    <th>started</th>
+                    <th>duration</th>
+                    <th className="num">exit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {runs.map((run) => {
+                    const secs = runSeconds(run)
+                    const isOpen = expanded === run.id
+                    return (
+                      <RunRow
+                        key={run.id}
+                        run={run}
+                        seconds={secs}
+                        open={isOpen}
+                        onToggle={() =>
+                          setExpanded((cur) => (cur === run.id ? null : run.id))
+                        }
+                      />
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  )
+}
+
+// One run row plus an expandable detail panel. The backend exposes no per-run
+// log stream, so the disclosure surfaces the full run record (timestamps,
+// attempt, exit status) instead of raw output.
+function RunRow({
+  run,
+  seconds,
+  open,
+  onToggle,
+}: {
+  readonly run: JobRun
+  readonly seconds: number | null
+  readonly open: boolean
+  readonly onToggle: () => void
+}) {
+  return (
+    <>
+      <tr>
+        <td>
+          <button
+            type="button"
+            className="btn-icon"
+            aria-expanded={open}
+            aria-label={open ? 'Collapse run detail' : 'Expand run detail'}
+            onClick={onToggle}
+            style={{
+              border: 0,
+              background: 'transparent',
+              color: 'var(--fg-muted)',
+              padding: 0,
+            }}
+          >
+            {open ? (
+              <ChevronDown size={15} aria-hidden="true" />
+            ) : (
+              <ChevronRight size={15} aria-hidden="true" />
+            )}
+          </button>
+        </td>
+        <td className="num">
+          <Num>{run.attempt}</Num>
+        </td>
+        <td>
+          <StatusBadge status={run.status} kind="run" />
+        </td>
+        <td className="tnum text-faint">
+          {run.started_at ? (
+            <span title={formatDateTime(run.started_at)}>
+              {formatRelative(run.started_at, Date.now())}
+            </span>
+          ) : (
+            '—'
+          )}
+        </td>
+        <td className="tnum text-faint">
+          {seconds !== null ? formatDuration(seconds) : '—'}
+        </td>
+        <td className="num">
+          {run.exit_code !== null ? <Num>{run.exit_code}</Num> : '—'}
+        </td>
+      </tr>
+      {open ? (
+        <tr>
+          <td colSpan={6} style={{ background: 'var(--surface-2)' }}>
+            <dl
+              className="flex flex-col gap-2"
+              style={{ margin: 0, padding: '0.4rem 0' }}
+            >
+              <Detail
+                label="status"
+                value={<StatusBadge status={run.status} kind="run" />}
+              />
+              <Detail label="attempt" value={<Num>{run.attempt}</Num>} />
+              <Detail
+                label="exit code"
+                value={run.exit_code !== null ? <Num>{run.exit_code}</Num> : '—'}
+              />
+              <Detail
+                label="started"
+                value={
+                  run.started_at ? (
+                    <Num>{formatDateTime(run.started_at)}</Num>
+                  ) : (
+                    '—'
+                  )
+                }
+              />
+              <Detail
+                label="finished"
+                value={
+                  run.finished_at ? (
+                    <Num>{formatDateTime(run.finished_at)}</Num>
+                  ) : (
+                    '—'
+                  )
+                }
+              />
+              <Detail
+                label="duration"
+                value={seconds !== null ? formatDuration(seconds) : '—'}
+              />
+              <Detail
+                label="enqueued"
+                value={<Num>{formatDateTime(run.created_at)}</Num>}
+              />
+            </dl>
+          </td>
+        </tr>
+      ) : null}
+    </>
+  )
+}
+
+function Detail({
+  label,
+  value,
+  mono = false,
+}: {
+  readonly label: string
+  readonly value: React.ReactNode
+  readonly mono?: boolean
+}) {
+  return (
+    <div className="flex items-baseline gap-3">
+      <dt className="kicker" style={{ minWidth: '9ch', flexShrink: 0 }}>
+        {label}
+      </dt>
+      <dd
+        className={mono ? 'tnum' : undefined}
+        style={{ margin: 0, minWidth: 0, wordBreak: 'break-word' }}
+      >
+        {value}
+      </dd>
+    </div>
   )
 }

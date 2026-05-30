@@ -524,10 +524,10 @@ export function ServiceForm({
                     id="hint-git-cred-name"
                     label="about credential name"
                   >
-                    Name of the credential registered via{' '}
-                    <code>POST /v1/credentials/git</code>. Points to the SOPS
-                    file holding the SSH deploy key Denia uses to clone the
-                    repo.
+                    Optional. For a private repo, the name of an SSH deploy key
+                    credential (a SOPS-encrypted key placed under the project
+                    secrets directory out of band). Leave blank for public
+                    repos.
                   </FieldHint>
                 </div>
                 <input

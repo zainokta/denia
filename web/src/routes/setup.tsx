@@ -2,9 +2,11 @@ import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Effect } from 'effect'
+import { ShieldCheck } from 'lucide-react'
 import { clearToken } from '../effect/auth-store'
 import { runQuery } from '../effect/runtime'
 import { ApiClient } from '../effect/api-client'
+import { InlineError } from '#/components/ErrorPanel'
 
 export const Route = createFileRoute('/setup')({
   component: Setup,
@@ -69,65 +71,84 @@ export function Setup() {
     bootstrapMutation.mutate({ username, password })
   }
 
+  const pending = bootstrapMutation.status === 'pending'
+
   return (
-    <main className="page-wrap px-4 py-16">
-      <div className="mx-auto max-w-sm">
-        <p className="kicker mb-3">setup</p>
-        <h1 className="mb-6 text-2xl font-semibold tracking-tight text-[var(--fg)]">
-          create first admin
-        </h1>
-        <form onSubmit={handleSubmit} className="panel p-6 space-y-4">
-          <div>
-            <label htmlFor="username" className="kicker block mb-1">
+    <main className="page-narrow px-4 py-16">
+      <header style={{ marginBottom: '1.5rem' }}>
+        <p className="kicker">denia setup</p>
+        <h1 className="t-display">Create admin</h1>
+        <p className="text-faint" style={{ marginTop: 6, maxWidth: '52ch' }}>
+          Bootstrap the first super-admin account for this node. After it is
+          created you will be redirected to sign in.
+        </p>
+      </header>
+
+      <form onSubmit={handleSubmit} className="panel panel-pad">
+        <div className="stack">
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="username" className="kicker">
               username
             </label>
             <input
               id="username"
+              name="username"
               type="text"
+              autoComplete="username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               className="field-input w-full"
               required
             />
           </div>
-          <div>
-            <label htmlFor="password" className="kicker block mb-1">
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="password" className="kicker">
               password
             </label>
             <input
               id="password"
+              name="password"
               type="password"
+              autoComplete="new-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="field-input w-full"
               required
             />
           </div>
-          <div>
-            <label htmlFor="confirm" className="kicker block mb-1">
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="confirm" className="kicker">
               confirm password
             </label>
             <input
               id="confirm"
+              name="confirm"
               type="password"
+              autoComplete="new-password"
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}
               className="field-input w-full"
               required
             />
           </div>
-          {error && <p className="text-sm text-[var(--violet)]">{error}</p>}
+          {error ? <InlineError message={error} /> : null}
           <button
             type="submit"
             className="btn btn-primary w-full justify-center"
-            disabled={bootstrapMutation.status === 'pending'}
+            disabled={pending}
           >
-            {bootstrapMutation.status === 'pending'
-              ? 'creating...'
-              : 'create admin'}
+            {pending ? (
+              <>
+                <span className="spin" aria-hidden="true" /> Creating
+              </>
+            ) : (
+              <>
+                <ShieldCheck size={14} aria-hidden="true" /> Create admin
+              </>
+            )}
           </button>
-        </form>
-      </div>
+        </div>
+      </form>
     </main>
   )
 }

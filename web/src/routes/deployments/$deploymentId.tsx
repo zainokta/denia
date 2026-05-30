@@ -1,10 +1,14 @@
 import { createFileRoute, Link, useParams } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import { Effect } from 'effect'
+import { ArrowLeft } from 'lucide-react'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
 import { DeployPhase } from '#/components/DeployPhase'
-import { useDeploymentLogs } from '#/hooks/useDeploymentLogs'
+import { StatusBadge } from '#/components/StatusBadge'
+import { LogStream } from '#/components/LogStream'
+import { ErrorPanel, errorMessage } from '#/components/ErrorPanel'
+import { formatDateTime, formatRelative, shortId } from '#/lib/format'
 
 const getDeployment = (id: string) =>
   Effect.gen(function* () {
@@ -35,139 +39,92 @@ export function DeploymentDetail() {
     refetchIntervalInBackground: false,
   })
 
-  const { lines, error: logsError, done } = useDeploymentLogs(id, true)
-
   return (
-    <main className="page-wrap px-4 pb-12 pt-12">
-      <p className="kicker mb-3">
-        deployment{' '}
+    <main className="page-wrap px-4 pb-16 pt-10">
+      <header style={{ marginBottom: '1.5rem' }}>
         {deployment ? (
           <Link
             to="/services/$serviceId"
             params={{ serviceId: deployment.service_id }}
-            className="text-[var(--fg-muted)]"
+            className="cluster"
+            style={{ gap: '0.4rem', fontSize: 'var(--text-label)', color: 'var(--fg-muted)' }}
           >
-            &larr; back to service
+            <ArrowLeft size={13} aria-hidden="true" /> back to service
           </Link>
         ) : (
-          <span className="text-[var(--fg-muted)]">&larr; back</span>
+          <p className="kicker">deployment</p>
         )}
-      </p>
-
-      <div className="mb-6 flex flex-wrap items-center gap-3">
-        <h1 className="text-2xl font-semibold tracking-tight text-[var(--fg)]">
-          {deployment ? deployment.id : id}
-        </h1>
+        <div className="panel-head" style={{ marginTop: '0.5rem' }}>
+          <h1 className="t-display tnum">{shortId(deployment ? deployment.id : id)}</h1>
+          {deployment ? <StatusBadge status={deployment.status} /> : null}
+        </div>
         {deployment ? (
-          <>
-            <span className="kicker">{deployment.status}</span>
+          <div style={{ marginTop: '0.75rem' }}>
             <DeployPhase status={deployment.status} />
-          </>
+          </div>
         ) : null}
-      </div>
+      </header>
 
       {error ? (
-        <div className="panel mb-4 p-3 text-xs text-[var(--fg)]">
-          <span className="signal signal-fault mr-2 inline-block align-middle" />
-          {error instanceof Error ? error.message : 'Failed to load deployment'}
-        </div>
+        <ErrorPanel
+          title="Failed to load deployment"
+          message={errorMessage(error)}
+        />
       ) : null}
 
-      {deployment ? (
-        <div className="panel mb-6 overflow-hidden">
-          <ul className="m-0 list-none">
-            <li className="flex items-center gap-3 px-4 py-2.5 text-sm border-b border-[var(--border)]">
-              <span className="kicker w-32">service</span>
-              <Link
-                to="/services/$serviceId"
-                params={{ serviceId: deployment.service_id }}
-                className="tnum text-[var(--fg)]"
-              >
-                {deployment.service_id}
-              </Link>
-            </li>
-            <li className="flex items-center gap-3 px-4 py-2.5 text-sm border-b border-[var(--border)]">
-              <span className="kicker w-32">created</span>
-              <span className="tnum text-[var(--fg-muted)]">
-                {deployment.created_at}
-              </span>
-            </li>
-            <li className="flex items-center gap-3 px-4 py-2.5 text-sm">
-              <span className="kicker w-32">artifact</span>
-              {deployment.artifact ? (
-                <span className="flex flex-wrap items-center gap-2 text-xs">
-                  <code className="tnum text-[var(--fg)]">
-                    {deployment.artifact.digest.slice(0, 12)}
-                  </code>
-                  <span className="text-[var(--fg-muted)]">
-                    {deployment.artifact.kind === 'OciImage'
-                      ? 'image'
-                      : 'bundle'}
+      <div className="stack">
+        {deployment ? (
+          <section className="panel panel-pad">
+            <dl className="flex flex-col gap-3" style={{ margin: 0 }}>
+              <Row label="service">
+                <Link to="/services/$serviceId" params={{ serviceId: deployment.service_id }}>
+                  {shortId(deployment.service_id)}
+                </Link>
+              </Row>
+              <Row label="created">
+                <span className="tnum" title={formatDateTime(deployment.created_at)}>
+                  {formatRelative(deployment.created_at, Date.now())}
+                </span>
+              </Row>
+              <Row label="artifact">
+                {deployment.artifact ? (
+                  <span className="cluster" style={{ gap: '0.5rem' }}>
+                    <code className="tnum">{deployment.artifact.digest.slice(0, 16)}</code>
+                    <span className="badge">
+                      {deployment.artifact.kind === 'OciImage' ? 'image' : 'bundle'}
+                    </span>
                   </span>
-                </span>
-              ) : (
-                <span className="text-xs text-[var(--fg-muted)]">pending</span>
-              )}
-            </li>
-          </ul>
-        </div>
-      ) : null}
+                ) : (
+                  <span className="text-faint">pending</span>
+                )}
+              </Row>
+            </dl>
+          </section>
+        ) : null}
 
-      <div className="mb-2 flex items-center gap-2 text-xs">
-        {logsError ? (
-          <span className="text-[var(--violet)]">
-            <span className="signal signal-fault mr-2 inline-block align-middle" />
-            {logsError}
-          </span>
-        ) : done ? (
-          <>
-            <span className="signal" />
-            <span className="kicker">closed</span>
-            <span className="tnum text-[var(--fg-muted)]">
-              {lines.length} line{lines.length === 1 ? '' : 's'}
-            </span>
-          </>
-        ) : (
-          <>
-            <span className="signal signal-steady" />
-            <span className="kicker">live</span>
-            <span className="tnum text-[var(--fg-muted)]">
-              {lines.length} line{lines.length === 1 ? '' : 's'}
-            </span>
-          </>
-        )}
+        <section>
+          <p className="kicker" style={{ marginBottom: '0.6rem' }}>
+            deploy log
+          </p>
+          <LogStream
+            path={`/v1/deployments/${id}/logs`}
+            title="deploy"
+            showLineNumbers
+            height="32rem"
+          />
+        </section>
       </div>
-
-      {lines.length === 0 ? (
-        <p className="text-sm text-[var(--fg-muted)]">
-          {logsError ? 'Stream unavailable.' : 'Waiting for logs...'}
-        </p>
-      ) : (
-        <div className="panel overflow-hidden">
-          <ul className="m-0 list-none">
-            {lines.map((line, i) => (
-              <li
-                key={`${i}:${line}`}
-                className={`flex gap-4 px-4 py-1.5 text-xs ${
-                  i > 0 ? 'border-t border-[var(--border)]' : ''
-                }`}
-              >
-                <span className="tnum flex-shrink-0 text-[var(--fg-muted)]">
-                  {String(i + 1).padStart(3, '0')}
-                </span>
-                <code className="flex-1 whitespace-pre-wrap break-all font-mono text-[var(--fg)]">
-                  {line}
-                </code>
-              </li>
-            ))}
-          </ul>
-          {done ? (
-            <p className="px-4 py-2 text-xs text-[var(--fg-muted)]">
-              stream closed
-            </p>
-          ) : null}
-        </div>
-      )}
     </main>
+  )
+}
+
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-baseline gap-3">
+      <dt className="kicker" style={{ minWidth: '7rem' }}>
+        {label}
+      </dt>
+      <dd style={{ margin: 0 }}>{children}</dd>
+    </div>
   )
 }

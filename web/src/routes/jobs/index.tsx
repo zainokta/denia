@@ -2,10 +2,16 @@ import { createFileRoute, Link } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Effect } from 'effect'
+import { ListChecks, Timer } from 'lucide-react'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
 import { useAuth, can } from '#/hooks/useAuth'
 import { useActiveProject } from '#/hooks/useActiveProject'
+import { EmptyState } from '#/components/EmptyState'
+import { ErrorPanel, errorMessage } from '#/components/ErrorPanel'
+import { SkeletonRows } from '#/components/Skeleton'
+import { Num } from '#/components/Num'
+import { formatRelative } from '#/lib/format'
 
 const listJobs = (projectId: string) =>
   Effect.gen(function* () {
@@ -86,7 +92,13 @@ export function JobsIndex() {
   const [maxRetries, setMaxRetries] = useState(0)
   const [createError, setCreateError] = useState('')
 
-  const { data: jobs = [], isFetching } = useQuery({
+  const {
+    data: jobs = [],
+    isFetching,
+    isLoading,
+    isError,
+    error,
+  } = useQuery({
     queryKey: ['jobs', projectId],
     queryFn: () => runQuery(listJobs(projectId)),
     enabled: projectId.length > 0,
@@ -157,10 +169,8 @@ export function JobsIndex() {
       setMaxRetries(0)
       setCreateError('')
     },
-    onError: (error: unknown) => {
-      setCreateError(
-        error instanceof Error ? error.message : 'Failed to create job',
-      )
+    onError: (err: unknown) => {
+      setCreateError(errorMessage(err) || 'Failed to create job')
     },
   })
 
@@ -177,205 +187,302 @@ export function JobsIndex() {
   }
 
   return (
-    <main className="page-wrap px-4 pb-12 pt-12">
-      <p className="kicker mb-3">scheduled work</p>
-      <h1 className="mb-6 text-2xl font-semibold tracking-tight text-[var(--fg)]">
-        Jobs
-      </h1>
+    <div className="page-wrap px-4 pb-16 pt-10">
+      <header className="panel-head" style={{ marginBottom: '1.5rem' }}>
+        <div>
+          <p className="kicker">scheduled work</p>
+          <h1 className="t-display">Jobs</h1>
+        </div>
+        {projectId && jobs.length > 0 ? (
+          <span className="badge">
+            <Num>{jobs.length}</Num> {jobs.length === 1 ? 'job' : 'jobs'}
+          </span>
+        ) : null}
+      </header>
 
       {!projectId ? (
-        <section className="panel p-8 text-center">
-          <p className="text-[var(--fg-muted)] mb-4">
-            Select a project to view its jobs.
-          </p>
-          <a href="/projects" className="btn btn-primary text-xs">
-            Browse Projects
-          </a>
-        </section>
+        <div className="panel">
+          <EmptyState
+            icon={<ListChecks size={22} />}
+            title="No project selected"
+            hint="Pick a project to view and schedule its jobs."
+            action={
+              <Link to="/projects" className="btn btn-primary">
+                Browse projects
+              </Link>
+            }
+          />
+        </div>
       ) : (
-        <>
-          {canOperate && (
-            <form onSubmit={handleCreate} className="panel mb-8 p-4 space-y-3">
-              <p className="kicker m-0">new job</p>
-              <div className="flex flex-wrap gap-3 items-end">
-                <div className="flex-1 min-w-0">
-                  <input
-                    placeholder="Job name"
-                    type="text"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    className="field-input w-full"
-                    required
-                  />
-                </div>
-                {imageMode === 'registry' ? (
-                  <>
-                    <div className="min-w-0">
-                      <select
-                        aria-label="registry"
-                        value={registryId}
-                        onChange={(e) => setRegistryId(e.target.value)}
-                        className="field-input w-full"
-                      >
-                        <option value="">select registry</option>
-                        {registries.map((r) => (
-                          <option key={r.id} value={r.id}>
-                            {r.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <input
-                        placeholder="Image ref (e.g. org/app:latest)"
-                        aria-label="image ref"
-                        type="text"
-                        value={imageRef}
-                        onChange={(e) => setImageRef(e.target.value)}
-                        className="field-input w-full"
-                      />
-                    </div>
-                  </>
-                ) : (
-                  <div className="flex-1 min-w-0">
+        <div className="stack-lg">
+          {canOperate ? (
+            <section>
+              <p className="kicker" style={{ marginBottom: '0.9rem' }}>
+                new job
+              </p>
+              <form onSubmit={handleCreate} className="panel panel-pad stack">
+                <div className="cluster" style={{ alignItems: 'flex-end' }}>
+                  <div className="min-w-0 flex-1">
+                    <label className="kicker" htmlFor="job-name">
+                      name
+                    </label>
                     <input
-                      placeholder="Image (e.g. alpine:latest)"
-                      aria-label="image"
+                      id="job-name"
+                      placeholder="Job name"
                       type="text"
-                      value={image}
-                      onChange={(e) => setImage(e.target.value)}
-                      className="field-input w-full"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      className="field-input mt-1 w-full"
+                      required
                     />
                   </div>
-                )}
-                <button
-                  type="submit"
-                  className="btn btn-primary"
-                  disabled={create.isPending || !sourceValid || !name.trim()}
-                >
-                  {create.isPending ? 'creating...' : 'create'}
-                </button>
-              </div>
+                  {imageMode === 'registry' ? (
+                    <>
+                      <div className="min-w-0">
+                        <label className="kicker" htmlFor="job-registry">
+                          registry
+                        </label>
+                        <select
+                          id="job-registry"
+                          aria-label="registry"
+                          value={registryId}
+                          onChange={(e) => setRegistryId(e.target.value)}
+                          className="field-input mt-1 w-full"
+                        >
+                          <option value="">select registry</option>
+                          {registries.map((r) => (
+                            <option key={r.id} value={r.id}>
+                              {r.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <label className="kicker" htmlFor="job-image-ref">
+                          image ref
+                        </label>
+                        <input
+                          id="job-image-ref"
+                          placeholder="org/app:latest"
+                          aria-label="image ref"
+                          type="text"
+                          value={imageRef}
+                          onChange={(e) => setImageRef(e.target.value)}
+                          className="field-input mt-1 w-full"
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="min-w-0 flex-1">
+                      <label className="kicker" htmlFor="job-image">
+                        image
+                      </label>
+                      <input
+                        id="job-image"
+                        placeholder="alpine:latest"
+                        aria-label="image"
+                        type="text"
+                        value={image}
+                        onChange={(e) => setImage(e.target.value)}
+                        className="field-input mt-1 w-full"
+                      />
+                    </div>
+                  )}
+                  <button
+                    type="submit"
+                    className="btn btn-primary"
+                    disabled={create.isPending || !sourceValid || !name.trim()}
+                  >
+                    {create.isPending ? (
+                      <>
+                        <span className="spin" aria-hidden="true" /> Creating
+                      </>
+                    ) : (
+                      'Create job'
+                    )}
+                  </button>
+                </div>
 
-              {registries.length > 0 ? (
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="kicker m-0">image source</span>
-                  <button
-                    type="button"
-                    aria-pressed={imageMode === 'direct'}
-                    className={`btn text-xs ${imageMode === 'direct' ? 'btn-primary' : ''}`}
-                    onClick={() => setImageMode('direct')}
-                  >
-                    direct
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={imageMode === 'registry'}
-                    className={`btn text-xs ${imageMode === 'registry' ? 'btn-primary' : ''}`}
-                    onClick={() => setImageMode('registry')}
-                  >
-                    registry + ref
-                  </button>
+                {registries.length > 0 ? (
+                  <div className="cluster">
+                    <span className="kicker">image source</span>
+                    <div className="segmented" role="group" aria-label="image source">
+                      <button
+                        type="button"
+                        aria-pressed={imageMode === 'direct'}
+                        onClick={() => setImageMode('direct')}
+                      >
+                        direct
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={imageMode === 'registry'}
+                        onClick={() => setImageMode('registry')}
+                      >
+                        registry + ref
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="cluster" style={{ alignItems: 'flex-end' }}>
+                  <div className="min-w-0 flex-1">
+                    <label className="kicker" htmlFor="job-command">
+                      command
+                    </label>
+                    <input
+                      id="job-command"
+                      placeholder="Args (space-separated)"
+                      type="text"
+                      value={command}
+                      onChange={(e) => setCommand(e.target.value)}
+                      className="field-input mt-1 w-full"
+                    />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <label className="kicker" htmlFor="job-schedule">
+                      schedule
+                    </label>
+                    <input
+                      id="job-schedule"
+                      placeholder="Cron, e.g. */5 * * * *"
+                      type="text"
+                      value={schedule}
+                      onChange={(e) => setSchedule(e.target.value)}
+                      className="field-input mt-1 w-full"
+                    />
+                  </div>
+                  <div className="w-24">
+                    <label className="kicker" htmlFor="job-retries">
+                      retries
+                    </label>
+                    <input
+                      id="job-retries"
+                      placeholder="0"
+                      type="number"
+                      value={maxRetries}
+                      onChange={(e) =>
+                        setMaxRetries(parseInt(e.target.value) || 0)
+                      }
+                      className="field-input mt-1 w-full"
+                    />
+                  </div>
                 </div>
-              ) : null}
-              <div className="flex flex-wrap gap-3">
-                <div className="flex-1 min-w-0">
-                  <input
-                    placeholder="Command args (space-separated)"
-                    type="text"
-                    value={command}
-                    onChange={(e) => setCommand(e.target.value)}
-                    className="field-input w-full"
+
+                <div>
+                  <label className="kicker" htmlFor="job-env">
+                    environment
+                  </label>
+                  <textarea
+                    id="job-env"
+                    placeholder="KEY=val, one per line"
+                    value={envStr}
+                    onChange={(e) => setEnvStr(e.target.value)}
+                    rows={3}
+                    className="field-input mt-1 w-full"
+                    aria-describedby="job-env-help"
                   />
+                  <p id="job-env-help" className="field-help">
+                    Secrets: use credential references, not raw values.
+                  </p>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <input
-                    placeholder="Cron schedule (e.g. */5 * * * *)"
-                    type="text"
-                    value={schedule}
-                    onChange={(e) => setSchedule(e.target.value)}
-                    className="field-input w-full"
-                  />
-                </div>
-                <div className="w-20">
-                  <input
-                    placeholder="Retries"
-                    type="number"
-                    value={maxRetries}
-                    onChange={(e) => setMaxRetries(parseInt(e.target.value) || 0)}
-                    className="field-input w-full"
-                  />
-                </div>
-              </div>
-              <div>
-                <textarea
-                  placeholder="Env vars (KEY=val, one per line). Secrets: use credential references, not raw values."
-                  value={envStr}
-                  onChange={(e) => setEnvStr(e.target.value)}
-                  rows={3}
-                  className="field-input w-full"
+
+                {createError ? (
+                  <p className="field-error" role="alert">
+                    {createError}
+                  </p>
+                ) : null}
+              </form>
+            </section>
+          ) : null}
+
+          <section>
+            <p className="kicker" style={{ marginBottom: '0.9rem' }}>
+              all jobs
+            </p>
+            {isError ? (
+              <ErrorPanel
+                title="Failed to load jobs"
+                message={errorMessage(error)}
+              />
+            ) : isLoading ? (
+              <SkeletonRows rows={4} />
+            ) : jobs.length === 0 ? (
+              <div className="panel">
+                <EmptyState
+                  icon={<ListChecks size={22} />}
+                  title="No jobs yet"
+                  hint={
+                    canOperate
+                      ? 'Create your first job above to run one-off or scheduled work.'
+                      : 'An operator can create jobs for this project.'
+                  }
                 />
               </div>
-              {createError && (
-                <p className="text-sm signal-fault">{createError}</p>
-              )}
-            </form>
-          )}
-
-          {jobs.length === 0 && !isFetching ? (
-            <p className="text-[var(--fg-muted)]">
-              No jobs yet. {canOperate ? 'Create your first job above.' : ''}
-            </p>
-          ) : (
-            <section className="panel overflow-hidden">
-              <div className="flex items-center border-b border-[var(--border)] px-4 py-2.5">
-                <p className="kicker m-0">
-                  {isFetching
-                    ? 'fetching...'
-                    : `${jobs.length} job${jobs.length !== 1 ? 's' : ''}`}
-                </p>
-              </div>
-              <ul className="m-0 list-none">
-                {jobs.map((j, i) => (
-                  <li
-                    key={j.id}
-                    className={`flex items-center gap-4 px-4 py-3 text-sm ${
-                      i > 0 ? 'border-t border-[var(--border)]' : ''
-                    }`}
+            ) : (
+              <div className="panel overflow-hidden">
+                <table className="dtable">
+                  <thead>
+                    <tr>
+                      <th>job</th>
+                      <th>source</th>
+                      <th>schedule</th>
+                      <th>next run</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {jobs.map((j) => {
+                      const hint = j.schedule ? cronHint(j.schedule) : null
+                      return (
+                        <tr key={j.id}>
+                          <td>
+                            <Link to="/jobs/$jobId" params={{ jobId: j.id }}>
+                              {j.name}
+                            </Link>
+                          </td>
+                          <td className="tnum text-faint">
+                            {sourceDisplay(j.source)}
+                          </td>
+                          <td>
+                            {j.schedule ? (
+                              <span className="cluster" style={{ gap: '0.4rem' }}>
+                                <Timer
+                                  size={13}
+                                  aria-hidden="true"
+                                  style={{ color: 'var(--fg-faint)' }}
+                                />
+                                <code className="tnum">{j.schedule}</code>
+                                {hint ? (
+                                  <span className="text-faint">{hint}</span>
+                                ) : null}
+                              </span>
+                            ) : (
+                              <span className="text-faint">manual</span>
+                            )}
+                          </td>
+                          <td className="tnum text-faint">
+                            {j.next_run_at
+                              ? formatRelative(j.next_run_at, Date.now())
+                              : '—'}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+                {isFetching ? (
+                  <p
+                    className="kicker"
+                    style={{ padding: '0.5rem 0.75rem', color: 'var(--fg-faint)' }}
                   >
-                    <span className="signal" aria-hidden="true" />
-                    <Link
-                      to="/jobs/$jobId"
-                      params={{ jobId: j.id }}
-                      className="min-w-0 flex-1 text-[var(--fg)] no-underline hover:underline"
-                    >
-                      <span className="font-semibold">{j.name}</span>
-                      <span className="ml-3 text-xs text-[var(--fg-muted)]">
-                        {sourceDisplay(j.source)}
-                      </span>
-                    </Link>
-                    {j.schedule && (
-                      <span className="text-xs text-[var(--fg-muted)]">
-                        {j.schedule}
-                        {cronHint(j.schedule) && (
-                          <span className="ml-1 opacity-60">
-                            ({cronHint(j.schedule)})
-                          </span>
-                        )}
-                      </span>
-                    )}
-                    {j.next_run_at && (
-                      <span className="tnum text-xs text-[var(--fg-muted)]">
-                        next {new Date(j.next_run_at).toLocaleString()}
-                      </span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
-        </>
+                    refreshing…
+                  </p>
+                ) : null}
+              </div>
+            )}
+          </section>
+        </div>
       )}
-    </main>
+    </div>
   )
 }
