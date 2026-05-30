@@ -23,6 +23,18 @@ use crate::logs::LogTailer;
 static DEPLOYMENT_LOG_STREAM_LIMIT: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(64)));
 
+/// Read-model for deployment responses: the persisted `Deployment` plus its
+/// resolved artifact (joined from the `artifacts` table). The domain
+/// `Deployment` deliberately has no artifact field — the link lives in a
+/// separate table — so the API attaches it here. `artifact` is `None` until the
+/// deploy pipeline acquires + links the artifact (`set_deployment_artifact`).
+#[derive(serde::Serialize)]
+struct DeploymentView {
+    #[serde(flatten)]
+    deployment: crate::domain::Deployment,
+    artifact: Option<crate::artifacts::ArtifactRecord>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/deployments", post(create_deployment))
@@ -132,12 +144,23 @@ async fn list_service_deployments(
     State(state): State<AppState>,
     principal: Principal,
     axum::extract::Path(service_id): axum::extract::Path<uuid::Uuid>,
-) -> Result<Json<Vec<crate::domain::Deployment>>, ApiError> {
+) -> Result<Json<Vec<DeploymentView>>, ApiError> {
     let Some(service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
     ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
-    Ok(Json(state.deployments.list_deployments(service_id)?))
+    let deployments = state.deployments.list_deployments(service_id)?;
+    let views = deployments
+        .into_iter()
+        .map(|deployment| {
+            let artifact = state.deployments.get_deployment_artifact(deployment.id)?;
+            Ok(DeploymentView {
+                deployment,
+                artifact,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok(Json(views))
 }
 
 /// `GET /v1/deployments/{deployment_id}` — fetch a single deployment row.
@@ -150,7 +173,7 @@ async fn get_deployment(
     State(state): State<AppState>,
     principal: Principal,
     axum::extract::Path(deployment_id): axum::extract::Path<uuid::Uuid>,
-) -> Result<Json<crate::domain::Deployment>, ApiError> {
+) -> Result<Json<DeploymentView>, ApiError> {
     let Some(deployment) = state.deployments.get_deployment(deployment_id)? else {
         return Err(ApiError::NotFound("deployment not found".to_string()));
     };
@@ -158,7 +181,11 @@ async fn get_deployment(
         return Err(ApiError::NotFound("service not found".to_string()));
     };
     ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
-    Ok(Json(deployment))
+    let artifact = state.deployments.get_deployment_artifact(deployment.id)?;
+    Ok(Json(DeploymentView {
+        deployment,
+        artifact,
+    }))
 }
 
 /// `GET /v1/deployments/{deployment_id}/logs` — SSE tail of the per-deployment

@@ -12,6 +12,7 @@ const DEPLOYMENT_STATE: Record<string, SemState> = {
   Pending: 'warn',
   Failed: 'fault',
   Stopped: 'muted',
+  Inactive: 'muted',
 }
 
 const RUN_STATE: Record<string, SemState> = {

@@ -135,6 +135,7 @@ export const DeploymentStatus = Schema.Literals([
   'Healthy',
   'Failed',
   'Stopped',
+  'Inactive',
 ])
 
 export const ArtifactRef = Schema.Struct({

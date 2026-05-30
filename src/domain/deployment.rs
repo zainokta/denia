@@ -39,6 +39,10 @@ pub enum DeploymentStatus {
     Healthy,
     Failed,
     Stopped,
+    /// A previously-promoted deployment that a newer deploy has replaced. Set on
+    /// the outgoing promoted row when a different deployment is promoted, so the
+    /// history shows exactly one live (`Healthy`) deployment per service.
+    Inactive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
