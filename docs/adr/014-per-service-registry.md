@@ -74,7 +74,9 @@ configured on each service").
   load the `Registry`, decrypt the optional `credential_ref` via
   `SopsSecretStore`, run `resolve_registry_auth`, compose
   `{endpoint}/{image_ref}`, then pull. The legacy `image` path keeps working
-  and decrypts `ExternalImageSource.credential` as Basic when set.
+  only for anonymous pulls. `ExternalImageSource.credential` is no longer
+  accepted for new service writes and deploy fails closed if an existing row
+  still contains it; authenticated image pulls must use a project `Registry`.
 
 - Add admin-only CRUD endpoints under
   `/v1/projects/{project_id}/registries`. Deleting a registry that any
@@ -90,7 +92,7 @@ configured on each service").
 
 - Operators manage registries per project. Multiple private registries can
   coexist; each service points at exactly one (or stays on the legacy
-  full-image path).
+  full-image anonymous path).
 - ECR / GAR tokens are short-lived. Operators must rotate them via an
   external hook (cron, deploy script). In-process SigV4 / metadata-server
   exchange remains deferred — adding `aws-sdk-ecr` / `gcp_auth` is a

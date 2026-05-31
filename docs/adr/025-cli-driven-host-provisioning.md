@@ -14,8 +14,16 @@ Split the installer along the build/provisioning seam:
 - `install.sh` keeps preflight, distro package install, rustup, node/pnpm, and `make install`. Roughly 200 lines.
 - All provisioning lives in `denia <subcommand>` (clap-driven): `setup`, `uninstall`, `status`, `doctor`, `rotate-token`. The daemon's run path (`denia` with no subcommand) is unchanged.
 - A root `Makefile` is the single build entry point. `install.sh`, CI, and contributors all call `make build` / `make install`.
+- Downloaded installer helper scripts use fresh `mktemp` paths, not predictable
+  names under `/tmp`.
+- Provisioning refuses symlinked config/data path components before applying
+  chmod/chown, and secret/config writes use same-directory random temp files
+  before atomic persist.
 
 The systemd unit content + TOML config schema are emitted from Rust templates embedded via `include_str!`, so changes track the binary version. `denia setup` is idempotent: re-run keeps keys + config, refreshes the unit.
+The generated management listener binds `127.0.0.1:7180` by default; operators
+must opt into wider exposure only behind a private network, tunnel, or a future
+control-plane TLS serving path.
 
 ## Consequences
 

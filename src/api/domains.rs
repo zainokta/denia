@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::State,
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
     routing::{delete, get, post},
 };
@@ -31,14 +31,35 @@ pub fn router() -> Router<AppState> {
 
 pub async fn challenge_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
+    let hostname = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(challenge_host_name)
+        .ok_or_else(|| ApiError::NotFound("not found".into()))?;
     let found = state.domains.get_service_domain_by_token(&token)?;
-    if found.is_some() {
+    if found.is_some_and(|domain| domain.hostname == hostname) {
         Ok(([(header::CONTENT_TYPE, "text/plain")], token).into_response())
     } else {
         Err(ApiError::NotFound("not found".into()))
     }
+}
+
+fn challenge_host_name(host: &str) -> Option<String> {
+    let host = host.trim();
+    let without_port = if host.matches(':').count() == 1 {
+        let (name, port) = host.rsplit_once(':')?;
+        if port.bytes().all(|b| b.is_ascii_digit()) {
+            name
+        } else {
+            host
+        }
+    } else {
+        host
+    };
+    crate::verification::validate_hostname(without_port).ok()
 }
 
 /// ACME HTTP-01 challenge responder.

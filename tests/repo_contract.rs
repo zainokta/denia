@@ -76,6 +76,28 @@ fn service_roundtrips_via_get_and_list() {
 }
 
 #[test]
+fn service_upsert_rejects_json_id_that_differs_from_existing_name_row() {
+    let store = migrated_store();
+    let project = default_project(&store);
+    let repo = SqliteServiceRepo::new(store.pool());
+    let victim = external_service(project.id, "victim");
+    let mut attacker = external_service(project.id, "attacker");
+
+    repo.put_service(victim.clone()).unwrap();
+    repo.put_service(attacker.clone()).unwrap();
+
+    attacker.id = victim.id;
+    let err = repo
+        .put_service(attacker)
+        .expect_err("poisoned service id must be rejected");
+    assert!(
+        err.to_string().contains("invalid column value")
+            || err.to_string().contains("sqlite error"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn service_get_missing_is_none() {
     let store = migrated_store();
     let repo = SqliteServiceRepo::new(store.pool());
@@ -208,6 +230,48 @@ fn job_roundtrip_and_run_lifecycle() {
     repo.update_job_run(run.id, denia::domain::JobRunStatus::Succeeded, Some(0))
         .unwrap();
     assert!(repo.active_run(job.id).unwrap().is_none());
+}
+
+#[test]
+fn job_put_rejects_existing_id_overwrite() {
+    let store = migrated_store();
+    let project = default_project(&store);
+    let other_project = seed_project(&store, "other-team");
+    let repo = SqliteJobRepo::new(store.pool());
+    let job = Job::new(
+        project.id,
+        "nightly",
+        ServiceSource::ExternalImage(ExternalImageSource {
+            image: "busybox".into(),
+            credential: None,
+            registry_id: None,
+            image_ref: None,
+        }),
+        None,
+    )
+    .unwrap();
+    repo.put_job(job.clone()).unwrap();
+
+    let mut poisoned = Job::new(
+        other_project.id,
+        "poisoned",
+        ServiceSource::ExternalImage(ExternalImageSource {
+            image: "busybox".into(),
+            credential: None,
+            registry_id: None,
+            image_ref: None,
+        }),
+        None,
+    )
+    .unwrap();
+    poisoned.id = job.id;
+
+    repo.put_job(poisoned)
+        .expect_err("job id overwrite must be rejected");
+    assert_eq!(
+        repo.get_job(job.id).unwrap().unwrap().project_id,
+        project.id
+    );
 }
 
 #[test]

@@ -248,7 +248,8 @@ token from `/v1/auth/login`. Routes enforce a project-scoped role minimum
 - `GET|POST /v1/services`, `GET /v1/services/{id}/{logs,metrics,requests,domains}`
 - `POST /v1/deployments`, `GET /v1/services/{id}/deployments`
 - `GET|POST /v1/jobs`, `POST /v1/jobs/{id}/run`, `GET /v1/jobs/{id}/runs`
-- `GET /.well-known/denia-challenge/{token}` (public domain verification)
+- `GET /.well-known/denia-challenge/{token}` (public domain verification;
+  token must match the request `Host`)
 
 ## Security
 

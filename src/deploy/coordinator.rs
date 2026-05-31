@@ -669,20 +669,21 @@ where
     }
 }
 
-/// Resolve `(full_image_ref, auth)` for an external-image deploy. Replicates
-/// the historic branching that lived inline in
-/// `deploy_external_image_source`: either the service references a registry
-/// row (which carries `auth_kind` + optional encrypted credential ref) or
-/// a legacy `credential`/`image` pair (basic auth / anonymous).
+/// Resolve `(full_image_ref, auth)` for an external-image deploy. Authenticated
+/// images must reference a registry row, which carries `auth_kind` plus an
+/// optional encrypted credential ref; legacy inline credentials fail closed.
 async fn resolve_external_auth(
     repos: &DeploymentRepos,
     source: &crate::domain::ExternalImageSource,
-    project_id: Uuid,
+    _project_id: Uuid,
     secret_store: &crate::secrets::SopsSecretStore,
     runner: &dyn CommandRunner,
     sops_binary: &std::path::Path,
     age_key_file: &std::path::Path,
 ) -> Result<(String, RegistryAuth), DeployError> {
+    if source.credential.is_some() {
+        return Err(DeployError::UnsupportedServiceSource);
+    }
     if let Some(registry_id) = source.registry_id {
         let registry = repos
             .registries
@@ -713,20 +714,7 @@ async fn resolve_external_auth(
         let (full_ref, _) = source
             .resolve_ref("")
             .map_err(|_| DeployError::UnsupportedServiceSource)?;
-        let auth = match &source.credential {
-            Some(secret_ref) => {
-                let payload = secret_store
-                    .decrypt(runner, sops_binary, age_key_file, project_id, secret_ref)
-                    .await?;
-                crate::oci::credentials::resolve_registry_auth(
-                    crate::domain::RegistryAuthKind::Basic,
-                    Some(&payload),
-                )
-                .map_err(DeployError::RegistryAuthResolution)?
-            }
-            None => RegistryAuth::Anonymous,
-        };
-        Ok((full_ref, auth))
+        Ok((full_ref, RegistryAuth::Anonymous))
     }
 }
 

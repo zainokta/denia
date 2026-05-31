@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Component, Path};
 
 use crate::domain::RuntimeStartRequest;
 use crate::runtime::error::RuntimeError;
@@ -32,7 +32,7 @@ pub(crate) fn validate_process_spec(
             argv0: process.argv[0].clone(),
         });
     }
-    if !process.workdir.starts_with('/') {
+    if !is_safe_absolute_workdir(&process.workdir) {
         return Err(RuntimeError::InvalidWorkdir {
             workdir: process.workdir.clone(),
         });
@@ -43,6 +43,24 @@ pub(crate) fn validate_process_spec(
         }
     }
     Ok(())
+}
+
+fn is_safe_absolute_workdir(workdir: &str) -> bool {
+    if workdir.as_bytes().contains(&0) {
+        return false;
+    }
+    if workdir
+        .split('/')
+        .skip(1)
+        .any(|component| matches!(component, "." | ".."))
+    {
+        return false;
+    }
+    let mut components = Path::new(workdir).components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return false;
+    }
+    components.all(|component| matches!(component, Component::Normal(_)))
 }
 
 pub(crate) fn validate_resource_limits(request: &RuntimeStartRequest) -> Result<(), RuntimeError> {
@@ -71,4 +89,43 @@ pub(crate) fn validate_resource_limits(request: &RuntimeStartRequest) -> Result<
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process_with_workdir(workdir: &str) -> LinuxRuntimeProcessSpec {
+        LinuxRuntimeProcessSpec {
+            argv: vec!["/bin/sh".to_string()],
+            env: Vec::new(),
+            workdir: workdir.to_string(),
+        }
+    }
+
+    #[test]
+    fn validate_process_spec_rejects_traversing_workdirs() {
+        for workdir in ["/../sock/pwn", "/app/../sock", "/./app"] {
+            let err = validate_process_spec(
+                &process_with_workdir(workdir),
+                Path::new("/tmp/manifest.json"),
+            )
+            .expect_err("traversing workdir must be rejected");
+            assert!(
+                matches!(err, RuntimeError::InvalidWorkdir { .. }),
+                "unexpected error for {workdir}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_process_spec_allows_absolute_normal_workdirs() {
+        for workdir in ["/", "/srv/app"] {
+            validate_process_spec(
+                &process_with_workdir(workdir),
+                Path::new("/tmp/manifest.json"),
+            )
+            .expect("normal absolute workdir");
+        }
+    }
 }

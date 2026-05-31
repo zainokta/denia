@@ -27,7 +27,9 @@ mirrors a gap Dokploy closes with domain verification.
   generated dynamic config.
 - The challenge is served by the Denia control plane at the public route
   `GET /.well-known/denia-challenge/{token}` (no auth — the token is the
-  secret) returning `200 text/plain` with the token body, or `404`.
+  secret) returning `200 text/plain` with the token body, or `404`. The request
+  `Host` header must match the hostname stored for that token; a valid token
+  presented for another hostname returns `404`.
 - Traefik exposes the challenge via a single global router matching
   `PathPrefix(`/.well-known/denia-challenge`)` on the `web` entrypoint at
   priority `1000`, forwarding to `IngressRenderOptions.control_backend_addr`.
@@ -40,6 +42,10 @@ mirrors a gap Dokploy closes with domain verification.
   `failed` with a short `last_error`. Re-triggering a `failed` domain retries.
   One in-flight verification per domain is enforced via an in-memory
   `HashSet<Uuid>` guard (409 on concurrent attempt).
+- The verifier rejects internal destinations before the HTTP fetch, including
+  IPv4 private/link-local/loopback/CGNAT and IPv6 loopback, link-local,
+  unique-local (`fc00::/7`), multicast (`ff00::/8`), and IPv4-mapped internal
+  addresses.
 - `tls_enabled` stays per-service. TLS routers render only for verified
   domains, so ACME is never asked for an unverified host.
 

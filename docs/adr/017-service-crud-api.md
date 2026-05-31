@@ -36,12 +36,17 @@ supply `ServiceConfig.id`, conflicts with that rule for the create case.
   server-side inside `put_service`:
   - If the incoming `id` is nil, reuse the existing service's id for the same
     `(project_id, name)` when one exists; otherwise mint a fresh `Uuid::now_v7()`.
-  - If the incoming `id` is non-nil, keep it (the update path).
+  - If the incoming `id` is non-nil, it is an update path only when an existing
+    row with that id has the same `project_id` and `name`. Otherwise the request
+    is rejected as `400 Bad Request`.
 
   The persistence layer upserts on `ON CONFLICT(project_id, name)` and never
   updates the primary-key `id`. Minting a fresh id for a row that already exists
   would leave `config_json.id` pointing at a different value than the row's PK,
   so the create path must reuse the existing id rather than generate a new one.
+  The repository also validates that `config_json.id`, `project_id`, and `name`
+  match the SQL row before returning a service, so poisoned JSON cannot drive
+  log, lifecycle, route, or runtime side effects under another service id.
 
   This lets the web client create a service by POSTing a body with no `id`, while
   updates keep their id stable.
@@ -54,7 +59,7 @@ supply `ServiceConfig.id`, conflicts with that rule for the create case.
 - A single POST endpoint serves both create and update; the client never
   generates IDs, preserving the UUIDv7 invariant and SQLite B-tree locality.
 - `put_service` carries slightly more logic: a lookup by `(project_id, name)`
-  when the incoming id is nil.
+  when the incoming id is nil, and a lookup by `id` for non-nil update bodies.
 - `GET` and `DELETE` follow the project-scoped RBAC split already used elsewhere
   (Viewer can read, Operator can mutate).
 

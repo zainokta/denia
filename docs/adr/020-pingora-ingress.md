@@ -36,8 +36,10 @@ file-provider config) and the loopback-bridge transport are removed.
 - **`:80` challenge + redirect:** `request_filter` intercepts
   `/.well-known/acme-challenge/*` and `/.well-known/denia-challenge/*`
   unconditionally (before host routing) and proxies them to the control-plane
-  backend (loopback axum), which serves the tokens. A `tls_enabled` host on `:80`
-  gets a 308 redirect to `https://`.
+  backend (loopback axum). ACME tokens are served by token lookup. Denia domain
+  verification tokens are served only when the request `Host` matches the
+  hostname stored for that token. A `tls_enabled` host on `:80` gets a 308
+  redirect to `https://`.
 - **TLS:** the `:443` listener uses a `TlsAccept::certificate_callback` that
   selects a cert by SNI from an `ArcSwap<CertStore>` at handshake; unknown/absent
   SNI declines cleanly (`TLSHandshakeFailure`, never a wrong cert). Cert

@@ -13,6 +13,20 @@ use crate::repo::sqlite::pool::SqlitePool;
 use crate::state::{SqliteStore, StateError};
 
 pub(super) fn put_service_q(conn: &Connection, config: &ServiceConfig) -> Result<(), RepoError> {
+    let existing_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM services WHERE project_id = ?1 AND name = ?2",
+            params![config.project_id.to_string(), config.name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing_id) = existing_id
+        && existing_id != config.id.to_string()
+    {
+        return Err(RepoError::InvalidColumn(
+            "services.config_json.id does not match existing row id".to_string(),
+        ));
+    }
     conn.execute(
         r#"
             INSERT INTO services (id, project_id, name, config_json)
@@ -31,11 +45,20 @@ pub(super) fn put_service_q(conn: &Connection, config: &ServiceConfig) -> Result
 }
 
 pub(super) fn list_services_q(conn: &Connection) -> Result<Vec<ServiceConfig>, RepoError> {
-    let mut statement = conn.prepare("SELECT config_json FROM services ORDER BY name")?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut statement =
+        conn.prepare("SELECT id, project_id, name, config_json FROM services ORDER BY name")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
     let mut services = Vec::new();
     for row in rows {
-        services.push(serde_json::from_str(&row?)?);
+        let (id, project_id, name, json) = row?;
+        services.push(parse_service_row(&id, &project_id, &name, &json)?);
     }
     Ok(services)
 }
@@ -44,17 +67,16 @@ pub(super) fn get_service_q(
     conn: &Connection,
     service_id: Uuid,
 ) -> Result<Option<ServiceConfig>, RepoError> {
-    let value: Option<String> = conn
+    let value: Option<(String, String, String, String)> = conn
         .query_row(
-            "SELECT config_json FROM services WHERE id = ?1",
+            "SELECT id, project_id, name, config_json FROM services WHERE id = ?1",
             params![service_id.to_string()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
     value
-        .map(|json| serde_json::from_str(&json))
+        .map(|(id, project_id, name, json)| parse_service_row(&id, &project_id, &name, &json))
         .transpose()
-        .map_err(Into::into)
 }
 
 pub(super) fn delete_service_q(conn: &Connection, service_id: Uuid) -> Result<(), RepoError> {
@@ -63,6 +85,33 @@ pub(super) fn delete_service_q(conn: &Connection, service_id: Uuid) -> Result<()
         params![service_id.to_string()],
     )?;
     Ok(())
+}
+
+fn parse_service_row(
+    id: &str,
+    project_id: &str,
+    name: &str,
+    json: &str,
+) -> Result<ServiceConfig, RepoError> {
+    let row_id = Uuid::parse_str(id)?;
+    let row_project_id = Uuid::parse_str(project_id)?;
+    let service: ServiceConfig = serde_json::from_str(json)?;
+    if service.id != row_id {
+        return Err(RepoError::InvalidColumn(
+            "services.config_json.id does not match row id".to_string(),
+        ));
+    }
+    if service.project_id != row_project_id {
+        return Err(RepoError::InvalidColumn(
+            "services.config_json.project_id does not match row project_id".to_string(),
+        ));
+    }
+    if service.name != name {
+        return Err(RepoError::InvalidColumn(
+            "services.config_json.name does not match row name".to_string(),
+        ));
+    }
+    Ok(service)
 }
 
 impl SqliteStore {

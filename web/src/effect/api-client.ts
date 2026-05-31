@@ -12,6 +12,7 @@ import {
   Deployment,
   Deployments,
   Job,
+  JobInput,
   JobRun,
   JobRuns,
   Jobs,
@@ -174,7 +175,7 @@ export class ApiClient extends Context.Service<
       id: string,
     ) => Effect.Effect<Job, ApiError | DecodeError>
     readonly createJob: (
-      input: Job,
+      input: JobInput,
     ) => Effect.Effect<Job, ApiError | DecodeError>
     readonly deleteJob: (id: string) => Effect.Effect<void, ApiError>
     readonly runJob: (
@@ -698,7 +699,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, Job)
       })
 
-    const createJob = (input: Job) =>
+    const createJob = (input: JobInput) =>
       Effect.gen(function* () {
         const response = yield* http
           .post(url('/v1/jobs'), {

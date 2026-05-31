@@ -43,4 +43,13 @@ mod tests {
             "expected age key path in rendered config:\n{toml_str}"
         );
     }
+
+    #[test]
+    fn rendered_config_binds_management_api_to_loopback() {
+        let ctx = InstallContext::from_user("rakei", "/home/rakei");
+        let toml_str = render_config_toml(&ctx);
+        let parsed: FileConfig =
+            toml::from_str(&toml_str).expect("rendered config.toml must parse as FileConfig");
+        assert_eq!(parsed.bind_addr.as_deref(), Some("127.0.0.1:7180"));
+    }
 }

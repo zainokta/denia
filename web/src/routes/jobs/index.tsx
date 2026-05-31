@@ -20,7 +20,6 @@ const listJobs = (projectId: string) =>
   })
 
 const createJob = (input: {
-  id: string
   project_id: string
   name: string
   source: {
@@ -34,9 +33,6 @@ const createJob = (input: {
   env: Array<[string, string]>
   schedule: string | null
   max_retries: number
-  next_run_at: null
-  last_enqueued_at: null
-  created_at: string
 }) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
@@ -142,7 +138,6 @@ export function JobsIndex() {
             }
       return runQuery(
         createJob({
-          id: crypto.randomUUID(),
           project_id: projectId,
           name,
           source,
@@ -150,9 +145,6 @@ export function JobsIndex() {
           env,
           schedule: schedule.trim() || null,
           max_retries: maxRetries,
-          next_run_at: null,
-          last_enqueued_at: null,
-          created_at: new Date().toISOString(),
         }),
       )
     },

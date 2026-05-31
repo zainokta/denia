@@ -15,8 +15,7 @@ use crate::state::{SqliteStore, StateError};
 pub(super) fn put_job_q(conn: &Connection, job: &Job) -> Result<(), RepoError> {
     let json = serde_json::to_string(job)?;
     conn.execute(
-        "INSERT INTO jobs (id, project_id, name, config_json) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json",
+        "INSERT INTO jobs (id, project_id, name, config_json) VALUES (?1, ?2, ?3, ?4)",
         params![
             job.id.to_string(),
             job.project_id.to_string(),
@@ -28,28 +27,33 @@ pub(super) fn put_job_q(conn: &Connection, job: &Job) -> Result<(), RepoError> {
 }
 
 pub(super) fn get_job_q(conn: &Connection, job_id: Uuid) -> Result<Option<Job>, RepoError> {
-    let value: Option<String> = conn
+    let value: Option<(String, String, String)> = conn
         .query_row(
-            "SELECT config_json FROM jobs WHERE id = ?1",
+            "SELECT id, project_id, config_json FROM jobs WHERE id = ?1",
             params![job_id.to_string()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
     value
-        .map(|json| serde_json::from_str(&json))
+        .map(|(id, project_id, json)| parse_job_row(&id, &project_id, &json))
         .transpose()
-        .map_err(Into::into)
 }
 
 pub(super) fn list_jobs_q(conn: &Connection, project_id: Uuid) -> Result<Vec<Job>, RepoError> {
-    let mut stmt =
-        conn.prepare("SELECT config_json FROM jobs WHERE project_id = ?1 ORDER BY name")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, config_json FROM jobs WHERE project_id = ?1 ORDER BY name",
+    )?;
     let rows = stmt.query_map(params![project_id.to_string()], |row| {
-        row.get::<_, String>(0)
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     })?;
     let mut jobs = Vec::new();
     for row in rows {
-        jobs.push(serde_json::from_str(&row?)?);
+        let (id, project_id, json) = row?;
+        jobs.push(parse_job_row(&id, &project_id, &json)?);
     }
     Ok(jobs)
 }
@@ -167,12 +171,18 @@ pub(super) fn claim_due_jobs_q(
     conn: &Connection,
     now: chrono::DateTime<Utc>,
 ) -> Result<Vec<Job>, RepoError> {
-    let mut stmt = conn.prepare("SELECT config_json FROM jobs")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut stmt = conn.prepare("SELECT id, project_id, config_json FROM jobs")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
     let mut due = Vec::new();
     for row in rows {
-        let json = row?;
-        let job: Job = serde_json::from_str(&json)?;
+        let (id, project_id, json) = row?;
+        let job = parse_job_row(&id, &project_id, &json)?;
         if job.next_run_at.map(|next| next <= now).unwrap_or(false) {
             due.push(job);
         }
@@ -194,6 +204,23 @@ pub(super) fn set_job_next_run_q(
         params![serde_json::to_string(&job)?, job_id.to_string()],
     )?;
     Ok(())
+}
+
+fn parse_job_row(id: &str, project_id: &str, json: &str) -> Result<Job, RepoError> {
+    let row_id = Uuid::parse_str(id)?;
+    let row_project_id = Uuid::parse_str(project_id)?;
+    let job: Job = serde_json::from_str(json)?;
+    if job.id != row_id {
+        return Err(RepoError::InvalidColumn(
+            "jobs.config_json.id does not match row id".to_string(),
+        ));
+    }
+    if job.project_id != row_project_id {
+        return Err(RepoError::InvalidColumn(
+            "jobs.config_json.project_id does not match row project_id".to_string(),
+        ));
+    }
+    Ok(job)
 }
 
 impl SqliteStore {

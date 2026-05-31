@@ -276,6 +276,7 @@ async fn challenge_endpoint_returns_token_body() {
             http::Request::builder()
                 .method(http::Method::GET)
                 .uri(format!("/.well-known/denia-challenge/{token}"))
+                .header(http::header::HOST, "challenge.example.com")
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -298,6 +299,47 @@ async fn challenge_endpoint_returns_token_body() {
         .await
         .unwrap();
     assert_eq!(std::str::from_utf8(&bytes).unwrap(), token);
+}
+
+#[tokio::test]
+async fn challenge_endpoint_requires_host_to_match_token_hostname() {
+    let store = make_store();
+    let service = seed_service(&store, "web");
+    let app = build_app_with_verifier(store, Arc::new(FakeVerifier { ok: true }));
+
+    let create_resp = post_domain(app.clone(), service.id, "owned.example.com").await;
+    assert_eq!(create_resp.status(), http::StatusCode::CREATED);
+    let created = body_json(create_resp).await;
+    let token = created["challenge_token"]
+        .as_str()
+        .expect("challenge_token");
+
+    let wrong_host = app
+        .clone()
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri(format!("/.well-known/denia-challenge/{token}"))
+                .header(http::header::HOST, "other.example.com")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_host.status(), http::StatusCode::NOT_FOUND);
+
+    let correct_host = app
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri(format!("/.well-known/denia-challenge/{token}"))
+                .header(http::header::HOST, "owned.example.com")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(correct_host.status(), http::StatusCode::OK);
 }
 
 // ---------------------------------------------------------------------------
