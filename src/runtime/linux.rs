@@ -24,7 +24,8 @@ use crate::runtime::plan::{
 };
 use crate::runtime::runtime_trait::Runtime;
 use crate::runtime::validation::{
-    validate_process_spec, validate_resource_limits, validate_service_name,
+    validate_environment_keys, validate_process_spec, validate_resource_limits,
+    validate_service_name,
 };
 use crate::syscall::caps;
 use crate::syscall::chown;
@@ -178,6 +179,11 @@ impl LinuxRuntime {
         for (key, value) in &request.env {
             env_map.insert(key.clone(), value.clone());
         }
+        let merged_env_for_validation: Vec<(String, String)> = env_map
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        validate_environment_keys(&merged_env_for_validation)?;
         let service_dir = self.runtime_dir.join(request.service_id.to_string());
         let deployment_dir = service_dir.join(request.deployment_id.to_string());
         let replica_dir = deployment_dir.join(request.replica_index.to_string());

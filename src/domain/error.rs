@@ -18,6 +18,8 @@ pub enum DomainError {
     InvalidHostname(String),
     #[error("registry endpoint cannot be empty")]
     RegistryMissingEndpoint,
+    #[error("invalid registry endpoint: {0}")]
+    InvalidRegistryEndpoint(String),
     #[error("registry credential is required for non-anonymous auth")]
     RegistryMissingCredential,
     #[error("external image source has both legacy image and registry_id/image_ref set")]

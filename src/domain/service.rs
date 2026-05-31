@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::project::Project;
+use crate::domain::registry::validate_legacy_image_registry_host;
 use crate::secrets::SecretRef;
 
 /// Marker substituted for env values when redacting for lower-privilege callers.
@@ -173,6 +174,9 @@ impl ExternalImageSource {
         }
         if !registry && !legacy {
             return Err(DomainError::RegistrySourceMissing);
+        }
+        if legacy {
+            validate_legacy_image_registry_host(&self.image)?;
         }
         Ok(())
     }
@@ -506,5 +510,32 @@ mod tests {
             only_image_ref.validate().unwrap_err(),
             DomainError::RegistrySourceMissing
         );
+    }
+
+    #[test]
+    fn external_image_source_rejects_local_explicit_registry_hosts() {
+        for image in [
+            "localhost:5000/acme/web:1",
+            "127.0.0.1:5000/acme/web:1",
+            "10.0.0.5/acme/web:1",
+            "169.254.169.254/latest:tag",
+        ] {
+            let source = ExternalImageSource {
+                image: image.to_string(),
+                credential: None,
+                registry_id: None,
+                image_ref: None,
+            };
+            assert!(source.validate().is_err(), "{image} should be rejected");
+        }
+
+        ExternalImageSource {
+            image: "busybox:latest".to_string(),
+            credential: None,
+            registry_id: None,
+            image_ref: None,
+        }
+        .validate()
+        .expect("default registry shorthand remains valid");
     }
 }

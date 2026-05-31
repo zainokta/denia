@@ -72,11 +72,13 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
                 && parent.starts_with(rootfs_dir)
                 && parent.exists()
             {
+                ensure_existing_dir_no_symlink(rootfs_dir, parent)?;
                 for child in fs::read_dir(parent)? {
                     let child = child?;
                     let child_path = child.path();
                     if child_path != safe_path {
-                        if child_path.is_dir() {
+                        let meta = fs::symlink_metadata(&child_path)?;
+                        if meta.is_dir() {
                             let _ = fs::remove_dir_all(&child_path);
                         } else {
                             let _ = fs::remove_file(&child_path);
@@ -89,8 +91,11 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
 
         if let Some(stripped) = file_name.strip_prefix(".wh.") {
             if let Some(parent) = safe_path.parent() {
+                if parent.exists() {
+                    ensure_existing_dir_no_symlink(rootfs_dir, parent)?;
+                }
                 let target = parent.join(stripped);
-                if target.starts_with(rootfs_dir) && target.exists() {
+                if target.starts_with(rootfs_dir) && fs::symlink_metadata(&target).is_ok() {
                     pending_whiteouts.push((target, safe_path.clone()));
                 }
             }
@@ -99,12 +104,15 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
 
         let is_symlink = entry.header().entry_type().is_symlink();
         if entry.header().entry_type().is_dir() {
-            fs::create_dir_all(&safe_path)?;
+            create_dir_all_no_symlink(rootfs_dir, &safe_path)?;
         } else if is_symlink {
             let target = entry
                 .link_name()?
                 .ok_or_else(|| OciError::Io(std::io::Error::other("symlink without target")))?;
             validate_symlink_target(&target, rootfs_dir)?;
+            if let Some(parent) = safe_path.parent() {
+                create_dir_all_no_symlink(rootfs_dir, parent)?;
+            }
             let _ = fs::remove_file(&safe_path);
             std::os::unix::fs::symlink(&target, &safe_path)?;
         } else {
@@ -125,7 +133,7 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
                 ))));
             }
             if let Some(parent) = safe_path.parent() {
-                fs::create_dir_all(parent)?;
+                create_dir_all_no_symlink(rootfs_dir, parent)?;
             }
             // Unlink any prior file/symlink at this path so File::create
             // cannot follow a stale symlink (from an earlier layer) out of
@@ -156,8 +164,10 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
     }
 
     for (target, _) in pending_whiteouts {
-        if target.starts_with(rootfs_dir) && target.exists() {
-            if target.is_dir() {
+        if target.starts_with(rootfs_dir)
+            && let Ok(meta) = fs::symlink_metadata(&target)
+        {
+            if meta.is_dir() {
                 let _ = fs::remove_dir_all(&target);
             } else {
                 let _ = fs::remove_file(&target);
@@ -220,6 +230,78 @@ fn safe_join(root: &Path, entry: &Path) -> Result<PathBuf, OciError> {
     Ok(joined)
 }
 
+fn create_dir_all_no_symlink(root: &Path, dir: &Path) -> Result<(), OciError> {
+    if !dir.starts_with(root) {
+        return Err(OciError::UnsafePath(format!(
+            "path traversal rejected: {}",
+            dir.display()
+        )));
+    }
+    let relative = dir
+        .strip_prefix(root)
+        .map_err(|_| OciError::UnsafePath(format!("path traversal rejected: {}", dir.display())))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            continue;
+        }
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(OciError::UnsafePath(format!(
+                    "symlink prefix rejected: {}",
+                    current.display()
+                )));
+            }
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(OciError::UnsafePath(format!(
+                    "non-directory prefix rejected: {}",
+                    current.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current)?;
+            }
+            Err(error) => return Err(OciError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
+fn ensure_existing_dir_no_symlink(root: &Path, dir: &Path) -> Result<(), OciError> {
+    if !dir.starts_with(root) {
+        return Err(OciError::UnsafePath(format!(
+            "path traversal rejected: {}",
+            dir.display()
+        )));
+    }
+    let relative = dir
+        .strip_prefix(root)
+        .map_err(|_| OciError::UnsafePath(format!("path traversal rejected: {}", dir.display())))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            continue;
+        }
+        current.push(component);
+        let meta = fs::symlink_metadata(&current)?;
+        if meta.file_type().is_symlink() {
+            return Err(OciError::UnsafePath(format!(
+                "symlink prefix rejected: {}",
+                current.display()
+            )));
+        }
+        if !meta.is_dir() {
+            return Err(OciError::UnsafePath(format!(
+                "non-directory prefix rejected: {}",
+                current.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_symlink_target(target: &Path, rootfs_dir: &Path) -> Result<(), OciError> {
     // Symlink targets are stored verbatim. Absolute targets and `..`
     // components are normal in OCI base images (e.g. `/usr/bin/awk ->
@@ -276,6 +358,26 @@ mod tests {
         }
     }
 
+    fn gz_symlink_layer(dir: &Path, name: &str, link: &str, target: &Path) -> LayerBlob {
+        let mut tar = Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_size(0);
+        h.set_mode(0o777);
+        h.set_cksum();
+        tar.append_link(&mut h, link, target).unwrap();
+        let raw = tar.into_inner().unwrap();
+        let mut enc = GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&raw).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, enc.finish().unwrap()).unwrap();
+        LayerBlob {
+            digest: "sha256:test".into(),
+            compression: LayerCompression::Gzip,
+            path,
+        }
+    }
+
     #[test]
     fn single_gzip_layer_extracts() {
         let dir = tempfile::tempdir().unwrap();
@@ -305,6 +407,41 @@ mod tests {
         let l2 = gz_layer(dir.path(), "l2.tar.gz", &[(".wh.foo", b"")]);
         TarRootfsUnpacker::new().unpack(&[l1, l2], &rootfs).unwrap();
         assert!(!rootfs.join("foo").exists());
+    }
+
+    #[test]
+    fn rejects_file_write_through_symlink_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        let host_target = dir.path().join("host-target");
+        fs::create_dir_all(&host_target).unwrap();
+
+        let l1 = gz_symlink_layer(dir.path(), "l1.tar.gz", "escape", &host_target);
+        let l2 = gz_layer(dir.path(), "l2.tar.gz", &[("escape/pwned.txt", b"owned")]);
+        let err = TarRootfsUnpacker::new()
+            .unpack(&[l1, l2], &rootfs)
+            .expect_err("symlink prefixes must not be followed during extraction");
+
+        assert!(matches!(err, OciError::UnsafePath(_)), "{err:?}");
+        assert!(!host_target.join("pwned.txt").exists());
+    }
+
+    #[test]
+    fn rejects_whiteout_through_symlink_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        let host_target = dir.path().join("host-target");
+        fs::create_dir_all(&host_target).unwrap();
+        fs::write(host_target.join("victim"), b"keep").unwrap();
+
+        let l1 = gz_symlink_layer(dir.path(), "l1.tar.gz", "escape", &host_target);
+        let l2 = gz_layer(dir.path(), "l2.tar.gz", &[("escape/.wh.victim", b"")]);
+        let err = TarRootfsUnpacker::new()
+            .unpack(&[l1, l2], &rootfs)
+            .expect_err("whiteout parents must not follow symlink prefixes");
+
+        assert!(matches!(err, OciError::UnsafePath(_)), "{err:?}");
+        assert_eq!(fs::read(host_target.join("victim")).unwrap(), b"keep");
     }
 
     #[test]

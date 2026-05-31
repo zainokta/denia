@@ -17,14 +17,12 @@ IFS=$'\n\t'
 readonly DENIA_BIN="/usr/local/bin/denia"
 readonly DENIA_BUILD_HOME="/usr/local/src/denia-build"
 
-# rustup-init official URL. Trust boundary: it is the upstream Rust project's
-# canonical bootstrap; we still verify against an embedded SHA256 when one is
-# pinned via DENIA_RUSTUP_SHA256, otherwise we log that the check was skipped
-# (see step_install_rust).
 readonly RUSTUP_INIT_URL="https://sh.rustup.rs"
 
 # Node 22 LTS; pnpm is bootstrapped via corepack which ships with Node >= 16.
 readonly NODE_MAJOR="22"
+readonly NODESOURCE_SETUP_URL="https://deb.nodesource.com/setup_${NODE_MAJOR}.x"
+readonly PNPM_VERSION="10.25.0"
 
 # ----------------------------------------------------------------------------
 # CLI flags
@@ -313,10 +311,13 @@ step_install_rust() {
         return 0
     fi
 
-    # rustup-init: official upstream Rust bootstrap. We do not pipe an
-    # unverified script blindly: we fetch to a tempfile, optionally verify
-    # against DENIA_RUSTUP_SHA256, then execute with explicit flags. No
-    # `curl | sh`.
+    # rustup-init: fetch to a tempfile, verify against an operator-pinned
+    # SHA256, then execute with explicit flags. No `curl | sh`.
+    if [[ -z "${DENIA_RUSTUP_SHA256:-}" ]]; then
+        fail "DENIA_RUSTUP_SHA256 must be set before installing Rust via rustup.
+  Re-run with DENIA_RUSTUP_SHA256=<known-good sha256 for ${RUSTUP_INIT_URL}>,
+  or preinstall cargo at ${CARGO_HOME}/bin/cargo."
+    fi
     local tmp
     tmp="$(/usr/bin/mktemp)"
     # shellcheck disable=SC2064 # we want $tmp expanded now, this trap is local
@@ -324,17 +325,12 @@ step_install_rust() {
 
     run_cmd /usr/bin/curl --proto '=https' --tlsv1.2 -sSfL "${RUSTUP_INIT_URL}" -o "${tmp}"
 
-    if [[ -n "${DENIA_RUSTUP_SHA256:-}" ]]; then
-        local actual
-        actual="$(/usr/bin/sha256sum "${tmp}" | /usr/bin/awk '{print $1}')"
-        if [[ "${actual}" != "${DENIA_RUSTUP_SHA256}" ]]; then
-            fail "rustup-init sha256 mismatch: got ${actual}, expected ${DENIA_RUSTUP_SHA256}"
-        fi
-        ok "rustup-init sha256 verified"
-    else
-        warn "DENIA_RUSTUP_SHA256 not set; skipping rustup-init checksum verification.
-  Set DENIA_RUSTUP_SHA256=<known-good> for a fully pinned install."
+    local actual
+    actual="$(/usr/bin/sha256sum "${tmp}" | /usr/bin/awk '{print $1}')"
+    if [[ "${actual}" != "${DENIA_RUSTUP_SHA256}" ]]; then
+        fail "rustup-init sha256 mismatch: got ${actual}, expected ${DENIA_RUSTUP_SHA256}"
     fi
+    ok "rustup-init sha256 verified"
 
     run_cmd /bin/sh "${tmp}" --default-toolchain stable --profile minimal -y \
         --no-modify-path
@@ -377,7 +373,17 @@ step_install_node() {
                     nodesource_setup="$(mktemp -t denia-nodesource.XXXXXX)"
                     trap 'rm -f "${nodesource_setup:-}"' RETURN
                 fi
-                run_cmd /usr/bin/curl --proto '=https' --tlsv1.2 -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o "${nodesource_setup}"
+                if [[ -z "${DENIA_NODESOURCE_SETUP_SHA256:-}" ]]; then
+                    fail "DENIA_NODESOURCE_SETUP_SHA256 must be set before executing ${NODESOURCE_SETUP_URL}.
+  Re-run with DENIA_NODESOURCE_SETUP_SHA256=<known-good sha256>, or preinstall Node ${NODE_MAJOR}."
+                fi
+                run_cmd /usr/bin/curl --proto '=https' --tlsv1.2 -fsSL "${NODESOURCE_SETUP_URL}" -o "${nodesource_setup}"
+                local nodesource_actual
+                nodesource_actual="$(/usr/bin/sha256sum "${nodesource_setup}" | /usr/bin/awk '{print $1}')"
+                if [[ "${nodesource_actual}" != "${DENIA_NODESOURCE_SETUP_SHA256}" ]]; then
+                    fail "NodeSource setup sha256 mismatch: got ${nodesource_actual}, expected ${DENIA_NODESOURCE_SETUP_SHA256}"
+                fi
+                ok "NodeSource setup sha256 verified"
                 run_cmd /bin/bash "${nodesource_setup}"
                 run_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
                 run_cmd rm -f "${nodesource_setup}"
@@ -403,10 +409,10 @@ step_install_node() {
     # Enable corepack (ships with Node) for a pinned, repo-local pnpm.
     if command -v corepack >/dev/null 2>&1; then
         run_cmd corepack enable
-        run_cmd corepack prepare pnpm@latest --activate
+        run_cmd corepack prepare "pnpm@${PNPM_VERSION}" --activate
         ok "pnpm via corepack"
     else
-        run_cmd npm install -g pnpm
+        run_cmd npm install -g "pnpm@${PNPM_VERSION}"
         ok "pnpm via npm -g (corepack unavailable)"
     fi
 }

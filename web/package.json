@@ -1,6 +1,7 @@
 {
   "name": "my-tanstack-app",
   "private": true,
+  "packageManager": "pnpm@10.25.0",
   "type": "module",
   "imports": {
     "#/*": "./src/*"
@@ -15,13 +16,13 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.18",
-    "@tanstack/react-devtools": "latest",
-    "@tanstack/react-query": "latest",
-    "@tanstack/react-query-devtools": "latest",
-    "@tanstack/react-router": "latest",
-    "@tanstack/react-router-devtools": "latest",
-    "@tanstack/react-router-ssr-query": "latest",
-    "@tanstack/react-start": "latest",
+    "@tanstack/react-devtools": "0.10.5",
+    "@tanstack/react-query": "5.100.14",
+    "@tanstack/react-query-devtools": "5.100.14",
+    "@tanstack/react-router": "1.170.8",
+    "@tanstack/react-router-devtools": "1.167.0",
+    "@tanstack/react-router-ssr-query": "1.167.0",
+    "@tanstack/react-start": "1.168.11",
     "@tanstack/router-plugin": "^1.132.0",
     "effect": "4.0.0-beta.70",
     "lucide-react": "^0.545.0",
@@ -32,7 +33,7 @@
   "devDependencies": {
     "@effect/vitest": "4.0.0-beta.70",
     "@tailwindcss/typography": "^0.5.16",
-    "@tanstack/devtools-vite": "latest",
+    "@tanstack/devtools-vite": "0.7.0",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.0",
     "@types/node": "^22.10.2",

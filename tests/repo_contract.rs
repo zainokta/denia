@@ -140,6 +140,30 @@ fn project_delete_blocked_when_not_empty() {
     assert!(repo.delete_project(project.id).is_err());
 }
 
+#[test]
+fn project_delete_removes_memberships() {
+    let store = migrated_store();
+    let project = seed_project(&store, "team-membership");
+    let users = SqliteUserRepo::new(store.pool());
+    let user = users.create_user("member", "hash", false).unwrap();
+    users
+        .set_membership(user.id, project.id, Role::Operator)
+        .unwrap();
+
+    SqliteProjectRepo::new(store.pool())
+        .delete_project(project.id)
+        .unwrap();
+
+    assert_eq!(users.role_for(user.id, project.id).unwrap(), None);
+    assert!(
+        users
+            .list_memberships_for_user(user.id)
+            .unwrap()
+            .into_iter()
+            .all(|membership| membership.project_id != project.id)
+    );
+}
+
 // --- Users / sessions / memberships ---------------------------------------
 
 #[test]

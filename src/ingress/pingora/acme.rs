@@ -118,6 +118,33 @@ impl ChallengeStore {
     }
 }
 
+struct PublishedChallenges {
+    store: ChallengeStore,
+    tokens: Vec<String>,
+}
+
+impl PublishedChallenges {
+    fn new(store: ChallengeStore) -> Self {
+        Self {
+            store,
+            tokens: Vec::new(),
+        }
+    }
+
+    fn register(&mut self, token: String, key_authorization: &str) {
+        self.store.register(token.clone(), key_authorization);
+        self.tokens.push(token);
+    }
+}
+
+impl Drop for PublishedChallenges {
+    fn drop(&mut self) {
+        for token in &self.tokens {
+            self.store.remove(token);
+        }
+    }
+}
+
 /// A freshly issued certificate: PEM chain (leaf first) + PEM private key.
 ///
 /// Holds private key material in `key_pem`, so it intentionally has no
@@ -192,7 +219,7 @@ impl AcmeDriver {
 
         // Publish the HTTP-01 key authorization for each authorization, then
         // mark each challenge ready.
-        let mut tokens: Vec<String> = Vec::new();
+        let mut published = PublishedChallenges::new(self.challenges.clone());
         let mut authorizations = order.authorizations();
         while let Some(authz) = authorizations.next().await {
             let mut authz = authz.map_err(AcmeError::from)?;
@@ -201,17 +228,11 @@ impl AcmeDriver {
                 .ok_or_else(|| AcmeError::NoHttp01Challenge(domain.clone()))?;
             let token = challenge.token.clone();
             let key_auth = challenge.key_authorization();
-            self.challenges.register(token.clone(), key_auth.as_str());
-            tokens.push(token);
+            published.register(token, key_auth.as_str());
             challenge.set_ready().await.map_err(AcmeError::from)?;
         }
 
-        let result = self.finalize_order(&mut order, &domain).await;
-        // Always clear published tokens once the order resolves.
-        for token in &tokens {
-            self.challenges.remove(token);
-        }
-        result
+        self.finalize_order(&mut order, &domain).await
     }
 
     async fn finalize_order(
@@ -521,6 +542,19 @@ VR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiEA7rINC49fiLX2DYAE06Cm\n\
         let store = load_certs_from_disk(tmp.path());
         assert_eq!(store.len(), 1);
         assert!(store.get("ok.example.com").is_some());
+    }
+
+    #[test]
+    fn published_challenges_are_removed_on_drop() {
+        let store = ChallengeStore::new();
+        {
+            let mut published = PublishedChallenges::new(store.clone());
+            published.register("token-a".to_string(), "secret-a");
+            published.register("token-b".to_string(), "secret-b");
+            assert_eq!(store.len(), 2);
+        }
+        assert_eq!(store.len(), 0);
+        assert_eq!(store.get("token-a"), None);
     }
 
     #[test]

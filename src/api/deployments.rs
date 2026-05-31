@@ -49,6 +49,18 @@ pub fn router() -> Router<AppState> {
         )
 }
 
+fn ensure_deployment_role(
+    state: &AppState,
+    principal: &Principal,
+    project_id: uuid::Uuid,
+    role: Role,
+) -> Result<(), ApiError> {
+    ensure_role(state, principal, project_id, role).map_err(|error| match error {
+        ApiError::Forbidden(_) => ApiError::NotFound("deployment not found".to_string()),
+        other => other,
+    })
+}
+
 /// `POST /v1/deployments` — async deploy entry point (ADR-024).
 ///
 /// Persists a `Pending` deployment row, opens the per-deployment log file, and
@@ -63,7 +75,7 @@ async fn create_deployment(
     let Some(service) = state.services.get_service(request.service_id())? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
-    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
+    ensure_deployment_role(&state, &principal, service.project_id, Role::Operator)?;
 
     let coordinator = DeploymentCoordinator::new_with_shared_routing(
         state.deployment_repos(),
@@ -148,7 +160,7 @@ async fn list_service_deployments(
     let Some(service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
-    ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
+    ensure_deployment_role(&state, &principal, service.project_id, Role::Viewer)?;
     let deployments = state.deployments.list_deployments(service_id)?;
     let views = deployments
         .into_iter()
@@ -180,7 +192,7 @@ async fn get_deployment(
     let Some(service) = state.services.get_service(deployment.service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
-    ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
+    ensure_deployment_role(&state, &principal, service.project_id, Role::Viewer)?;
     let artifact = state.deployments.get_deployment_artifact(deployment.id)?;
     Ok(Json(DeploymentView {
         deployment,
@@ -209,7 +221,7 @@ async fn deployment_log_stream(
     let Some(service) = state.services.get_service(deployment.service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
-    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
+    ensure_deployment_role(&state, &principal, service.project_id, Role::Operator)?;
 
     let permit = DEPLOYMENT_LOG_STREAM_LIMIT
         .clone()

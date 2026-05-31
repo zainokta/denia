@@ -34,6 +34,18 @@ pub fn router() -> Router<AppState> {
         .route("/jobs/{job_id}/runs", get(list_job_runs))
 }
 
+fn ensure_job_role(
+    state: &AppState,
+    principal: &Principal,
+    project_id: uuid::Uuid,
+    role: Role,
+) -> Result<(), ApiError> {
+    ensure_role(state, principal, project_id, role).map_err(|error| match error {
+        ApiError::Forbidden(_) => ApiError::NotFound("job not found".to_string()),
+        other => other,
+    })
+}
+
 async fn list_jobs(
     State(state): State<AppState>,
     principal: Principal,
@@ -77,7 +89,7 @@ async fn get_job(
         .jobs
         .get_job(job_id)?
         .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
-    ensure_role(&state, &principal, job.project_id, Role::Viewer)?;
+    ensure_job_role(&state, &principal, job.project_id, Role::Viewer)?;
     let mut job = job;
     if ensure_role(&state, &principal, job.project_id, Role::Operator).is_err() {
         job.redact_env();
@@ -94,7 +106,7 @@ async fn delete_job(
         .jobs
         .get_job(job_id)?
         .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
-    ensure_role(&state, &principal, job.project_id, Role::Operator)?;
+    ensure_job_role(&state, &principal, job.project_id, Role::Operator)?;
     state.jobs.delete_job(job_id)?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
@@ -108,7 +120,7 @@ async fn run_job(
         .jobs
         .get_job(job_id)?
         .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
-    ensure_role(&state, &principal, job.project_id, Role::Operator)?;
+    ensure_job_role(&state, &principal, job.project_id, Role::Operator)?;
     if state.jobs.active_run(job_id)?.is_some() {
         return Err(ApiError::Conflict(
             "job already has an active run".to_string(),
@@ -127,7 +139,7 @@ async fn list_job_runs(
         .jobs
         .get_job(job_id)?
         .ok_or_else(|| ApiError::NotFound("job not found".to_string()))?;
-    ensure_role(&state, &principal, job.project_id, Role::Viewer)?;
+    ensure_job_role(&state, &principal, job.project_id, Role::Viewer)?;
     Ok(Json(state.jobs.list_job_runs(job_id)?))
 }
 
@@ -255,5 +267,48 @@ mod tests {
         let fetched = body_json(get).await;
         assert_eq!(fetched["env"][0][0], "TOKEN");
         assert_eq!(fetched["env"][0][1], REDACTED_ENV_VALUE);
+    }
+
+    #[tokio::test]
+    async fn get_job_in_foreign_project_returns_404() {
+        let state = test_state();
+        let project_id = state.projects.default_project_id().unwrap();
+        let stranger = state.users.create_user("stranger", "hash", false).unwrap();
+        let stranger_token = state
+            .tokens
+            .create_api_token(stranger.id, "stranger")
+            .unwrap()
+            .token;
+
+        let create = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/jobs")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&job_body(project_id, uuid::Uuid::now_v7())).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::CREATED);
+        let created = body_json(create).await;
+        let job_id = created["id"].as_str().unwrap();
+
+        let get = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/jobs/{job_id}"))
+                    .header("Authorization", format!("Bearer {stranger_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(get.status(), StatusCode::NOT_FOUND);
     }
 }
