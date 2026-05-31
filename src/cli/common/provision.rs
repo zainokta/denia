@@ -1,7 +1,7 @@
 //! User/group/directory provisioning used by `denia setup`. Every helper is
 //! a probe-then-act idempotent operation so re-runs are safe.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use super::paths::InstallContext;
@@ -43,7 +43,9 @@ pub fn ensure_user(user: &str, group: &str, home: &str) -> anyhow::Result<bool> 
 /// Ensure a directory exists with the given mode, owner, and group. Idempotent.
 /// Always re-applies mode + chown so a hand-edited install gets repaired.
 pub fn ensure_dir(path: &Path, mode: u32, owner: &str, group: &str) -> anyhow::Result<()> {
+    reject_symlink_components(path)?;
     std::fs::create_dir_all(path)?;
+    reject_symlink_components(path)?;
     let p = path.display().to_string();
     run("chmod", &[&format!("{mode:o}"), &p])?;
     run("chown", &[&format!("{owner}:{group}"), &p])?;
@@ -90,6 +92,25 @@ pub fn ensure_user_config_dir(ctx: &InstallContext) -> anyhow::Result<()> {
     ensure_dir(&ctx.user_config_dir, 0o750, &ctx.install_user, "denia")
 }
 
+pub(crate) fn reject_symlink_components(path: &Path) -> anyhow::Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!(
+                    "refusing to follow symlinked path component: {}",
+                    current.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 fn group_exists(name: &str) -> anyhow::Result<bool> {
     Ok(Command::new("getent")
         .args(["group", name])
@@ -116,4 +137,37 @@ fn run(bin: &str, args: &[&str]) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("{bin} {args:?} exited with {status}"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_symlink_components_rejects_final_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = reject_symlink_components(&link).unwrap_err();
+
+        assert!(err.to_string().contains("symlinked path component"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_symlink_components_rejects_parent_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = reject_symlink_components(&link.join("denia")).unwrap_err();
+
+        assert!(err.to_string().contains("symlinked path component"));
+    }
 }

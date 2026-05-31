@@ -12,28 +12,31 @@ pub fn write_owned_secret(path: &Path, body: &str, owner: &str) -> anyhow::Resul
         .parent()
         .ok_or_else(|| anyhow::anyhow!("no parent for {}", path.display()))?;
     fs::create_dir_all(parent)?;
-    let tmp_path = parent.join(format!(
-        ".{}.tmp",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("denia-tmp")
-    ));
+    super::provision::reject_symlink_components(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("denia-tmp");
+    let mut tmp = tempfile::Builder::new()
+        .prefix(&format!(".{file_name}."))
+        .suffix(".tmp")
+        .tempfile_in(parent)?;
     {
-        let mut f = fs::File::create(&tmp_path)?;
+        let f = tmp.as_file_mut();
         f.write_all(body.as_bytes())?;
         f.sync_all()?;
     }
-    fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o640))?;
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o640))?;
     let owner_group = format!("{owner}:denia");
     let status = std::process::Command::new("chown")
-        .args([&owner_group, &tmp_path.display().to_string()])
+        .args([&owner_group, &tmp.path().display().to_string()])
         .status()?;
     if !status.success() {
         return Err(anyhow::anyhow!(
             "chown {owner_group} {} failed",
-            tmp_path.display()
+            tmp.path().display()
         ));
     }
-    fs::rename(&tmp_path, path)?;
+    tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }

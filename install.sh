@@ -368,11 +368,20 @@ step_install_node() {
         case "${PKG_MGR}" in
             apt)
                 # NodeSource provides a Node 22 LTS apt repo. Fetched as a script,
-                # but only run after a sanity check; trust boundary documented.
-                run_sh "/usr/bin/curl --proto '=https' --tlsv1.2 -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x -o /tmp/nodesource-setup.sh"
-                run_cmd /bin/bash /tmp/nodesource-setup.sh
+                # then executed from a fresh mktemp path so another local user
+                # cannot pre-place or swap a predictable /tmp script.
+                local nodesource_setup
+                if [[ "${DRY_RUN}" -eq 1 ]]; then
+                    nodesource_setup="/tmp/denia-nodesource.XXXXXX"
+                else
+                    nodesource_setup="$(mktemp -t denia-nodesource.XXXXXX)"
+                    trap 'rm -f "${nodesource_setup:-}"' RETURN
+                fi
+                run_cmd /usr/bin/curl --proto '=https' --tlsv1.2 -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o "${nodesource_setup}"
+                run_cmd /bin/bash "${nodesource_setup}"
                 run_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
-                run_cmd rm -f /tmp/nodesource-setup.sh
+                run_cmd rm -f "${nodesource_setup}"
+                nodesource_setup=""
                 ;;
             dnf)
                 run_cmd dnf module reset -y nodejs || true

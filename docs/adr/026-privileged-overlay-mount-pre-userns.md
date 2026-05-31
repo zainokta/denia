@@ -146,6 +146,12 @@ the host path.
 The two-stage unshare now fires whenever an overlay is configured, any read-only
 bind is requested, `/dev` setup is requested, **or** a socket bind is configured.
 
+**Workdir normalization.** OCI `WorkingDir` is attacker-influenced through the
+image config, so the runtime validates it before planning or forking. Workdirs
+must be absolute, must not contain NUL, `.` or `..` components, and are created
+under the selected new root by stripping the leading `/` before joining. Setup
+errors are reported through the child setup pipe instead of being ignored.
+
 ## Consequences
 
 - Workload deploys succeed on btrfs (and on any upper filesystem), eliminating the
@@ -160,6 +166,8 @@ bind is requested, `/dev` setup is requested, **or** a socket bind is configured
 - Read-only bind mounts are source-path-independent: a daemon binary under a
   `0700` home (dev `cargo run`) deploys identically to a world-searchable
   `/usr/local/bin` install. The `/.old_root`-relative bind source is gone.
+- Malicious image workdirs can no longer create host directories outside the
+  workload root before `pivot_root`.
 
 ## Risks
 

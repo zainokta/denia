@@ -306,6 +306,16 @@ export class Job extends Schema.Class<Job>('Job')({
 
 export const Jobs = Schema.Array(Job)
 
+const {
+  id: _jobId,
+  next_run_at: _jobNextRunAt,
+  last_enqueued_at: _jobLastEnqueuedAt,
+  created_at: _jobCreatedAt,
+  ...jobInputFields
+} = Job.fields
+export const JobInput = Schema.Struct(jobInputFields)
+export type JobInput = typeof JobInput.Type
+
 export class JobRun extends Schema.Class<JobRun>('JobRun')({
   id: Schema.String,
   job_id: Schema.String,

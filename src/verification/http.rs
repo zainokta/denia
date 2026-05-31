@@ -125,9 +125,15 @@ fn is_internal_ip(ip: &std::net::IpAddr) -> bool {
                 || v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64
         }
         std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_internal_ip(&std::net::IpAddr::V4(v4));
+            }
+            let octets = v6.octets();
             v6.is_loopback()
                 || v6.is_unspecified()
-                || v6.octets()[0] == 0xfe && v6.octets()[1] == 0x80
+                || (octets[0] & 0xfe) == 0xfc
+                || octets[0] == 0xff
+                || (octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80)
         }
     }
 }
@@ -196,5 +202,13 @@ mod verifier_tests {
         let v = client_with_base(&server.base_url());
         let err = v.verify("ignored.example.com", "tok").await.unwrap_err();
         assert_eq!(err, DomainVerifyError::BodyTooLarge);
+    }
+
+    #[test]
+    fn internal_ip_filter_rejects_ipv6_private_and_multicast_ranges() {
+        for addr in ["fc00::1", "fd00::1", "ff02::1", "::ffff:127.0.0.1"] {
+            let ip = addr.parse().unwrap();
+            assert!(is_internal_ip(&ip), "{addr} must be blocked");
+        }
     }
 }

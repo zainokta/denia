@@ -7,8 +7,9 @@
 
 # --- Control plane bind ---
 # Management API socket. Pingora handles :80/:443; this is only the
-# operator-facing /v1 + /healthz + SPA.
-bind_addr = "0.0.0.0:7180"
+# operator-facing /v1 + /healthz + SPA. Keep loopback unless access is
+# protected by a private network, tunnel, or future control-plane TLS.
+bind_addr = "127.0.0.1:7180"
 
 # --- On-disk layout ---
 data_dir = "/var/lib/denia"

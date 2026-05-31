@@ -95,6 +95,13 @@ async fn put_service(
         .validate()
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     if let crate::domain::ServiceSource::ExternalImage(src) = &service.source
+        && src.credential.is_some()
+    {
+        return Err(ApiError::BadRequest(
+            "legacy external image credential refs are no longer supported; configure a project registry and set registry_id/image_ref".to_string(),
+        ));
+    }
+    if let crate::domain::ServiceSource::ExternalImage(src) = &service.source
         && let Some(registry_id) = src.registry_id
     {
         let registry = state
@@ -129,6 +136,16 @@ async fn put_service(
             Some(found) => found.id,
             None => uuid::Uuid::now_v7(),
         };
+    } else {
+        let existing = state
+            .services
+            .get_service(service.id)?
+            .ok_or_else(|| ApiError::BadRequest("service id does not exist".to_string()))?;
+        if existing.project_id != service.project_id || existing.name != service.name {
+            return Err(ApiError::BadRequest(
+                "service id does not match existing service project/name".to_string(),
+            ));
+        }
     }
     Ok(Json(state.services.put_service(service)?))
 }
@@ -508,29 +525,12 @@ mod tests {
 
     #[tokio::test]
     async fn create_then_list_service_roundtrips() {
-        use crate::domain::{
-            ExternalImageSource, HealthCheck, Project, ServiceConfig, ServiceSource,
-        };
+        use crate::domain::{Project, ServiceConfig};
+
         let state = test_state();
         let project = Project::new("team-a", None).unwrap();
         state.projects.put_project(project.clone()).unwrap();
-        let svc = ServiceConfig::new(
-            project.id,
-            "web",
-            vec!["example.com".into()],
-            ServiceSource::ExternalImage(ExternalImageSource {
-                image: "nginx".into(),
-                credential: None,
-                registry_id: None,
-                image_ref: None,
-            }),
-            80,
-            HealthCheck::new("/health", 5),
-            None,
-            Vec::new(),
-        )
-        .unwrap();
-        let body = serde_json::to_vec(&svc).unwrap();
+        let body = service_create_body(project.id, "web");
 
         let app = build_router(state);
         let create = app
@@ -794,5 +794,114 @@ mod tests {
             second_cfg.id, first_cfg.id,
             "re-POST with same (project_id, name) and nil id must reuse the existing id"
         );
+    }
+
+    #[tokio::test]
+    async fn put_service_rejects_body_id_that_differs_from_existing_name_row() {
+        let state = test_state();
+        let victim_project = Project::new("team-victim", None).unwrap();
+        let attacker_project = Project::new("team-attacker", None).unwrap();
+        state.projects.put_project(victim_project.clone()).unwrap();
+        state
+            .projects
+            .put_project(attacker_project.clone())
+            .unwrap();
+
+        let app = build_router(state);
+        let victim = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(service_create_body(victim_project.id, "victim")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(victim.status(), StatusCode::OK);
+        let victim_cfg: ServiceConfig = serde_json::from_str(&body_string(victim).await).unwrap();
+
+        let attacker = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(service_create_body(
+                        attacker_project.id,
+                        "attacker",
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(attacker.status(), StatusCode::OK);
+
+        let poisoned = serde_json::to_vec(&serde_json::json!({
+            "id": victim_cfg.id,
+            "project_id": attacker_project.id,
+            "name": "attacker",
+            "domains": ["attacker.example.com"],
+            "source": { "type": "external_image", "image": "nginx", "credential": null },
+            "internal_port": 80,
+            "health_check": { "path": "/health", "timeout_seconds": 5 }
+        }))
+        .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(poisoned))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn put_service_rejects_legacy_external_image_credential_ref() {
+        let state = test_state();
+        let project = Project::new("team-legacy-cred", None).unwrap();
+        state.projects.put_project(project.clone()).unwrap();
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "project_id": project.id,
+            "name": "legacycred",
+            "domains": ["legacycred.example.com"],
+            "source": {
+                "type": "external_image",
+                "image": "ghcr.io/acme/web:1",
+                "credential": "legacy-cred"
+            },
+            "internal_port": 80,
+            "health_check": { "path": "/health", "timeout_seconds": 5 }
+        }))
+        .unwrap();
+
+        let resp = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

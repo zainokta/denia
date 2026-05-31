@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::service::ServiceSource;
+use crate::domain::service::{REDACTED_ENV_VALUE, ServiceSource};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +60,12 @@ impl Job {
             last_enqueued_at: None,
             created_at: Utc::now(),
         })
+    }
+
+    pub fn redact_env(&mut self) {
+        for (_key, value) in self.env.iter_mut() {
+            *value = REDACTED_ENV_VALUE.to_string();
+        }
     }
 }
 

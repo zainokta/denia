@@ -31,6 +31,12 @@ history (status + exit code) preserved across restarts.
   Pending/Running rows left by a crash.
 - API: `POST /v1/jobs/{id}/run` returns `409 Conflict` if `active_run` finds
   an in-progress run, else creates a Pending row and returns `202 Accepted`.
+- API create is server-owned: `POST /v1/jobs` accepts a create payload without
+  persisted identity or scheduler timestamps. The server mints a UUIDv7 and
+  owns `created_at`, `next_run_at`, and `last_enqueued_at`. Client-supplied
+  persisted IDs or scheduler state are ignored.
+- API read redacts job env values for project Viewers. Operators and super
+  admins can read raw env values.
 - Graceful shutdown: `axum::serve(...).with_graceful_shutdown(ctrl_c)`
   triggers the scheduler's oneshot shutdown channel before the binary
   exits.
@@ -48,6 +54,8 @@ history (status + exit code) preserved across restarts.
 - Run reconciliation on boot is destructive: a Pending row from a clean
   shutdown that hadn't yet been executed will be marked Failed. Acceptable
   because the scheduler will re-evaluate the cron cursor at the next tick.
+- Job rows are insert-only by ID. A duplicate job ID is an integrity error, not
+  an upsert, so one project cannot overwrite another project's job JSON.
 
 ## Alternatives Considered
 

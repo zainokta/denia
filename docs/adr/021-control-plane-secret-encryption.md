@@ -29,8 +29,12 @@ The control plane owns SOPS encryption for registry credentials:
    json --output-type yaml`, and writes
    `<data_dir>/secrets/<project_id>/<ref>.sops.yaml` with mode `0600`.
 4. The previously documented operator-managed `.sops.yaml` flow is retired
-   for registry credentials. Existing service-secret refs (SSH deploy keys,
-   etc.) remain operator-managed for now; their migration is out of scope.
+   for registry credentials. Existing service-secret refs for Git deploy keys
+   remain operator-managed for now; their migration is out of scope.
+5. Legacy `ExternalImageSource.credential` refs are not a registry credential
+   path. The service API rejects them, and deployment fails closed if an old row
+   still contains one. Authenticated external-image pulls must reference an
+   Admin-managed project registry via `registry_id`/`image_ref`.
 
 ## Consequences
 

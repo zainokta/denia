@@ -325,9 +325,9 @@ impl NamespaceConfig {
                 self.rootfs.display()
             )));
         }
-        if !self.workdir.starts_with('/') {
+        if !is_safe_absolute_workdir(&self.workdir) {
             return Err(SyscallError::Capability(format!(
-                "workdir must be absolute, got {}",
+                "workdir must be absolute and normalized within root, got {}",
                 self.workdir
             )));
         }
@@ -447,6 +447,24 @@ impl NamespaceConfig {
         }
         flags
     }
+}
+
+fn is_safe_absolute_workdir(workdir: &str) -> bool {
+    if workdir.as_bytes().contains(&0) {
+        return false;
+    }
+    if workdir
+        .split('/')
+        .skip(1)
+        .any(|component| matches!(component, "." | ".."))
+    {
+        return false;
+    }
+    let mut components = Path::new(workdir).components();
+    if !matches!(components.next(), Some(std::path::Component::RootDir)) {
+        return false;
+    }
+    components.all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 fn uid_map_line(map: UidMap) -> String {
@@ -1365,9 +1383,14 @@ unsafe fn child_exec(
     let workdir_bytes = plan.workdir.to_bytes();
     if workdir_bytes != b"/" {
         let mut wd_buf = new_root.to_bytes().to_vec();
-        wd_buf.extend_from_slice(workdir_bytes);
+        if !wd_buf.ends_with(b"/") {
+            wd_buf.push(b'/');
+        }
+        wd_buf.extend_from_slice(workdir_bytes.strip_prefix(b"/").unwrap_or(workdir_bytes));
         let wd_path = std::path::Path::new(std::ffi::OsStr::from_bytes(&wd_buf));
-        let _ = std::fs::create_dir_all(wd_path);
+        if let Err(e) = std::fs::create_dir_all(wd_path) {
+            unsafe { child_setup_fail_errno(pipes, b'w', e.raw_os_error().unwrap_or(libc::EIO)) };
+        }
     }
 
     // The new root is either the overlay mounted before the user-namespace
@@ -1886,6 +1909,22 @@ mod tests {
             plan.setup.cgroup_procs_path,
             PathBuf::from("/sys/fs/cgroup/denia/test/cgroup.procs")
         );
+    }
+
+    #[test]
+    fn namespace_config_rejects_traversing_workdirs_before_fork() {
+        for workdir in ["/../sock/pwn", "/srv/../sock", "/./srv"] {
+            let err = NamespaceConfig::new("/var/lib/denia/rootfs", vec!["/bin/sh".to_string()])
+                .with_uid_map(100000, 65536)
+                .with_cgroup_path("/sys/fs/cgroup/denia/test")
+                .with_workdir(workdir)
+                .native_launch_plan()
+                .expect_err("traversing workdir must be rejected before fork");
+            assert!(
+                err.to_string().contains("workdir"),
+                "unexpected error for {workdir}: {err:?}"
+            );
+        }
     }
 
     #[test]

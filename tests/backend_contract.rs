@@ -436,22 +436,19 @@ async fn axum_router_accepts_service_creation_with_admin_token() {
     let store = SqliteStore::open_in_memory().expect("open sqlite");
     store.migrate().expect("migrate");
     let app = build_router(AppState::new(AppConfig::for_test("test-token"), &store));
-    let service = ServiceConfig::new(
-        DEFAULT_PROJECT_ID,
-        "web",
-        vec!["web.example.test".to_string()],
-        ServiceSource::ExternalImage(ExternalImageSource {
-            image: "ghcr.io/acme/web:latest".to_string(),
-            credential: None,
-            registry_id: None,
-            image_ref: None,
-        }),
-        3000,
-        HealthCheck::new("/ready", 5),
-        Some(ResourceLimits::default()),
-        vec![],
-    )
-    .expect("service");
+    let service = serde_json::json!({
+        "project_id": DEFAULT_PROJECT_ID,
+        "name": "web",
+        "domains": ["web.example.test"],
+        "source": {
+            "type": "external_image",
+            "image": "ghcr.io/acme/web:latest"
+        },
+        "internal_port": 3000,
+        "health_check": { "path": "/ready", "timeout_seconds": 5 },
+        "resources": ResourceLimits::default(),
+        "env": []
+    });
 
     let response = app
         .oneshot(
@@ -468,7 +465,14 @@ async fn axum_router_accepts_service_creation_with_admin_token() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), http::StatusCode::OK);
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(status, http::StatusCode::OK);
+    let created: ServiceConfig = serde_json::from_slice(&bytes).unwrap();
+    assert_ne!(created.id, Uuid::nil());
+    assert_eq!(created.name, "web");
 }
 
 #[tokio::test]
@@ -859,7 +863,7 @@ async fn deploy_external_image_legacy_anonymous_fallback() {
 }
 
 #[tokio::test]
-async fn deploy_external_image_legacy_basic_credential() {
+async fn deploy_external_image_legacy_basic_credential_fails_closed() {
     use denia::domain::Project;
 
     let store = SqliteStore::open_in_memory().expect("sqlite");
@@ -900,7 +904,7 @@ async fn deploy_external_image_legacy_basic_credential() {
     let coordinator = deploy_test_coordinator(&store);
     let secret_store = SopsSecretStore::new(config.data_dir.clone());
 
-    coordinator
+    let err = coordinator
         .deploy_external_image_source(
             &service,
             &acquirer,
@@ -909,19 +913,19 @@ async fn deploy_external_image_legacy_basic_credential() {
             config.sops_binary.as_path(),
         )
         .await
-        .expect("deployment");
+        .expect_err("legacy external-image credentials must fail closed");
 
-    let recorded_image = puller
-        .image
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("image recorded");
-    let recorded_auth = puller.auth.lock().unwrap().clone().expect("auth recorded");
-    assert_eq!(recorded_image, "ghcr.io/acme/web:1");
-    assert_eq!(
-        recorded_auth,
-        denia::oci::RegistryAuth::Basic("u".to_string(), "p".to_string())
+    assert!(matches!(
+        err,
+        denia::deploy::DeployError::UnsupportedServiceSource
+    ));
+    assert!(
+        puller.image.lock().unwrap().is_none(),
+        "puller must not receive an image when legacy credentials are present"
+    );
+    assert!(
+        puller.auth.lock().unwrap().is_none(),
+        "puller must not receive auth when legacy credentials are present"
     );
 }
 
