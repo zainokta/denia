@@ -4,6 +4,16 @@ use crate::domain::RuntimeStartRequest;
 use crate::runtime::error::RuntimeError;
 use crate::runtime::plan::LinuxRuntimeProcessSpec;
 
+const BLOCKED_LOADER_ENV_KEYS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "LD_DEBUG",
+    "LD_PROFILE",
+    "LD_ORIGIN_PATH",
+    "GLIBC_TUNABLES",
+];
+
 pub(crate) fn validate_service_name(service_name: &str) -> Result<(), RuntimeError> {
     let valid = !service_name.is_empty()
         && service_name
@@ -37,8 +47,19 @@ pub(crate) fn validate_process_spec(
             workdir: process.workdir.clone(),
         });
     }
-    for (key, _) in &process.env {
+    validate_environment_keys(&process.env)?;
+    Ok(())
+}
+
+pub(crate) fn validate_environment_keys(env: &[(String, String)]) -> Result<(), RuntimeError> {
+    for (key, _) in env {
         if key.is_empty() || key.contains('=') || key.contains('\0') {
+            return Err(RuntimeError::InvalidEnvironmentKey { key: key.clone() });
+        }
+        if BLOCKED_LOADER_ENV_KEYS
+            .iter()
+            .any(|blocked| key.eq_ignore_ascii_case(blocked))
+        {
             return Err(RuntimeError::InvalidEnvironmentKey { key: key.clone() });
         }
     }
@@ -126,6 +147,22 @@ mod tests {
                 Path::new("/tmp/manifest.json"),
             )
             .expect("normal absolute workdir");
+        }
+    }
+
+    #[test]
+    fn validate_process_spec_rejects_dynamic_loader_environment() {
+        for key in [
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "LD_AUDIT",
+            "GLIBC_TUNABLES",
+        ] {
+            let mut process = process_with_workdir("/");
+            process.env.push((key.to_string(), "x".to_string()));
+            let err = validate_process_spec(&process, Path::new("/tmp/manifest.json"))
+                .expect_err("loader-controlled env must be rejected");
+            assert!(matches!(err, RuntimeError::InvalidEnvironmentKey { .. }));
         }
     }
 }

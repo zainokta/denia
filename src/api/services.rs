@@ -24,6 +24,18 @@ use crate::metrics::CgroupMetricsReader;
 static LOG_STREAM_LIMIT: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(64)));
 
+fn ensure_service_role(
+    state: &AppState,
+    principal: &Principal,
+    project_id: uuid::Uuid,
+    role: Role,
+) -> Result<(), ApiError> {
+    ensure_role(state, principal, project_id, role).map_err(|error| match error {
+        ApiError::Forbidden(_) => ApiError::NotFound("service not found".to_string()),
+        other => other,
+    })
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/services", get(list_services).post(put_service))
@@ -158,7 +170,7 @@ async fn get_service(
     let Some(mut service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
-    ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
+    ensure_service_role(&state, &principal, service.project_id, Role::Viewer)?;
     // Only Operators+ (and super admins) see raw env values (F-7).
     if ensure_role(&state, &principal, service.project_id, Role::Operator).is_err() {
         service.redact_env();
@@ -174,7 +186,7 @@ async fn delete_service(
     let Some(service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
-    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
+    ensure_service_role(&state, &principal, service.project_id, Role::Operator)?;
     state.services.delete_service(service_id)?;
     Ok(Json(json!({"deleted": true})))
 }
@@ -187,7 +199,7 @@ async fn lifecycle_command(
     let Some(service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
-    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
+    ensure_service_role(&state, &principal, service.project_id, Role::Operator)?;
     match action.as_str() {
         "stop" => {
             let coordinator = DeploymentCoordinator::new_with_shared_routing(
@@ -229,7 +241,7 @@ async fn service_logs(
     let Some(service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
-    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
+    ensure_service_role(&state, &principal, service.project_id, Role::Operator)?;
     let logs = LogStore::new(&state.config.log_dir);
     // Logs are stored by service_id (globally unique), not name (F-3).
     match logs.read_recent(&service.id.to_string(), 200) {
@@ -247,7 +259,7 @@ async fn service_logs_stream(
     let Some(service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
-    ensure_role(&state, &principal, service.project_id, Role::Operator)?;
+    ensure_service_role(&state, &principal, service.project_id, Role::Operator)?;
 
     // Bound the number of concurrent SSE log streams process-wide. Each stream
     // holds a long-lived task polling a file; without a cap a client could open
@@ -303,7 +315,7 @@ async fn service_metrics(
     let Some(service) = state.services.get_service(service_id)? else {
         return Err(ApiError::NotFound("service not found".to_string()));
     };
-    ensure_role(&state, &principal, service.project_id, Role::Viewer)?;
+    ensure_service_role(&state, &principal, service.project_id, Role::Viewer)?;
     let Some(deployment_id) = state.deployments.promoted_deployment(service_id)? else {
         return Ok(Json(Vec::new()));
     };
@@ -641,6 +653,50 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_service_in_foreign_project_returns_404() {
+        let state = test_state();
+        let project = Project::new("foreign-team", None).unwrap();
+        state.projects.put_project(project.clone()).unwrap();
+        let stranger = state.users.create_user("stranger", "hash", false).unwrap();
+        let stranger_token = state
+            .tokens
+            .create_api_token(stranger.id, "stranger")
+            .unwrap()
+            .token;
+        let svc = ServiceConfig::new(
+            project.id,
+            "foreignsvc",
+            vec!["foreignsvc.example.com".into()],
+            ServiceSource::ExternalImage(ExternalImageSource {
+                image: "nginx".into(),
+                credential: None,
+                registry_id: None,
+                image_ref: None,
+            }),
+            80,
+            HealthCheck::new("/health", 5),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        let service_id = svc.id;
+        state.services.put_service(svc).unwrap();
+
+        let resp = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/services/{service_id}"))
+                    .header("Authorization", format!("Bearer {stranger_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 

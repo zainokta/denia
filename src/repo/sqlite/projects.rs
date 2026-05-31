@@ -83,6 +83,22 @@ pub(super) fn delete_project_q(conn: &Connection, project_id: Uuid) -> Result<()
         return Err(RepoError::ProjectNotEmpty);
     }
     conn.execute(
+        "DELETE FROM job_runs WHERE job_id IN (SELECT id FROM jobs WHERE project_id = ?1)",
+        params![project_id.to_string()],
+    )?;
+    conn.execute(
+        "DELETE FROM jobs WHERE project_id = ?1",
+        params![project_id.to_string()],
+    )?;
+    conn.execute(
+        "DELETE FROM registries WHERE project_id = ?1",
+        params![project_id.to_string()],
+    )?;
+    conn.execute(
+        "DELETE FROM project_members WHERE project_id = ?1",
+        params![project_id.to_string()],
+    )?;
+    conn.execute(
         "DELETE FROM projects WHERE id = ?1",
         params![project_id.to_string()],
     )?;
