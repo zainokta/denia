@@ -1030,6 +1030,7 @@ dependencies = [
  "httpmock",
  "instant-acme",
  "libc",
+ "minisign-verify",
  "oci-client",
  "pingora",
  "pingora-proxy",
@@ -1039,6 +1040,7 @@ dependencies = [
  "rust-embed",
  "rustix",
  "rustls-pki-types",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2426,6 +2428,12 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "minisign-verify"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22f9645cb765ea72b8111f36c522475d2daa0d22c957a9826437e97534bc4e9e"
 
 [[package]]
 name = "miniz_oxide"

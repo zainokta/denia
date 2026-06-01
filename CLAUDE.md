@@ -48,7 +48,7 @@ Guidelines for AI agents working on Denia, a Rust backend PaaS that runs workloa
 - TLS is in-process: ACME via `instant-acme` (HTTP-01), per-SNI certs served by a `TlsAccept` callback from an `ArcSwap<CertStore>`; certs persisted `0600` under `<tls_dir>` (`DENIA_TLS_DIR`), boot-loaded before `:443` accepts; renewal scan task. `DENIA_ACME_DIRECTORY_URL` defaults to Let's Encrypt prod — set the LE staging URL for non-prod. ACME is gated to `tls_enabled` services with verified domains. Every hostname is run through `validate_domain` before becoming a route/SNI/ACME identifier.
 - Runtime metrics come from cgroup v2 and procfs.
 - Runtime security hardening uses `DENIA_USERNS_BASE` (default `100000`) and `DENIA_USERNS_SIZE` (default `65536`). `no_new_privs` and capability-bounding-set drop are applied in-process via the `rustix` syscall module (`src/syscall/`); the `setpriv` host binary is no longer required.
-- The web console (`web/`) is served by the binary itself: `src/web.rs` embeds the SPA build (`web/dist/client`) via `rust-embed` and `build_router` adds it as a fallback after `/healthz` and `/v1`. SSR is dropped; the UI is a static SPA on the same origin as `/v1`. See ADR-004. Build flow: `cd web && pnpm build`, then `cargo run` serves API + UI on `DENIA_BIND_ADDR` (default `127.0.0.1:7180`). A release `cargo build` requires `web/dist/client` to exist first (it is gitignored). Production installs are `sudo ./install.sh` (build + binary) then `sudo denia setup` (provisioning); see ADR-025.
+- The web console (`web/`) is served by the binary itself: `src/web.rs` embeds the SPA build (`web/dist/client`) via `rust-embed` and `build_router` adds it as a fallback after `/healthz` and `/v1`. SSR is dropped; the UI is a static SPA on the same origin as `/v1`. See ADR-004. Build flow: `cd web && pnpm build`, then `cargo run` serves API + UI on `DENIA_BIND_ADDR` (default `127.0.0.1:7180`). A release `cargo build` requires `web/dist/client` to exist first (it is gitignored). Production installs are `sudo ./install.sh` (build + binary) then `sudo denia setup` (provisioning); see ADR-025. Upgrades use `sudo denia update`, which downloads the latest prebuilt binary from the GitHub release, verifies it against a pinned minisign signature over `SHA256SUMS`, atomically swaps `/usr/local/bin/denia`, and restarts the service; releases are built by `.github/workflows/release.yml`. See ADR-029.
 
 ## Commits And Security
 
@@ -70,7 +70,7 @@ Guidelines for AI agents working on Denia, a Rust backend PaaS that runs workloa
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **denia** (5174 symbols, 12274 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **denia** (5253 symbols, 12460 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

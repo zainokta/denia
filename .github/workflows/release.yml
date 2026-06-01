@@ -1,0 +1,137 @@
+# Builds, checksums, and minisign-signs Denia release binaries, then publishes
+# them as GitHub release assets. Consumed by `denia update` (ADR-029).
+#
+# Trigger: push a tag `vX.Y.Z` whose X.Y.Z equals the Cargo.toml version.
+#
+# Required repo secret:
+#   MINISIGN_SECRET_KEY  - the contents of a minisign secret key generated
+#                          WITHOUT a password: `minisign -W -p key.pub -s key.sec`.
+#                          The matching public key (line 2 of key.pub) must be
+#                          pinned in src/cli/update.rs as MINISIGN_PUBKEY.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            # Ubuntu 24.04 is the intentional glibc baseline (2.39+) for
+            # signed release assets consumed by `denia update`.
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          # GitHub-hosted native ARM runner. If unavailable for this repo,
+          # switch to `cross` or a QEMU build for aarch64.
+          - arch: aarch64
+            # Keep this aligned with the documented glibc 2.39+ host
+            # requirement in README.md and ADR-029.
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}" >&2
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.25.0 --activate
+
+      # rust-embed bakes web/dist/client into the binary, so the SPA must exist
+      # before cargo build (ADR-004).
+      - name: Build web console
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        run: |
+          install -Dm0755 \
+            "target/${{ matrix.target }}/release/denia" \
+            "dist/denia-${{ matrix.arch }}-linux-gnu"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: denia-${{ matrix.arch }}
+          path: dist/denia-${{ matrix.arch }}-linux-gnu
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -type f -name 'denia-*-linux-gnu' -exec cp {} dist/ \;
+          ls -l dist
+
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          printf '# denia-release: %s\n' "${GITHUB_REF_NAME}" > SHA256SUMS
+          sha256sum denia-*-linux-gnu >> SHA256SUMS
+
+      - name: Install minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+
+      - name: Sign SHA256SUMS
+        working-directory: dist
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > minisign.key
+          # Key is password-less (generated with -W), so -S is non-interactive.
+          minisign -S -s minisign.key -m SHA256SUMS -t "denia ${GITHUB_REF_NAME}"
+          rm -f minisign.key
+          test -f SHA256SUMS.minisig
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/denia-x86_64-linux-gnu
+            dist/denia-aarch64-linux-gnu
+            dist/SHA256SUMS
+            dist/SHA256SUMS.minisig
+          fail_on_unmatched_files: true

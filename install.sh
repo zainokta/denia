@@ -23,6 +23,8 @@ readonly RUSTUP_INIT_URL="https://sh.rustup.rs"
 readonly NODE_MAJOR="22"
 readonly NODESOURCE_SETUP_URL="https://deb.nodesource.com/setup_${NODE_MAJOR}.x"
 readonly PNPM_VERSION="10.25.0"
+readonly MIN_GLIBC_MAJOR="2"
+readonly MIN_GLIBC_MINOR="39"
 
 # ----------------------------------------------------------------------------
 # CLI flags
@@ -140,14 +142,30 @@ step_preflight_os() {
         fail "WSL detected. Denia needs a real Linux kernel; install on bare metal, a VM, or a Linux cloud host."
     fi
 
-    # Reject non-glibc (musl) hosts: the rust release build links against the
-    # host libc; mixing with musl Alpine needs a different toolchain.
-    if [[ -x /usr/bin/ldd ]]; then
-        if ! /usr/bin/ldd --version 2>&1 | /bin/grep -qiE "glibc|gnu libc"; then
-            fail "Non-glibc libc detected (likely musl). This installer targets glibc distros."
-        fi
+    # Release binaries are built on Ubuntu 24.04, so the supported production
+    # host contract is glibc 2.39+. Source builds on older hosts may work, but
+    # `denia update` would later fetch a signed binary that cannot exec there.
+    local ldd_path ldd_out glibc_version glibc_major glibc_minor
+    ldd_path="$(command -v ldd || true)"
+    if [[ -z "${ldd_path}" ]]; then
+        fail "ldd not found. Denia requires a glibc host with glibc >= ${MIN_GLIBC_MAJOR}.${MIN_GLIBC_MINOR}."
     fi
-    ok "Linux glibc host confirmed"
+    ldd_out="$("${ldd_path}" --version 2>&1 || true)"
+    if ! printf '%s\n' "${ldd_out}" | /bin/grep -qiE "glibc|gnu libc"; then
+        fail "Non-glibc libc detected (likely musl). Denia requires glibc >= ${MIN_GLIBC_MAJOR}.${MIN_GLIBC_MINOR}."
+    fi
+    glibc_version="$(printf '%s\n' "${ldd_out}" | /bin/grep -Eo '[0-9]+\.[0-9]+' | /usr/bin/head -n1 || true)"
+    if [[ -z "${glibc_version}" ]]; then
+        fail "Could not parse glibc version from ldd output. Denia requires glibc >= ${MIN_GLIBC_MAJOR}.${MIN_GLIBC_MINOR}."
+    fi
+    glibc_major="${glibc_version%%.*}"
+    glibc_minor="${glibc_version#*.}"
+    if (( glibc_major < MIN_GLIBC_MAJOR || (glibc_major == MIN_GLIBC_MAJOR && glibc_minor < MIN_GLIBC_MINOR) )); then
+        fail "glibc ${glibc_version} is below Denia's required ${MIN_GLIBC_MAJOR}.${MIN_GLIBC_MINOR} baseline.
+  Release binaries are built for Ubuntu 24.04-era glibc so signed self-updates can run.
+  Remediation: upgrade the host OS before installing Denia."
+    fi
+    ok "glibc ${glibc_version} meets release baseline >= ${MIN_GLIBC_MAJOR}.${MIN_GLIBC_MINOR}"
 
     if [[ "${EUID}" -ne 0 ]]; then
         if [[ "${DRY_RUN}" -eq 1 ]]; then
@@ -453,6 +471,10 @@ print_next_step() {
     sudo denia setup
 
   Once setup completes, see "denia --help" for status/doctor/rotate-token/uninstall.
+
+  To upgrade an existing install to the latest signed release:
+
+    sudo denia update
 EOF
 }
 

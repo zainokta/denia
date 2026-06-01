@@ -7,6 +7,7 @@ use std::time::Duration;
 use crate::config::{FileConfig, config_file_path};
 
 use super::common::paths::InstallContext;
+use super::common::platform;
 use super::common::systemd;
 
 pub enum CheckResult {
@@ -43,6 +44,7 @@ pub fn run() -> anyhow::Result<()> {
         });
 
     let checks: Vec<CheckResult> = vec![
+        check_glibc_baseline(),
         check_cgroup_v2(),
         check_userns_enabled(),
         check_ports_free(),
@@ -68,6 +70,22 @@ pub fn run() -> anyhow::Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn check_glibc_baseline() -> CheckResult {
+    match platform::host_glibc_version() {
+        Ok(version) if platform::is_supported_glibc_version(version) => CheckResult::Pass(format!(
+            "glibc {} meets release baseline >= {}",
+            platform::format_glibc_version(version),
+            platform::minimum_glibc_label()
+        )),
+        Ok(version) => CheckResult::Fail(format!(
+            "glibc {} is below required {}; upgrade the host OS before using signed release updates",
+            platform::format_glibc_version(version),
+            platform::minimum_glibc_label()
+        )),
+        Err(e) => CheckResult::Fail(format!("glibc baseline check failed: {e}")),
+    }
 }
 
 fn check_cgroup_v2() -> CheckResult {

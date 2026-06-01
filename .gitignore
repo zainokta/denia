@@ -17,5 +17,10 @@ age.key
 *.db
 *.pem
 *.key
+# minisign release-signing keypair (ADR-029). The secret key must NEVER be
+# committed; store it as the MINISIGN_SECRET_KEY GitHub Actions secret.
+key.sec
+key.pub
+*.minisig
 
 TODO.md
