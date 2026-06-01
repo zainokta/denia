@@ -69,9 +69,9 @@ the console as the fallback for non-API routes. For a production install, use th
 ## Requirements
 
 - **Rust 2024 edition** (stable toolchain).
-- **Linux** with **cgroup v2** and **systemd** (Ubuntu/Debian LTS baseline).
-  Kernel **≥ 5.11** for overlayfs mounts inside the workload user namespace
-  (per-replica isolation, ADR-019).
+- **Linux glibc ≥ 2.39** with **cgroup v2** and **systemd** (Ubuntu 24.04+
+  baseline). Kernel **≥ 5.11** for overlayfs mounts inside the workload user
+  namespace (per-replica isolation, ADR-019).
 - **`sops`** for secret encryption/decryption.
 - **BuildKit** (`buildctl`) — only for Git artifact sources. OCI image
   acquisition is in-process (no `skopeo`/`umoci`); `no_new_privs` + capability
@@ -89,10 +89,10 @@ sudo ./install.sh
 ```
 
 `install.sh` must be run via **sudo from a regular user account** (not directly
-as root). It runs preflight checks (OS/arch, cgroup v2, user namespaces, free
-`:80`/`:443`), installs OS dependencies, sets up Rust (via `rustup`) and Node,
-builds the release binary with the embedded SPA, and installs it to
-`/usr/local/bin/denia`.
+as root). It runs preflight checks (OS/arch, glibc ≥ 2.39, cgroup v2, user
+namespaces, free `:80`/`:443`), installs OS dependencies, sets up Rust (via
+`rustup`) and Node, builds the release binary with the embedded SPA, and
+installs it to `/usr/local/bin/denia`.
 
 - `--dry-run` previews every command without changing anything.
 - `--skip-build` reuses an existing `target/release/denia`.

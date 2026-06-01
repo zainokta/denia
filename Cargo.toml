@@ -47,6 +47,10 @@ uuid = { version = "1", features = ["serde", "v7"] }
 zstd = "0.13.3"
 reqwest = { version = "0.13.3", default-features = false, features = ["http2", "rustls"] }
 subtle = "2"
+semver = "1"
+# Pure-Rust, verify-only minisign. Used by `denia update` to authenticate the
+# SHA256SUMS manifest of a GitHub release against a pinned public key (ADR-029).
+minisign-verify = "0.2"
 
 [features]
 default = []

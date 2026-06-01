@@ -45,6 +45,8 @@ Each ADR should include:
 | [025](025-cli-driven-host-provisioning.md) | CLI-Driven Host Provisioning | Accepted | 2026-05-28 |
 | [026](026-privileged-overlay-mount-pre-userns.md) | Privileged Overlay Mount Before the User-Namespace Unshare | Accepted | 2026-05-29 |
 | [027](027-daemon-lifecycle-stop-all-and-autostart.md) | Workload Lifecycle Bound to the Daemon (Stop-All on Shutdown, Autostart on Boot) | Accepted | 2026-05-29 |
+| [028](028-deploy-autoscale-ownership-handoff.md) | Deploy→Autoscale Replica Ownership Handoff | Accepted | 2026-05-29 |
+| [029](029-self-update-from-github-release.md) | Self-Update From Signed GitHub Release Binaries | Accepted | 2026-06-01 |
 
 ## Contributing
 

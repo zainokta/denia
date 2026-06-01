@@ -7,6 +7,7 @@ pub mod rotate_token;
 pub mod setup;
 pub mod status;
 pub mod uninstall;
+pub mod update;
 
 use clap::{Parser, Subcommand};
 use setup::SetupArgs;
@@ -41,6 +42,8 @@ pub enum Commands {
     Doctor,
     /// Regenerate the admin token and restart the service.
     RotateToken,
+    /// Self-update from the latest signed GitHub release and restart.
+    Update(update::UpdateArgs),
 }
 
 /// Entry point called from main.rs. Subcommand variants return placeholder
@@ -60,6 +63,7 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Status) => crate::cli::status::run(),
         Some(Commands::Doctor) => crate::cli::doctor::run(),
         Some(Commands::RotateToken) => crate::cli::rotate_token::run(),
+        Some(Commands::Update(args)) => crate::cli::update::run(args),
         None => {
             // Daemon is async; build a runtime here so non-daemon subcommands
             // never pay for one.
