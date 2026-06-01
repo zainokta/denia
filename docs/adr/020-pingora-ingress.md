@@ -29,8 +29,9 @@ file-provider config) and the loopback-bridge transport are removed.
   `RouteTable`, picks a healthy replica (round-robin), and dials the workload's
   Unix socket directly with `HttpPeer::new_uds(path, false, sni)`. Unknown host →
   404; no healthy replica → scale-from-zero activation (single-flight, bounded by
-  `ACTIVATION_WAIT`) → 503 on timeout. The bridge's control brain (replica pools,
-  health, activation hook, idle `last_activity`, access log) moved into
+  `ACTIVATION_WAIT`, with a per-service failure backoff before retrying) → 503 on
+  timeout or backoff. The bridge's control brain (replica pools, health,
+  activation hook, idle `last_activity`, access log) moved into
   `IngressState`; only the UDS→TCP *transport* was deleted. `bridge_port`,
   `BridgeAllocator`, and `DENIA_BRIDGE_START_PORT` are gone.
 - **`:80` challenge + redirect:** `request_filter` intercepts
@@ -79,10 +80,12 @@ file-provider config) and the loopback-bridge transport are removed.
   production rate limits during testing.
 - **Unauthenticated activation posture (accepted):** an unauthenticated client on
   `:80`/`:443` can trigger scale-from-zero for an already-routed cold service.
-  This is bounded by per-service single-flight + `ACTIVATION_WAIT` (no unbounded
-  thread/issuance growth) and the challenge hop always dials the fixed control
-  backend (no SSRF). General request rate-limiting on the data plane is
-  intentionally out of scope for this ADR.
+  This is bounded by per-service single-flight + `ACTIVATION_WAIT` + a
+  per-service failure backoff after failed or timed-out activation (no unbounded
+  thread/issuance growth, and broken services cannot be relaunched on every
+  request). The challenge hop always dials the fixed control backend (no SSRF).
+  General request rate-limiting on the data plane is intentionally out of scope
+  for this ADR.
 - **TLS backend is boringssl** — Pingora's `rustls` path is a stub; Cargo enables
   the `boringssl` feature explicitly. Key bytes are owned by foreign types
   (`boring`, `instant-acme`); zeroize-on-drop is not feasible, so the mitigation

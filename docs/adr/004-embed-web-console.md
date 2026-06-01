@@ -36,6 +36,10 @@ Serve the console from the Rust binary as a static single-page app.
   unmatched non-asset paths resolve to `_shell.html` (client-side routing);
   unmatched asset-looking paths (last segment has a `.`) return 404. The console
   is same-origin with `/v1`, so no CORS.
+- **Production debug surface.** TanStack router/query devtools are not mounted in
+  the embedded console route. Production SPA bundles must not expose query or
+  mutation cache inspection UI that could retain one-time tokens, registry
+  credentials, service environment values, or password-bearing mutations.
 - **Build flow.** Two-step build, one run: `pnpm build` (in `web/`) then
   `cargo build`/`cargo run`. The single binary then serves both API and UI on
   `DENIA_BIND_ADDR` (default `127.0.0.1:7180`).
