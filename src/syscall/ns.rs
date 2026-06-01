@@ -1238,11 +1238,8 @@ unsafe fn child_bind_dir_rw(
             let mut component = full_bytes[..index].to_vec();
             component.push(0);
             let component = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(&component) };
-            if unsafe { libc::mkdir(component.as_ptr(), 0o755) } < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() != Some(libc::EEXIST) {
-                    unsafe { child_setup_fail(pipes, b'k') };
-                }
+            if mkdir_mountpoint_component_no_symlink(component).is_err() {
+                unsafe { child_setup_fail(pipes, b'k') };
             }
         }
         index += 1;
@@ -1258,6 +1255,32 @@ unsafe fn child_bind_dir_rw(
     } < 0
     {
         unsafe { child_setup_fail(pipes, b'k') };
+    }
+}
+
+fn mkdir_mountpoint_component_no_symlink(component: &std::ffi::CStr) -> Result<(), i32> {
+    if unsafe { libc::mkdir(component.as_ptr(), 0o755) } == 0 {
+        return Ok(());
+    }
+
+    let errno = std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EIO);
+    if errno != libc::EEXIST {
+        return Err(errno);
+    }
+
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::lstat(component.as_ptr(), stat.as_mut_ptr()) } < 0 {
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO));
+    }
+    let stat = unsafe { stat.assume_init() };
+    match stat.st_mode & libc::S_IFMT {
+        libc::S_IFDIR => Ok(()),
+        libc::S_IFLNK => Err(libc::ELOOP),
+        _ => Err(libc::ENOTDIR),
     }
 }
 
@@ -2092,6 +2115,21 @@ mod tests {
             matches!(error, SyscallError::Capability(ref reason) if reason.contains("ro bind dest must be absolute")),
             "expected ro bind dest error, got: {error:?}"
         );
+    }
+
+    #[test]
+    fn socket_bind_mountpoint_creation_rejects_symlink_components() {
+        let root = tempfile::tempdir().expect("root");
+        let escaped = tempfile::tempdir().expect("escaped");
+        let link = root.path().join("var");
+        std::os::unix::fs::symlink(escaped.path(), &link).expect("symlink");
+        let component = CString::new(link.as_os_str().as_bytes()).expect("component");
+
+        let err = mkdir_mountpoint_component_no_symlink(&component)
+            .expect_err("symlink components must be rejected");
+
+        assert_eq!(err, libc::ELOOP);
+        assert!(!escaped.path().join("lib").exists());
     }
 
     #[test]

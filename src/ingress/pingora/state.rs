@@ -18,6 +18,7 @@ use pingora::tls::{pkey::PKey, pkey::Private, x509::X509};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::Mutex;
+use tokio::time::Instant as TokioInstant;
 use uuid::Uuid;
 
 use crate::access_log::AccessLogStore;
@@ -248,6 +249,8 @@ impl CertStore {
 /// Maximum time a request waits for a cold-start activation to produce a
 /// healthy replica before giving up with a 503.
 pub const ACTIVATION_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Per-service cooldown after a failed or timed-out cold start.
+pub const ACTIVATION_FAILURE_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Number of times a waiter re-checks `next_socket` after a successful
 /// activation before treating the absence of a socket as a failure.
@@ -265,6 +268,8 @@ pub trait ActivationHook: Send + Sync {
 pub enum ActivationError {
     #[error("activation timed out")]
     Timeout,
+    #[error("activation temporarily backed off after a recent failure")]
+    Backoff,
     #[error("activation failed: {0}")]
     Failed(String),
 }
@@ -337,6 +342,8 @@ pub struct IngressState {
     activator: Mutex<Option<Arc<dyn ActivationHook>>>,
     /// Per-service single-flight gate serializing concurrent cold starts.
     activation_gates: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    /// Per-service failure cooldowns after failed or timed-out activation.
+    activation_backoffs: Mutex<BTreeMap<String, TokioInstant>>,
 }
 
 impl IngressState {
@@ -349,6 +356,7 @@ impl IngressState {
             access_log,
             activator: Mutex::new(None),
             activation_gates: Mutex::new(BTreeMap::new()),
+            activation_backoffs: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -501,6 +509,30 @@ impl IngressState {
             .clone()
     }
 
+    async fn activation_backoff_active(&self, service: &str) -> bool {
+        let mut backoffs = self.activation_backoffs.lock().await;
+        let Some(until) = backoffs.get(service).copied() else {
+            return false;
+        };
+        if until > TokioInstant::now() {
+            return true;
+        }
+        backoffs.remove(service);
+        false
+    }
+
+    async fn record_activation_failure(&self, service: &str) {
+        let mut backoffs = self.activation_backoffs.lock().await;
+        backoffs.insert(
+            service.to_string(),
+            TokioInstant::now() + ACTIVATION_FAILURE_BACKOFF,
+        );
+    }
+
+    async fn clear_activation_failure(&self, service: &str) {
+        self.activation_backoffs.lock().await.remove(service);
+    }
+
     /// Resolve a healthy socket for `service`, triggering a single-flight
     /// cold-start activation when none is available and an activator is set.
     ///
@@ -517,6 +549,9 @@ impl IngressState {
         let Some(activator) = activator else {
             return Ok(None);
         };
+        if self.activation_backoff_active(service).await {
+            return Err(ActivationError::Backoff);
+        }
 
         let gate = self.activation_gate(service).await;
         let _guard = gate.lock().await;
@@ -525,17 +560,30 @@ impl IngressState {
         if let Some(socket) = self.next_socket(service).await {
             return Ok(Some(socket));
         }
+        if self.activation_backoff_active(service).await {
+            return Err(ActivationError::Backoff);
+        }
 
         // Bound the whole activation + post-activation wait so a hung
         // `ActivationHook::activate()` cannot block the proxy hot path forever
-        // (audit A4). On elapse we drop the gate guard and return `Timeout`,
-        // letting a later request retry fresh.
-        match tokio::time::timeout(ACTIVATION_WAIT, self.activate_and_wait(service, &activator))
-            .await
+        // (audit A4). On failure/timeout, set a short backoff so public
+        // requests cannot serialize repeated expensive launches for a broken
+        // service.
+        let result = match tokio::time::timeout(
+            ACTIVATION_WAIT,
+            self.activate_and_wait(service, &activator),
+        )
+        .await
         {
             Ok(result) => result,
             Err(_elapsed) => Err(ActivationError::Timeout),
+        };
+        if result.is_ok() {
+            self.clear_activation_failure(service).await;
+        } else {
+            self.record_activation_failure(service).await;
         }
+        result
     }
 
     /// Run the activation hook then poll for a healthy socket. Wrapped by
@@ -1054,8 +1102,8 @@ mod pool_tests {
         assert_eq!(state.resolve_or_activate("svc").await.unwrap(), None);
     }
 
-    #[tokio::test]
-    async fn activation_failure_resets_latch() {
+    #[tokio::test(start_paused = true)]
+    async fn activation_failure_enters_backoff_before_retry() {
         let state = Arc::new(IngressState::default());
         let calls = Arc::new(AtomicUsize::new(0));
         let hook = Arc::new(FakeActivator {
@@ -1069,7 +1117,16 @@ mod pool_tests {
         assert!(state.resolve_or_activate("svc").await.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        // Latch reset: a second attempt runs a fresh (now succeeding) activation.
+        // Immediate retry is denied by failure backoff and does not launch again.
+        assert!(matches!(
+            state.resolve_or_activate("svc").await,
+            Err(ActivationError::Backoff)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(ACTIVATION_FAILURE_BACKOFF).await;
+
+        // After backoff, a fresh activation is allowed and can recover.
         let resolved = state.resolve_or_activate("svc").await.expect("resolve");
         assert!(resolved.is_some());
         assert_eq!(calls.load(Ordering::SeqCst), 2);

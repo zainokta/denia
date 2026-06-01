@@ -146,6 +146,14 @@ the host path.
 The two-stage unshare now fires whenever an overlay is configured, any read-only
 bind is requested, `/dev` setup is requested, **or** a socket bind is configured.
 
+**Socket bind mountpoint safety amendment (2026-06-01).** The pre-userns socket
+bind still runs privileged for the reasons above, but its destination path is
+image-influenced because the overlay `merged` tree contains rootfs symlinks. When
+creating the mountpoint chain for the identity socket bind, the child must not
+follow existing symlink components. Each existing component is checked with
+`lstat`; only real directories are accepted. Symlinks fail the child setup before
+the bind mount is attempted.
+
 **Workdir normalization.** OCI `WorkingDir` is attacker-influenced through the
 image config, so the runtime validates it before planning or forking. Workdirs
 must be absolute, must not contain NUL, `.` or `..` components, and are created
@@ -168,6 +176,9 @@ errors are reported through the child setup pipe instead of being ignored.
   `/usr/local/bin` install. The `/.old_root`-relative bind source is gone.
 - Malicious image workdirs can no longer create host directories outside the
   workload root before `pivot_root`.
+- Malicious rootfs symlinks on the socket bind destination prefix can no longer
+  make privileged pre-userns mountpoint creation walk outside the selected new
+  root.
 
 ## Risks
 

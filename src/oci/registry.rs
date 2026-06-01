@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,6 +62,7 @@ impl OciImagePuller for RegistryImagePuller {
         let reference: Reference = image
             .parse()
             .map_err(|e| OciError::Pull(format!("invalid image reference '{image}': {e}")))?;
+        validate_registry_resolution(&reference).await?;
 
         let (manifest, manifest_digest, config_json) = self
             .client
@@ -130,6 +132,88 @@ impl OciImagePuller for RegistryImagePuller {
 
     async fn read_layout(&self, layout_dir: &Path) -> Result<PulledImage, OciError> {
         super::layout::read_oci_layout(layout_dir)
+    }
+}
+
+async fn validate_registry_resolution(reference: &Reference) -> Result<(), OciError> {
+    let registry = reference.resolve_registry();
+    let (host, port) = registry_lookup_target(registry)?;
+    let addrs: Vec<IpAddr> = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|e| OciError::Pull(format!("registry DNS lookup failed for {registry}: {e}")))?
+        .map(|addr| addr.ip())
+        .collect();
+    validate_resolved_registry_addrs(registry, &addrs)
+}
+
+fn registry_lookup_target(registry: &str) -> Result<(String, u16), OciError> {
+    if let Some(rest) = registry.strip_prefix('[') {
+        let end = rest
+            .find(']')
+            .ok_or_else(|| OciError::Pull(format!("invalid registry authority: {registry}")))?;
+        let host = &rest[..end];
+        let suffix = &rest[end + 1..];
+        if suffix.is_empty() {
+            return Ok((host.to_string(), 443));
+        }
+        let port = suffix
+            .strip_prefix(':')
+            .ok_or_else(|| OciError::Pull(format!("invalid registry authority: {registry}")))?
+            .parse::<u16>()
+            .map_err(|_| OciError::Pull(format!("invalid registry port: {registry}")))?;
+        return Ok((host.to_string(), port));
+    }
+
+    if registry.matches(':').count() == 1 {
+        let (host, port) = registry
+            .split_once(':')
+            .ok_or_else(|| OciError::Pull(format!("invalid registry authority: {registry}")))?;
+        let port = port
+            .parse::<u16>()
+            .map_err(|_| OciError::Pull(format!("invalid registry port: {registry}")))?;
+        return Ok((host.to_string(), port));
+    }
+    Ok((registry.to_string(), 443))
+}
+
+fn validate_resolved_registry_addrs(registry: &str, addrs: &[IpAddr]) -> Result<(), OciError> {
+    if addrs.is_empty() {
+        return Err(OciError::Pull(format!(
+            "registry DNS lookup returned no addresses for {registry}"
+        )));
+    }
+    if let Some(blocked) = addrs.iter().copied().find(|ip| is_blocked_registry_ip(*ip)) {
+        return Err(OciError::Pull(format!(
+            "registry {registry} resolved to blocked address {blocked}"
+        )));
+    }
+    Ok(())
+}
+
+fn is_blocked_registry_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+                || octets[0] == 0
+                || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_blocked_registry_ip(IpAddr::V4(v4));
+            }
+            let first = ip.segments()[0];
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+        }
     }
 }
 
@@ -208,4 +292,35 @@ pub fn build_cache(
 #[allow(dead_code)]
 pub fn share_cache(cache: LayerCache) -> Arc<LayerCache> {
     Arc::new(cache)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn resolved_registry_addresses_reject_private_results() {
+        let addrs = [
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10)),
+        ];
+
+        let err = validate_resolved_registry_addrs("registry.example", &addrs)
+            .expect_err("any private DNS answer must be rejected");
+
+        assert!(err.to_string().contains("registry.example"));
+    }
+
+    #[test]
+    fn registry_authority_splits_host_and_port() {
+        assert_eq!(
+            registry_lookup_target("ghcr.io").expect("host"),
+            ("ghcr.io".to_string(), 443)
+        );
+        assert_eq!(
+            registry_lookup_target("registry.example:5000").expect("host"),
+            ("registry.example".to_string(), 5000)
+        );
+    }
 }

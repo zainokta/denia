@@ -37,11 +37,12 @@ mirrors a gap Dokploy closes with domain verification.
 - Verification is **operator-triggered** (manual). `POST
   /v1/services/{id}/domains/{domain_id}/verify` fetches
   `http://{hostname}/.well-known/denia-challenge/{token}` with 5s connect/read
-  timeouts, no redirects, a 1 KiB body cap, and a constant-time body compare
-  (`subtle`). Success sets `verified` and re-renders Traefik; failure sets
-  `failed` with a short `last_error`. Re-triggering a `failed` domain retries.
-  One in-flight verification per domain is enforced via an in-memory
-  `HashSet<Uuid>` guard (409 on concurrent attempt).
+  timeouts, no redirects, a streaming 1 KiB body cap enforced before buffering
+  beyond the cap, and a constant-time body compare (`subtle`). Success sets
+  `verified` and re-renders Traefik; failure sets `failed` with a short
+  `last_error`. Re-triggering a `failed` domain retries. One in-flight
+  verification per domain is enforced via an in-memory `HashSet<Uuid>` guard
+  (409 on concurrent attempt).
 - The verifier rejects internal destinations before the HTTP fetch, including
   IPv4 private/link-local/loopback/CGNAT and IPv6 loopback, link-local,
   unique-local (`fc00::/7`), multicast (`ff00::/8`), and IPv4-mapped internal

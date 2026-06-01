@@ -77,6 +77,12 @@ configured on each service").
   only for anonymous pulls. `ExternalImageSource.credential` is no longer
   accepted for new service writes and deploy fails closed if an existing row
   still contains it; authenticated image pulls must use a project `Registry`.
+- Before each registry pull, Denia resolves the OCI registry host that
+  `oci-client` will use (including the `docker.io` → `index.docker.io` rewrite)
+  and rejects empty DNS results or any address in loopback, private, link-local,
+  multicast, unspecified, broadcast, CGNAT, IPv6 unique-local/link-local, or
+  IPv4-mapped internal ranges. This complements the CRUD-time literal-IP checks
+  and prevents DNS names from bypassing the private-address policy at pull time.
 
 - Add admin-only CRUD endpoints under
   `/v1/projects/{project_id}/registries`. Deleting a registry that any

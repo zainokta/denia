@@ -95,10 +95,7 @@ impl DomainVerifier for HttpDomainVerifier {
             return Err(DomainVerifyError::HttpStatus(status.as_u16()));
         }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| DomainVerifyError::BodyTooLarge)?;
+        let bytes = read_limited_body(response).await?;
         if bytes.len() > MAX_BODY {
             return Err(DomainVerifyError::BodyTooLarge);
         }
@@ -112,6 +109,25 @@ impl DomainVerifier for HttpDomainVerifier {
         }
         Ok(())
     }
+}
+
+async fn read_limited_body(mut response: reqwest::Response) -> Result<Vec<u8>, DomainVerifyError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| DomainVerifyError::BodyTooLarge)?
+    {
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or(DomainVerifyError::BodyTooLarge)?;
+        if next_len > MAX_BODY {
+            return Err(DomainVerifyError::BodyTooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn is_internal_ip(ip: &std::net::IpAddr) -> bool {
@@ -201,6 +217,32 @@ mod verifier_tests {
             .await;
         let v = client_with_base(&server.base_url());
         let err = v.verify("ignored.example.com", "tok").await.unwrap_err();
+        assert_eq!(err, DomainVerifyError::BodyTooLarge);
+    }
+
+    #[tokio::test]
+    async fn verifier_body_reader_stops_after_limit() {
+        let server = MockServer::start_async().await;
+        let big = "x".repeat(MAX_BODY + 1);
+        let _m = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/.well-known/denia-challenge/tok");
+                then.status(200).body(big);
+            })
+            .await;
+        let v = client_with_base(&server.base_url());
+        let response = v
+            .client
+            .get(format!(
+                "{}/.well-known/denia-challenge/tok",
+                server.base_url()
+            ))
+            .send()
+            .await
+            .expect("response");
+
+        let err = read_limited_body(response).await.unwrap_err();
+
         assert_eq!(err, DomainVerifyError::BodyTooLarge);
     }
 
