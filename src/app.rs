@@ -440,13 +440,28 @@ pub fn build_router(state: AppState) -> Router {
             "/.well-known/acme-challenge/{token}",
             get(api::domains::acme_challenge_handler),
         )
-        .nest("/v1", auth_public.merge(authed))
+        // `console::public_router` (the ticket-authenticated websocket upgrade)
+        // is merged OUTSIDE the bearer-auth layer: browser websockets cannot send
+        // an `Authorization` header, so the single-use console ticket is the
+        // credential. See ADR-033.
+        .nest(
+            "/v1",
+            auth_public
+                .merge(authed)
+                .merge(api::console::public_router()),
+        )
         .nest(
             "/v2",
-            crate::registry::api_v2::router().route_layer(middleware::from_fn_with_state(
-                state.clone(),
-                crate::registry::api_v2::registry_auth,
-            )),
+            crate::registry::api_v2::router()
+                .route_layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::registry::api_v2::registry_auth,
+                ))
+                // Exempt the registry from the global 1 MiB body cap below:
+                // image layer uploads (PATCH/PUT) are far larger. This inner
+                // layer overrides the outer DefaultBodyLimit for `/v2` only;
+                // `/v1` stays capped at 1 MiB.
+                .layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(security_headers))

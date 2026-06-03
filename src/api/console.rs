@@ -589,4 +589,25 @@ mod tests {
         assert!(consume_ticket(service_id, &ticket).is_ok());
         assert!(consume_ticket(service_id, &ticket).is_err());
     }
+
+    #[tokio::test]
+    async fn console_ws_route_is_registered() {
+        // Regression: `public_router()` must be merged into the app router, or
+        // the ticket-authenticated websocket upgrade 404s and the browser
+        // console reports "console websocket failed". A plain GET is rejected by
+        // the upgrade/ticket checks (4xx) but must NOT be 404.
+        let state = test_state();
+        let service_id = uuid::Uuid::now_v7();
+        let resp = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/services/{service_id}/console/ws"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::NOT_FOUND);
+    }
 }
