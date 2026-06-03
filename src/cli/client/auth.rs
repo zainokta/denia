@@ -1,5 +1,5 @@
 //! `denia auth`: interactive login → session token → mint long-lived API token
-//! → save to client profile. See ADR-035.
+//! → save to client profile. See ADR-034.
 
 use std::io::{BufRead, Write};
 

@@ -9,7 +9,7 @@
 **Tech Stack:** Rust 2024, axum 0.8, tokio, `tar` + `zstd` (present), `reqwest` (present, rustls), `crossterm` (present — password no-echo), new dep `ignore` (gitignore/dockerignore matching), `httpmock`/`assert_cmd` (dev-deps, present).
 
 **Spec:** `docs/superpowers/specs/2026-06-03-denia-push-working-tree-deploy-design.md`
-**ADR:** `docs/adr/035-client-driven-deploy-upload.md`
+**ADR:** `docs/adr/034-client-driven-deploy-upload.md`
 
 ---
 
@@ -78,7 +78,7 @@ Commit format: `<type>(<scope>): message` (`feat`/`fix`/`docs`/`test`/`refactor`
 - [ ] **Step 1: Add the dependency** under `[dependencies]` (keep alphabetical-ish grouping near other utility crates):
 
 ```toml
-# gitignore/.dockerignore-aware working-tree walking for `denia push` (ADR-035).
+# gitignore/.dockerignore-aware working-tree walking for `denia push` (ADR-034).
 ignore = "0.4"
 ```
 
@@ -91,7 +91,7 @@ Expected: builds; `ignore` appears in `Cargo.lock`.
 
 ```bash
 git add Cargo.toml Cargo.lock
-git commit -m "build: add ignore crate for working-tree packing (ADR-035)"
+git commit -m "build: add ignore crate for working-tree packing (ADR-034)"
 ```
 
 ### Task 0.2: Upload config fields
@@ -138,7 +138,7 @@ Expected: PASS.
 
 ```bash
 git add src/config.rs
-git commit -m "feat(config): add upload staging dir + size/entry/ttl caps (ADR-035)"
+git commit -m "feat(config): add upload staging dir + size/entry/ttl caps (ADR-034)"
 ```
 
 ---
@@ -165,7 +165,7 @@ git commit -m "feat(config): add upload staging dir + size/entry/ttl caps (ADR-0
 
 ```bash
 git add src/artifacts/mod.rs
-git commit -m "feat(artifacts): add UploadedContext source variant (ADR-035)"
+git commit -m "feat(artifacts): add UploadedContext source variant (ADR-034)"
 ```
 
 ### Task 1.2: `acquire_staged` + dispatch arms
@@ -275,7 +275,7 @@ Expected: PASS.
 
 ```bash
 git add src/artifacts/acquirer.rs
-git commit -m "feat(artifacts): build OCI image from a staged upload context (ADR-035)"
+git commit -m "feat(artifacts): build OCI image from a staged upload context (ADR-034)"
 ```
 
 ---
@@ -420,7 +420,7 @@ Expected: PASS.
 
 ```bash
 git add src/api/uploads.rs
-git commit -m "feat(api): hardened tar.zst extraction for build-context uploads (ADR-035)"
+git commit -m "feat(api): hardened tar.zst extraction for build-context uploads (ADR-034)"
 ```
 
 ### Task 2.2: Upload route + body cap + role check
@@ -463,7 +463,7 @@ Expected: PASS.
 
 ```bash
 git add src/api/uploads.rs src/app.rs src/api/mod.rs
-git commit -m "feat(api): add POST /v1/services/{id}/uploads endpoint (ADR-035)"
+git commit -m "feat(api): add POST /v1/services/{id}/uploads endpoint (ADR-034)"
 ```
 
 ### Task 2.3: Expired-upload cleanup task
@@ -480,7 +480,7 @@ Run: `CARGO_TARGET_DIR=/tmp/denia-verify cargo test sweep_expired_uploads && CAR
 
 ```bash
 git add src/api/uploads.rs src/daemon.rs
-git commit -m "feat: periodically sweep expired build-context uploads (ADR-035)"
+git commit -m "feat: periodically sweep expired build-context uploads (ADR-034)"
 ```
 
 ---
@@ -546,7 +546,7 @@ Expected: PASS.
 
 ```bash
 git add src/domain/deployment.rs
-git commit -m "feat(domain): add Upload deployment request variant (ADR-035)"
+git commit -m "feat(domain): add Upload deployment request variant (ADR-034)"
 ```
 
 ### Task 3.2: Coordinator `Upload` arm
@@ -579,7 +579,7 @@ Unlike Git/ExternalImage, the Upload arm does **not** require a matching `servic
 
 ```bash
 git add src/deploy/coordinator.rs
-git commit -m "feat(deploy): build + deploy from an uploaded context (ADR-035)"
+git commit -m "feat(deploy): build + deploy from an uploaded context (ADR-034)"
 ```
 
 ### Task 3.3: Staged-dir cleanup after deploy
@@ -614,7 +614,7 @@ The spawned task already runs `run_with_deps` then an autoscale block. After the
 
 ```bash
 git add src/api/deployments.rs
-git commit -m "feat(api): clean up staged upload after deploy completes (ADR-035)"
+git commit -m "feat(api): clean up staged upload after deploy completes (ADR-034)"
 ```
 
 ---
@@ -699,7 +699,7 @@ Expected: PASS.
 
 ```bash
 git add src/cli/client/profile.rs
-git commit -m "feat(cli): writable client profile store (ADR-035)"
+git commit -m "feat(cli): writable client profile store (ADR-034)"
 ```
 
 ---
@@ -779,7 +779,7 @@ Expected: PASS (including the existing `parses_project_and_service` / `rejects_m
 
 ```bash
 git add src/cli/client/manifest.rs
-git commit -m "feat(cli): extend .denia manifest with build + create config (ADR-035)"
+git commit -m "feat(cli): extend .denia manifest with build + create config (ADR-034)"
 ```
 
 ---
@@ -829,7 +829,7 @@ impl ClientApi {
 
 ```bash
 git add src/cli/client/http.rs
-git commit -m "feat(cli): client API methods for login, token mint, me (ADR-035)"
+git commit -m "feat(cli): client API methods for login, token mint, me (ADR-034)"
 ```
 
 ### Task 6.2: `denia auth` command
@@ -858,7 +858,7 @@ Flow (no echo of secrets; never log token):
 
 ```bash
 git add src/cli/client/auth.rs src/cli/client/mod.rs tests/cli_auth.rs
-git commit -m "feat(cli): add denia auth (login + API token mint) (ADR-035)"
+git commit -m "feat(cli): add denia auth (login + API token mint) (ADR-034)"
 ```
 
 ---
@@ -931,7 +931,7 @@ pub fn pack_context(
 
 ```bash
 git add src/cli/client/pack.rs src/cli/client/mod.rs
-git commit -m "feat(cli): working-tree packer honoring .gitignore/.dockerignore (ADR-035)"
+git commit -m "feat(cli): working-tree packer honoring .gitignore/.dockerignore (ADR-034)"
 ```
 
 ---
@@ -957,7 +957,7 @@ Add:
 
 ```bash
 git add src/cli/client/http.rs
-git commit -m "feat(cli): client API methods for upload + deploy (ADR-035)"
+git commit -m "feat(cli): client API methods for upload + deploy (ADR-034)"
 ```
 
 ### Task 8.2: `denia push` command
@@ -984,7 +984,7 @@ Flow:
 
 ```bash
 git add src/cli/client/push.rs src/cli/client/mod.rs tests/cli_push.rs
-git commit -m "feat(cli): add denia push (working-tree upload deploy) (ADR-035)"
+git commit -m "feat(cli): add denia push (working-tree upload deploy) (ADR-034)"
 ```
 
 ### Task 8.3: Wire subcommands into the CLI
@@ -1022,7 +1022,7 @@ Expected: both subcommands listed.
 
 ```bash
 git add src/cli/mod.rs
-git commit -m "feat(cli): register denia auth + denia push subcommands (ADR-035)"
+git commit -m "feat(cli): register denia auth + denia push subcommands (ADR-034)"
 ```
 
 ---
@@ -1033,12 +1033,12 @@ git commit -m "feat(cli): register denia auth + denia push subcommands (ADR-035)
 
 **Files:** Modify `README.md`
 
-- [ ] **Step 1:** Add a Features bullet (client-driven deploy), a CLI subcommands table row each for `denia auth` and `denia push`, an API highlight for `POST /v1/services/{id}/uploads`, and a new "## Deploy from your machine" section documenting `denia auth` → `.denia` → `denia push` with the manifest example and the Dockerfile requirement. Reference ADR-035.
+- [ ] **Step 1:** Add a Features bullet (client-driven deploy), a CLI subcommands table row each for `denia auth` and `denia push`, an API highlight for `POST /v1/services/{id}/uploads`, and a new "## Deploy from your machine" section documenting `denia auth` → `.denia` → `denia push` with the manifest example and the Dockerfile requirement. Reference ADR-034.
 - [ ] **Step 2: Commit**
 
 ```bash
 git add README.md
-git commit -m "docs: document denia auth + denia push client deploy (ADR-035)"
+git commit -m "docs: document denia auth + denia push client deploy (ADR-034)"
 ```
 
 ### Task 9.2: Full verification
@@ -1056,7 +1056,7 @@ DENIA_RUN_PRIVILEGED_TESTS=1 cargo test --test linux_runtime_privileged -- --ign
 
 ```bash
 git add -A
-git commit -m "chore: rustfmt + clippy for client-driven deploy (ADR-035)"
+git commit -m "chore: rustfmt + clippy for client-driven deploy (ADR-034)"
 ```
 
 ---
