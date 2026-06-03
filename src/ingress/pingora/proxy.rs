@@ -117,26 +117,56 @@ pub struct DeniaProxy {
     /// Whether this instance is the `:80` listener (challenge interception +
     /// HTTP→HTTPS redirect run only here; `:443` falls straight through).
     is_http: bool,
+    /// The configured control domain (e.g. `denia.example.com`), if any.
+    /// Requests for this host are routed directly to `control_backend`.
+    control_domain: Option<String>,
+    /// Whether the control domain is TLS-enabled (used for redirect decisions
+    /// on `:80` when the host matches `control_domain`).
+    control_tls: bool,
 }
 
 impl DeniaProxy {
     /// Build a `:80` proxy (challenge interception + redirect enabled).
-    pub fn http(state: Arc<IngressState>, control_backend: SocketAddr) -> Self {
-        Self {
-            state,
-            control_backend,
-            is_http: true,
-        }
+    pub fn http(
+        state: Arc<IngressState>,
+        control_backend: SocketAddr,
+        control_domain: Option<String>,
+        control_tls: bool,
+    ) -> Self {
+        Self { state, control_backend, is_http: true, control_domain, control_tls }
     }
 
     /// Build a `:443` proxy (TLS already terminated by the listener; no
     /// challenge/redirect special-casing).
-    pub fn https(state: Arc<IngressState>, control_backend: SocketAddr) -> Self {
-        Self {
-            state,
-            control_backend,
-            is_http: false,
-        }
+    pub fn https(
+        state: Arc<IngressState>,
+        control_backend: SocketAddr,
+        control_domain: Option<String>,
+        control_tls: bool,
+    ) -> Self {
+        Self { state, control_backend, is_http: false, control_domain, control_tls }
+    }
+}
+
+/// Whether `host` is the configured control domain (exact, already-lowercased
+/// match; both sides are lowercased at their sources — `request_host` lowercases
+/// the request Host, config lowercases `control_domain`).
+pub fn is_control_host(host: &str, control_domain: Option<&str>) -> bool {
+    control_domain == Some(host)
+}
+
+/// The effective `tls_for_host` fed to [`classify_port80`]: the control domain
+/// uses `control_tls`; everything else uses its route's tls flag.
+pub fn control_tls_for_host(
+    host: &str,
+    control_domain: Option<&str>,
+    control_tls: bool,
+    route_tls: Option<bool>,
+) -> Option<bool> {
+    if is_control_host(host, control_domain) {
+        Some(control_tls)
+    } else {
+        route_tls
     }
 }
 
@@ -201,7 +231,13 @@ impl ProxyHttp for DeniaProxy {
 
         let path = request_path(session);
         let host = request_host(session);
-        let tls_for_host = self.state.routes().resolve(&host).map(|r| r.tls);
+        let route_tls = self.state.routes().resolve(&host).map(|r| r.tls);
+        let tls_for_host = control_tls_for_host(
+            &host,
+            self.control_domain.as_deref(),
+            self.control_tls,
+            route_tls,
+        );
 
         match classify_port80(&path, &host, tls_for_host) {
             Port80Decision::ToControlBackend => {
@@ -237,6 +273,15 @@ impl ProxyHttp for DeniaProxy {
         }
 
         let host = request_host(session);
+
+        if is_control_host(&host, self.control_domain.as_deref()) {
+            return Ok(Box::new(HttpPeer::new(
+                self.control_backend,
+                false,
+                self.control_backend.ip().to_string(),
+            )));
+        }
+
         // Resolve the Host to its route, capturing BOTH the pool lookup key
         // (`service_id` = `service.id.to_string()`, what `add_replica` keys by
         // and the activator parses as a UUID) and the human `service_name` (for
@@ -448,5 +493,32 @@ mod classify_tests {
         assert_eq!(entry.status, 200);
         assert_eq!(entry.bytes, Some(1234));
         assert!(!entry.recorded_at.is_empty());
+    }
+
+    #[test]
+    fn is_control_host_matches_exact_lowercased() {
+        assert!(is_control_host("denia.example.com", Some("denia.example.com")));
+        assert!(!is_control_host("other.example.com", Some("denia.example.com")));
+        assert!(!is_control_host("denia.example.com", None));
+    }
+
+    #[test]
+    fn control_tls_for_host_overrides_route_lookup() {
+        assert_eq!(
+            control_tls_for_host("denia.example.com", Some("denia.example.com"), true, None),
+            Some(true)
+        );
+        assert_eq!(
+            control_tls_for_host("denia.example.com", Some("denia.example.com"), false, None),
+            Some(false)
+        );
+        assert_eq!(
+            control_tls_for_host("svc.example.com", Some("denia.example.com"), true, Some(true)),
+            Some(true)
+        );
+        assert_eq!(
+            control_tls_for_host("nope.example.com", Some("denia.example.com"), true, None),
+            None
+        );
     }
 }

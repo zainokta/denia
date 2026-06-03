@@ -142,7 +142,7 @@ pub async fn run() -> anyhow::Result<()> {
     // plane keeps serving `bind_addr` (axum), never aborting the process (A6).
     let (pingora_shutdown_tx, pingora_shutdown_rx) = tokio::sync::watch::channel(false);
     let pingora_cfg =
-        IngressServerConfig::from_ports(config.http_port, config.https_port, config.bind_addr);
+        IngressServerConfig::from_ports(config.http_port, config.https_port, config.bind_addr, None, false);
     let pingora_thread = {
         let ingress = state.ingress.clone();
         std::thread::Builder::new()
