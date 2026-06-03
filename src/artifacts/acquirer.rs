@@ -584,11 +584,8 @@ mod tests {
         let mut config = AppConfig::for_test("test-token");
         config.uploads_dir = uploads_dir.clone();
 
-        let acquirer = ArtifactAcquirer::with_traits(
-            config,
-            Arc::new(FakePuller),
-            Arc::new(FakeUnpacker),
-        );
+        let acquirer =
+            ArtifactAcquirer::with_traits(config, Arc::new(FakePuller), Arc::new(FakeUnpacker));
 
         let runner = FakeCommandRunner::new(vec![CommandOutput {
             stdout: "sha256:abc123staged".to_string(),

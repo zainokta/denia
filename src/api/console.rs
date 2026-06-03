@@ -40,8 +40,7 @@ const MAX_CONSOLE_SESSIONS_PER_SERVICE: usize = 2;
 type TicketStore = Arc<Mutex<HashMap<String, ConsoleTicket>>>;
 type ServiceLimitStore = Arc<Mutex<HashMap<Uuid, Arc<Semaphore>>>>;
 
-static TICKETS: LazyLock<TicketStore> =
-    LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+static TICKETS: LazyLock<TicketStore> = LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 static CONSOLE_LIMIT: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_CONSOLE_SESSIONS)));
 static SERVICE_LIMITS: LazyLock<ServiceLimitStore> =

@@ -1,7 +1,12 @@
 use std::path::{Component, Path};
 use std::time::Duration;
 
-use axum::{Json, Router, body::Body, extract::{Path as AxumPath, State}, routing::post};
+use axum::{
+    Json, Router,
+    body::Body,
+    extract::{Path as AxumPath, State},
+    routing::post,
+};
 use chrono::Utc;
 use serde::Serialize;
 use tokio_stream::StreamExt;
@@ -82,7 +87,11 @@ pub enum ExtractError {
 /// Extract a `tar.zst` into `dest`, accepting only regular files and dirs.
 ///
 /// On error, partially-extracted files may remain in `dest`; cleanup is the caller's responsibility.
-pub fn extract_tar_zst(bytes: &[u8], dest: &Path, limits: &ExtractLimits) -> Result<(), ExtractError> {
+pub fn extract_tar_zst(
+    bytes: &[u8],
+    dest: &Path,
+    limits: &ExtractLimits,
+) -> Result<(), ExtractError> {
     let decoder = zstd::stream::read::Decoder::new(bytes)?;
     let mut archive = tar::Archive::new(decoder);
     archive.set_preserve_permissions(false);
@@ -99,18 +108,27 @@ pub fn extract_tar_zst(bytes: &[u8], dest: &Path, limits: &ExtractLimits) -> Res
         }
         let etype = entry.header().entry_type();
         if !(etype.is_file() || etype.is_dir()) {
-            return Err(ExtractError::Rejected(format!("disallowed entry type: {etype:?}")));
+            return Err(ExtractError::Rejected(format!(
+                "disallowed entry type: {etype:?}"
+            )));
         }
         let path = entry.path()?.into_owned();
         for c in path.components() {
             match c {
                 Component::Normal(_) | Component::CurDir => {}
-                _ => return Err(ExtractError::Rejected(format!("unsafe path: {}", path.display()))),
+                _ => {
+                    return Err(ExtractError::Rejected(format!(
+                        "unsafe path: {}",
+                        path.display()
+                    )));
+                }
             }
         }
         total = total.saturating_add(entry.header().size()?);
         if total > limits.max_uncompressed {
-            return Err(ExtractError::Rejected("uncompressed size cap exceeded".into()));
+            return Err(ExtractError::Rejected(
+                "uncompressed size cap exceeded".into(),
+            ));
         }
         if !entry.unpack_in(dest)? {
             return Err(ExtractError::Rejected(format!(
@@ -129,11 +147,10 @@ struct UploadResponse {
 }
 
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/services/{service_id}/uploads",
-            post(upload_handler).layer(axum::extract::DefaultBodyLimit::disable()),
-        )
+    Router::new().route(
+        "/services/{service_id}/uploads",
+        post(upload_handler).layer(axum::extract::DefaultBodyLimit::disable()),
+    )
 }
 
 async fn upload_handler(
@@ -180,14 +197,18 @@ async fn upload_handler(
     let archive_path = upload_dir.join("context.tar.zst");
     if let Err(e) = tokio::fs::write(&archive_path, &buf).await {
         let _ = tokio::fs::remove_dir_all(&upload_dir).await;
-        return Err(ApiError::BadRequest(format!("failed to write archive: {e}")));
+        return Err(ApiError::BadRequest(format!(
+            "failed to write archive: {e}"
+        )));
     }
 
     // Extract into <upload_dir>/context/
     let context_dir = upload_dir.join("context");
     if let Err(e) = tokio::fs::create_dir_all(&context_dir).await {
         let _ = tokio::fs::remove_dir_all(&upload_dir).await;
-        return Err(ApiError::BadRequest(format!("failed to create context dir: {e}")));
+        return Err(ApiError::BadRequest(format!(
+            "failed to create context dir: {e}"
+        )));
     }
 
     let limits = ExtractLimits {
@@ -215,7 +236,10 @@ async fn upload_handler(
         + chrono::Duration::try_seconds(ttl_secs)
             .unwrap_or_else(|| chrono::Duration::seconds(3600));
 
-    Ok(Json(UploadResponse { upload_id, expires_at }))
+    Ok(Json(UploadResponse {
+        upload_id,
+        expires_at,
+    }))
 }
 
 #[cfg(test)]
@@ -259,21 +283,24 @@ mod tests {
         let project_id = state.projects.default_project_id().unwrap();
         state
             .services
-            .put_service(ServiceConfig::new(
-                project_id,
-                "web",
-                Vec::new(),
-                ServiceSource::ExternalImage(ExternalImageSource {
-                    image: "busybox".to_string(),
-                    credential: None,
-                    registry_id: None,
-                    image_ref: None,
-                }),
-                8080,
-                HealthCheck::new("/", 5),
-                None,
-                Vec::new(),
-            ).unwrap())
+            .put_service(
+                ServiceConfig::new(
+                    project_id,
+                    "web",
+                    Vec::new(),
+                    ServiceSource::ExternalImage(ExternalImageSource {
+                        image: "busybox".to_string(),
+                        credential: None,
+                        registry_id: None,
+                        image_ref: None,
+                    }),
+                    8080,
+                    HealthCheck::new("/", 5),
+                    None,
+                    Vec::new(),
+                )
+                .unwrap(),
+            )
             .unwrap()
     }
 
@@ -348,7 +375,10 @@ mod tests {
     #[test]
     fn extracts_regular_files() {
         let dir = tempfile::tempdir().unwrap();
-        let bytes = tar_zst(&[("Dockerfile", b"FROM scratch\n"), ("src/main.rs", b"fn main(){}")]);
+        let bytes = tar_zst(&[
+            ("Dockerfile", b"FROM scratch\n"),
+            ("src/main.rs", b"fn main(){}"),
+        ]);
         let limits = ExtractLimits {
             max_uncompressed: 1 << 20,
             max_entries: 100,
@@ -372,9 +402,11 @@ mod tests {
     #[test]
     fn rejects_too_many_entries() {
         let dir = tempfile::tempdir().unwrap();
-        let many: Vec<(String, Vec<u8>)> =
-            (0..10).map(|i| (format!("f{i}"), vec![0u8])).collect();
-        let refs: Vec<(&str, &[u8])> = many.iter().map(|(p, b)| (p.as_str(), b.as_slice())).collect();
+        let many: Vec<(String, Vec<u8>)> = (0..10).map(|i| (format!("f{i}"), vec![0u8])).collect();
+        let refs: Vec<(&str, &[u8])> = many
+            .iter()
+            .map(|(p, b)| (p.as_str(), b.as_slice()))
+            .collect();
         let bytes = tar_zst(&refs);
         let limits = ExtractLimits {
             max_uncompressed: 1 << 20,
