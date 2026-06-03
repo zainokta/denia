@@ -8,13 +8,15 @@
 
 use std::collections::HashMap;
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use sha2::Digest as _;
 
 use axum::{
     Router,
     body::Bytes,
-    extract::{Path, Query, State},
-    http::{HeaderName, HeaderValue, StatusCode, header},
+    extract::{Path, Query, Request, State},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, patch, post},
 };
@@ -42,6 +44,51 @@ pub fn router() -> Router<AppState> {
             "/{project}/{service}/blobs/uploads/{upload_id}",
             patch(patch_upload).put(commit_upload),
         )
+}
+
+/// Auth middleware for `/v2`. Accepts the same bearer tokens as `/v1` AND HTTP
+/// Basic auth where the PASSWORD is a Denia API token (so `docker login -u
+/// <user> -p <api-token>` works, ECR-style; the username is ignored). On
+/// failure it advertises Basic auth via `WWW-Authenticate` so docker clients
+/// know to retry with credentials.
+pub(crate) async fn registry_auth(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Some(token) = extract_registry_token(request.headers())
+        && let Some(principal) = crate::auth::resolve_auth(
+            &state.users,
+            &state.tokens,
+            &token,
+            &state.config.admin_token_hash,
+            &state.config.admin_token_hmac_key,
+        )
+    {
+        let mut request = request;
+        request.extensions_mut().insert(principal);
+        return next.run(request).await;
+    }
+    let mut resp = StatusCode::UNAUTHORIZED.into_response();
+    resp.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        header::HeaderValue::from_static("Basic realm=\"Denia Registry\""),
+    );
+    resp
+}
+
+fn extract_registry_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    if let Some(bearer) = value.strip_prefix("Bearer ") {
+        return Some(bearer.to_string());
+    }
+    if let Some(basic) = value.strip_prefix("Basic ") {
+        let decoded = STANDARD.decode(basic.trim()).ok()?;
+        let creds = String::from_utf8(decoded).ok()?;
+        let (_user, token) = creds.split_once(':')?;
+        return Some(token.to_string());
+    }
+    None
 }
 
 async fn v2_ping(_principal: Principal) -> StatusCode {
