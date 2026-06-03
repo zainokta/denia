@@ -1,7 +1,8 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Effect } from 'effect'
-import { Boxes } from 'lucide-react'
+import { Boxes, Terminal } from 'lucide-react'
+import { useState } from 'react'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
 import type { HostedRegistryStatus, HostedRepository } from '#/effect/schema'
@@ -13,6 +14,8 @@ import { ErrorPanel, errorMessage } from '#/components/ErrorPanel'
 import { SkeletonRows } from '#/components/Skeleton'
 import { Num } from '#/components/Num'
 import { formatBytes, formatRelative } from '#/lib/format'
+import { Modal } from '#/components/Modal'
+import { CopyButton } from '#/components/CopyButton'
 
 const getHostedRegistryStatus = Effect.gen(function* () {
   const api = yield* ApiClient
@@ -117,8 +120,8 @@ function Header() {
       <p className="kicker">settings</p>
       <h1 className="t-display">Hosted registry</h1>
       <p className="text-faint" style={{ marginTop: 6, maxWidth: '60ch' }}>
-        Denia-hosted OCI images served under <code>/v2</code>, stored locally,
-        and garbage-collected to reclaim unreferenced blobs.
+        Push and pull container images on this node. Layers live on local disk;
+        garbage collection reclaims unreferenced blobs.
       </p>
     </header>
   )
@@ -147,6 +150,86 @@ function StatusGrid({ status }: { readonly status: HostedRegistryStatus }) {
   )
 }
 
+// Derive the registry host from the current window location (no scheme — docker registry form).
+// Falls back to a placeholder in SSR / test environments where window is absent.
+function registryHost(): string {
+  return typeof window !== 'undefined' && window.location.host
+    ? window.location.host
+    : 'denia.example.com'
+}
+
+// Small helper: one labelled command row with a copy button.
+function CommandLine({ label, command }: { readonly label: string; readonly command: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+      <span className="kicker">{label}</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+        <code
+          style={{
+            flex: 1,
+            display: 'block',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 'var(--text-body)',
+            background: 'var(--surface-2)',
+            border: '1px solid var(--border)',
+            borderRadius: '6px',
+            padding: '0.5rem 0.75rem',
+            overflowX: 'auto',
+            whiteSpace: 'pre',
+            lineHeight: 1.5,
+          }}
+        >
+          {command}
+        </code>
+        <CopyButton value={command} />
+      </div>
+    </div>
+  )
+}
+
+// Exported for tests.
+export function PushCommandsModal({
+  repository,
+  open,
+  onClose,
+}: {
+  readonly repository: string
+  readonly open: boolean
+  readonly onClose: () => void
+}) {
+  const host = registryHost()
+  const login = `docker login ${host} -u denia -p <API_TOKEN>`
+  const tag = `docker tag <local-image>:latest ${host}/${repository}:latest`
+  const push = `docker push ${host}/${repository}:latest`
+  const pull = `docker pull ${host}/${repository}:latest`
+
+  return (
+    <Modal open={open} onClose={onClose} title={`Push commands — ${repository}`}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
+        <p
+          className="text-faint"
+          style={{ fontSize: 'var(--text-body)', margin: 0, lineHeight: 1.55 }}
+        >
+          Authenticate with any username and a Denia API token as the password
+          (create one under Settings → API tokens).
+        </p>
+
+        <CommandLine label="login" command={login} />
+        <CommandLine label="tag" command={tag} />
+        <CommandLine label="push" command={push} />
+        <CommandLine label="pull" command={pull} />
+
+        <p
+          className="text-faint"
+          style={{ fontSize: 'var(--text-label)', margin: 0, lineHeight: 1.55 }}
+        >
+          For a non-HTTPS host, docker needs the registry in its insecure-registries list.
+        </p>
+      </div>
+    </Modal>
+  )
+}
+
 // Exported for tests: renders the repository table (or empty state).
 export function RepositoriesTable({
   repositories,
@@ -172,6 +255,7 @@ export function RepositoriesTable({
             <th className="kicker" style={{ paddingInline: '1rem', paddingBlock: '0.6rem', textAlign: 'left' }}>project</th>
             <th className="kicker" style={{ paddingInline: '1rem', paddingBlock: '0.6rem', textAlign: 'left' }}>service</th>
             <th className="kicker" style={{ paddingInline: '1rem', paddingBlock: '0.6rem', textAlign: 'left' }}>tags</th>
+            <th className="kicker" style={{ paddingInline: '1rem', paddingBlock: '0.6rem', textAlign: 'right' }}></th>
           </tr>
         </thead>
         <tbody>
@@ -185,6 +269,8 @@ export function RepositoriesTable({
 }
 
 function RepositoryRow({ repo }: { readonly repo: HostedRepository }) {
+  const [open, setOpen] = useState(false)
+
   return (
     <tr style={{ borderTop: '1px solid var(--border)' }}>
       <td
@@ -236,6 +322,31 @@ function RepositoryRow({ repo }: { readonly repo: HostedRepository }) {
             <span className="text-faint" style={{ fontSize: 'var(--text-body)' }}>—</span>
           ) : null}
         </div>
+      </td>
+      <td
+        style={{
+          paddingInline: '1rem',
+          paddingBlock: '0.75rem',
+          verticalAlign: 'middle',
+          textAlign: 'right',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        <button
+          type="button"
+          className="btn"
+          style={{ fontSize: 'var(--text-label)', padding: '0.35rem 0.65rem', gap: '0.4rem' }}
+          onClick={() => setOpen(true)}
+          title="Show push commands"
+        >
+          <Terminal size={13} aria-hidden="true" />
+          Push commands
+        </button>
+        <PushCommandsModal
+          repository={repo.repository}
+          open={open}
+          onClose={() => setOpen(false)}
+        />
       </td>
     </tr>
   )

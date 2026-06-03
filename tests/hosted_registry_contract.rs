@@ -1,6 +1,7 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use denia::app::{AppState, build_router};
 use denia::config::AppConfig;
 use denia::domain::service::ExternalImageSource;
@@ -205,4 +206,41 @@ async fn v2_requires_bearer_auth() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn v2_accepts_docker_basic_auth_with_api_token() {
+    let app = test_app_with_project_service().await;
+    // docker sends Basic base64("user:password"); password is the API token.
+    let creds = STANDARD.encode("denia:test-token");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v2/default/api/manifests/latest")
+                .header("authorization", format!("Basic {creds}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Auth passed (super-admin); missing manifest => 404, NOT 401.
+    assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn v2_unauthenticated_advertises_basic_realm() {
+    let app = test_app_with_project_service().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v2/default/api/manifests/latest")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert!(resp.headers().get("www-authenticate").is_some());
 }

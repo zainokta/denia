@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from '@effect/vitest'
 import { render, screen } from '@testing-library/react'
-import { RepositoriesTable, GcButton } from './hosted-registry'
+import { RepositoriesTable, GcButton, PushCommandsModal } from './hosted-registry'
 import type { HostedRepository } from '#/effect/schema'
 
 describe('RepositoriesTable', () => {
@@ -47,5 +47,23 @@ describe('GcButton', () => {
     const { container } = render(<GcButton busy={false} onConfirm={() => {}} />)
     const btn = container.querySelector('button')
     expect(btn?.hasAttribute('disabled')).toBe(false)
+  })
+})
+
+describe('PushCommandsModal', () => {
+  it('renders push command containing the repository name when open', () => {
+    render(<PushCommandsModal repository="default/api" open={true} onClose={() => {}} />)
+    // The push command line must be visible and include the repository path.
+    const el = screen.getByText(/docker push/)
+    expect(el).toBeTruthy()
+    expect(el.textContent).toContain('default/api')
+  })
+
+  it('renders nothing when open is false', () => {
+    const { container } = render(
+      <PushCommandsModal repository="default/api" open={false} onClose={() => {}} />,
+    )
+    // Modal returns null when closed — container should have no push command text.
+    expect(container.querySelector('code')).toBeNull()
   })
 })
