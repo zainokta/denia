@@ -16,6 +16,7 @@ pub mod projects;
 pub mod registries;
 pub mod services;
 pub mod tokens;
+pub mod uploads;
 pub mod users;
 
 pub use error::ApiError;
