@@ -1,4 +1,4 @@
-# ADR-034: Client-Driven Deploy via Working-Tree Upload
+# ADR-035: Client-Driven Deploy via Working-Tree Upload
 
 - Status: Accepted
 - Date: 2026-06-03

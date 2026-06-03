@@ -3,7 +3,7 @@
 - Date: 2026-06-03
 - Status: Approved (brainstorm), pending spec review
 - Supersedes the deploy mechanism of ADR-030 (Cross-Platform Client CLI)
-- New ADR: ADR-034 (Client-Driven Deploy via Working-Tree Upload)
+- New ADR: ADR-035 (Client-Driven Deploy via Working-Tree Upload)
 - Related: ADR-003, ADR-011, ADR-015, ADR-017, ADR-024, ADR-025, ADR-031, ADR-033
 
 ## 1. Context
@@ -278,13 +278,13 @@ Privileged (gated, `DENIA_RUN_PRIVILEGED_TESTS=1`):
 
 ## 8. ADR Reconciliation
 
-- **ADR-034 (new):** "Client-Driven Deploy via Working-Tree Upload" — records the
+- **ADR-035 (new):** "Client-Driven Deploy via Working-Tree Upload" — records the
   upload endpoint, the `UploadedContext` artifact source, the Vercel-style
   working-tree context model, and the auth token-minting client flow.
-- **ADR-030:** restore onto master with status **Superseded by ADR-034** (its
+- **ADR-030:** restore onto master with status **Superseded by ADR-035** (its
   Git-deploy mechanism is replaced; its cross-platform packaging decision is
   left to a future ADR and noted as out of scope here).
-- Update `docs/adr/README.md` index with ADR-030, ADR-034 rows (ADR-032 already
+- Update `docs/adr/README.md` index with ADR-030, ADR-035 rows (ADR-032 already
   restored separately).
 - Update root `README.md` (Features, CLI subcommands, API highlights, a "Deploy
   from your machine" section) once implemented.
@@ -294,7 +294,7 @@ Privileged (gated, `DENIA_RUN_PRIVILEGED_TESTS=1`):
 New:
 - `src/cli/client/auth.rs`, `src/cli/client/push.rs`, `src/cli/client/pack.rs`
 - `src/api/uploads.rs` (or fold into `src/api/deployments.rs`)
-- `docs/adr/034-client-driven-deploy-upload.md`
+- `docs/adr/035-client-driven-deploy-upload.md`
 
 Modified:
 - `src/cli/client/profile.rs` (writer), `src/cli/client/manifest.rs` (fields),
