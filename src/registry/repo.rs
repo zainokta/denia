@@ -1,10 +1,12 @@
 //! SQLite-backed metadata repository for the hosted OCI registry.
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::registry::domain::{HostedManifest, HostedRepository, HostedTag};
+use crate::registry::domain::{HostedManifest, HostedRepository, HostedTag, HostedUpload};
 use crate::repo::error::RepoError;
 use crate::repo::sqlite::SqlitePool;
 
@@ -181,5 +183,104 @@ impl HostedRegistryRepo {
                 created_at: DateTime::parse_from_rfc3339(&ca)?.with_timezone(&Utc),
             })),
         }
+    }
+
+    /// Creates a new upload session record using the provided ID.
+    pub fn create_upload(
+        &self,
+        id: Uuid,
+        repository_id: Uuid,
+        path: &str,
+    ) -> Result<HostedUpload, RepoError> {
+        let conn = self.pool.connection()?;
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let rid = repository_id.to_string();
+        conn.execute(
+            "INSERT INTO hosted_uploads (id, repository_id, path, started_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id.to_string(), &rid, path, &now_str, &now_str],
+        )?;
+        Ok(HostedUpload {
+            id,
+            repository_id,
+            path: PathBuf::from(path),
+            started_at: now,
+            updated_at: now,
+        })
+    }
+
+    /// Returns an upload session by ID, if it exists.
+    pub fn upload(&self, upload_id: Uuid) -> Result<Option<HostedUpload>, RepoError> {
+        let conn = self.pool.connection()?;
+        let uid = upload_id.to_string();
+        let row: Option<(String, String, String, String, String)> = conn
+            .query_row(
+                "SELECT id, repository_id, path, started_at, updated_at \
+                 FROM hosted_uploads WHERE id=?1",
+                params![&uid],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        match row {
+            None => Ok(None),
+            Some((id_str, rid_str, path_str, started_str, updated_str)) => Ok(Some(HostedUpload {
+                id: Uuid::parse_str(&id_str)?,
+                repository_id: Uuid::parse_str(&rid_str)?,
+                path: PathBuf::from(path_str),
+                started_at: DateTime::parse_from_rfc3339(&started_str)?.with_timezone(&Utc),
+                updated_at: DateTime::parse_from_rfc3339(&updated_str)?.with_timezone(&Utc),
+            })),
+        }
+    }
+
+    /// Deletes an upload session record.
+    pub fn delete_upload(&self, upload_id: Uuid) -> Result<(), RepoError> {
+        let conn = self.pool.connection()?;
+        conn.execute(
+            "DELETE FROM hosted_uploads WHERE id=?1",
+            params![upload_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Upserts a blob record for a repository.
+    pub fn put_blob(
+        &self,
+        repository_id: Uuid,
+        digest: &str,
+        size: u64,
+    ) -> Result<(), RepoError> {
+        let conn = self.pool.connection()?;
+        let rid = repository_id.to_string();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO hosted_blobs (repository_id, digest, size, created_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(repository_id, digest) DO UPDATE SET size=excluded.size",
+            params![&rid, digest, size as i64, &now],
+        )?;
+        Ok(())
+    }
+
+    /// Returns true if the blob exists for the given repository.
+    pub fn has_blob(&self, repository_id: Uuid, digest: &str) -> Result<bool, RepoError> {
+        let conn = self.pool.connection()?;
+        let rid = repository_id.to_string();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM hosted_blobs WHERE repository_id=?1 AND digest=?2",
+            params![&rid, digest],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 }
