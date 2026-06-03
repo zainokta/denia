@@ -3,5 +3,6 @@
 //! systemd, cgroup, and syscall code paths.
 
 pub mod git;
+pub mod http;
 pub mod manifest;
 pub mod profile;
