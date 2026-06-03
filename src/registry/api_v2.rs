@@ -56,6 +56,13 @@ pub(crate) async fn registry_auth(
     request: Request,
     next: Next,
 ) -> Response {
+    // Docker clients require `Docker-Distribution-Api-Version: registry/2.0` on
+    // `/v2/` responses (both 200 and 401) to recognize the endpoint as a
+    // Distribution V2 API and run the credential handshake. Without it the push
+    // pipeline fires unauthenticated blob probes and never re-applies the Basic
+    // credentials, surfacing a bare `unauthorized:`. Set on every response that
+    // flows through this middleware (it wraps all `/v2` routes).
+    let api_version = HeaderName::from_static("docker-distribution-api-version");
     if let Some(token) = extract_registry_token(request.headers())
         && let Some(principal) = crate::auth::resolve_auth(
             &state.users,
@@ -67,13 +74,18 @@ pub(crate) async fn registry_auth(
     {
         let mut request = request;
         request.extensions_mut().insert(principal);
-        return next.run(request).await;
+        let mut resp = next.run(request).await;
+        resp.headers_mut()
+            .insert(api_version, HeaderValue::from_static("registry/2.0"));
+        return resp;
     }
     let mut resp = StatusCode::UNAUTHORIZED.into_response();
-    resp.headers_mut().insert(
+    let headers = resp.headers_mut();
+    headers.insert(
         header::WWW_AUTHENTICATE,
-        header::HeaderValue::from_static("Basic realm=\"Denia Registry\""),
+        HeaderValue::from_static("Basic realm=\"Denia Registry\""),
     );
+    headers.insert(api_version, HeaderValue::from_static("registry/2.0"));
     resp
 }
 
