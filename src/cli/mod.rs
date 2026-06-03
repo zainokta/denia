@@ -49,6 +49,8 @@ pub enum Commands {
     Console(client::console::ConsoleArgs),
     /// Authenticate to a remote Denia instance and save credentials locally.
     Auth(client::auth::AuthArgs),
+    /// Pack the local working tree and deploy it to a remote service.
+    Push(client::push::PushArgs),
 }
 
 /// Entry point called from main.rs. Subcommand variants return placeholder
@@ -78,6 +80,10 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Auth(args)) => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(crate::cli::client::auth::run(args))
+        }
+        Some(Commands::Push(args)) => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(crate::cli::client::push::run(args))
         }
         None => {
             // Daemon is async; build a runtime here so non-daemon subcommands
