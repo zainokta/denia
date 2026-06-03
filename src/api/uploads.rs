@@ -104,12 +104,15 @@ async fn upload_handler(
     let mut stream = body.into_data_stream();
     let mut buf: Vec<u8> = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            let _ = std::fs::remove_dir_all(&upload_dir);
-            ApiError::BadRequest(format!("body read error: {e}"))
-        })?;
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&upload_dir).await;
+                return Err(ApiError::BadRequest(format!("body read error: {e}")));
+            }
+        };
         if buf.len() as u64 + chunk.len() as u64 > max_bytes {
-            let _ = std::fs::remove_dir_all(&upload_dir);
+            let _ = tokio::fs::remove_dir_all(&upload_dir).await;
             return Err(ApiError::PayloadTooLarge(format!(
                 "upload exceeds {} byte limit",
                 max_bytes
@@ -120,21 +123,17 @@ async fn upload_handler(
 
     // Write the compressed archive to disk.
     let archive_path = upload_dir.join("context.tar.zst");
-    tokio::fs::write(&archive_path, &buf)
-        .await
-        .map_err(|e| {
-            let _ = std::fs::remove_dir_all(&upload_dir);
-            ApiError::BadRequest(format!("failed to write archive: {e}"))
-        })?;
+    if let Err(e) = tokio::fs::write(&archive_path, &buf).await {
+        let _ = tokio::fs::remove_dir_all(&upload_dir).await;
+        return Err(ApiError::BadRequest(format!("failed to write archive: {e}")));
+    }
 
     // Extract into <upload_dir>/context/
     let context_dir = upload_dir.join("context");
-    tokio::fs::create_dir_all(&context_dir)
-        .await
-        .map_err(|e| {
-            let _ = std::fs::remove_dir_all(&upload_dir);
-            ApiError::BadRequest(format!("failed to create context dir: {e}"))
-        })?;
+    if let Err(e) = tokio::fs::create_dir_all(&context_dir).await {
+        let _ = tokio::fs::remove_dir_all(&upload_dir).await;
+        return Err(ApiError::BadRequest(format!("failed to create context dir: {e}")));
+    }
 
     let limits = ExtractLimits {
         max_uncompressed: state.config.upload_max_uncompressed_bytes,
@@ -144,11 +143,11 @@ async fn upload_handler(
     match result {
         Ok(()) => {}
         Err(ExtractError::Rejected(msg)) => {
-            let _ = std::fs::remove_dir_all(&upload_dir);
+            let _ = tokio::fs::remove_dir_all(&upload_dir).await;
             return Err(ApiError::BadRequest(format!("archive rejected: {msg}")));
         }
         Err(ExtractError::Io(e)) => {
-            let _ = std::fs::remove_dir_all(&upload_dir);
+            let _ = tokio::fs::remove_dir_all(&upload_dir).await;
             return Err(ApiError::BadRequest(format!("archive io error: {e}")));
         }
     }
@@ -156,8 +155,10 @@ async fn upload_handler(
     // Remove the compressed archive, keep only context/
     let _ = tokio::fs::remove_file(&archive_path).await;
 
+    let ttl_secs = i64::try_from(state.config.upload_ttl_secs).unwrap_or(i64::MAX);
     let expires_at = Utc::now()
-        + chrono::Duration::seconds(state.config.upload_ttl_secs as i64);
+        + chrono::Duration::try_seconds(ttl_secs)
+            .unwrap_or_else(|| chrono::Duration::seconds(3600));
 
     Ok(Json(UploadResponse { upload_id, expires_at }))
 }
@@ -221,8 +222,8 @@ mod tests {
             .unwrap()
     }
 
-    /// Build a small valid tar.zst with a single `Dockerfile` entry.
-    fn make_tar_zst(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    /// Build a tar.zst from a slice of (path, body) pairs.
+    fn tar_zst(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut tar = tar::Builder::new(Vec::new());
         for (path, body) in entries {
             let mut h = tar::Header::new_gnu();
@@ -235,13 +236,145 @@ mod tests {
         zstd::stream::encode_all(&tar_bytes[..], 0).unwrap()
     }
 
+    /// Build a raw tar archive (uncompressed) with a single regular-file entry
+    /// whose name is exactly `name` (no sanitisation). Used to inject paths like
+    /// `../escape` that the tar::Builder itself would refuse to write.
+    fn raw_tar_with_name(name: &str, body: &[u8]) -> Vec<u8> {
+        // POSIX ustar header layout: name[100], mode[8], uid[8], gid[8],
+        // size[12], mtime[12], checksum[8], typeflag[1], linkname[100],
+        // magic[6], version[2], uname[32], gname[32], devmajor[8],
+        // devminor[8], prefix[155], pad[12]  = 512 bytes total.
+        let mut header = [0u8; 512];
+        // name (bytes 0..100)
+        let name_bytes = name.as_bytes();
+        let copy_len = name_bytes.len().min(99);
+        header[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        // mode (100..108): octal "0000644\0"
+        header[100..107].copy_from_slice(b"0000644");
+        header[107] = b'\0';
+        // uid / gid: leave as zeros (valid enough for reading)
+        // size (124..136): octal of body.len() + NUL  [POSIX ustar bytes 124–135]
+        let size_str = format!("{:011o}\0", body.len());
+        header[124..136].copy_from_slice(size_str.as_bytes());
+        // mtime (136..148): "00000000000\0"  [POSIX ustar bytes 136–147]
+        header[136..147].copy_from_slice(b"00000000000");
+        header[147] = b'\0';
+        // checksum (148..156): computed below  [POSIX ustar bytes 148–155]
+        // typeflag (156): '0' = regular file
+        header[156] = b'0';
+        // magic / version (257..265): "ustar  \0"
+        header[257..263].copy_from_slice(b"ustar ");
+        header[263..265].copy_from_slice(b" \0");
+        // Checksum (148..156): sum of all header bytes with chksum field treated as spaces,
+        // stored as 6-digit octal + NUL + space.
+        header[148..156].copy_from_slice(b"        "); // placeholder (8 spaces per POSIX)
+        let cksum: u32 = header.iter().map(|&b| b as u32).sum();
+        let cksum_str = format!("{:06o}\0 ", cksum);
+        header[148..156].copy_from_slice(cksum_str.as_bytes());
+
+        let mut out = Vec::with_capacity(512 + body.len().div_ceil(512) * 512 + 1024);
+        out.extend_from_slice(&header);
+        out.extend_from_slice(body);
+        // Pad data block to 512-byte boundary
+        let pad = (512 - body.len() % 512) % 512;
+        out.extend(std::iter::repeat(0u8).take(pad));
+        // Two 512-byte zero blocks = end-of-archive
+        out.extend([0u8; 1024]);
+        out
+    }
+
+    fn raw_tar_zst_with_name(name: &str, body: &[u8]) -> Vec<u8> {
+        let tar_bytes = raw_tar_with_name(name, body);
+        zstd::stream::encode_all(&tar_bytes[..], 0).unwrap()
+    }
+
+    // ── Extractor unit tests ────────────────────────────────────────────────
+
+    #[test]
+    fn extracts_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = tar_zst(&[("Dockerfile", b"FROM scratch\n"), ("src/main.rs", b"fn main(){}")]);
+        let limits = ExtractLimits {
+            max_uncompressed: 1 << 20,
+            max_entries: 100,
+        };
+        extract_tar_zst(&bytes, dir.path(), &limits).unwrap();
+        assert!(dir.path().join("Dockerfile").exists());
+        assert!(dir.path().join("src/main.rs").exists());
+    }
+
+    #[test]
+    fn rejects_parent_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = raw_tar_zst_with_name("../escape", b"x");
+        let limits = ExtractLimits {
+            max_uncompressed: 1 << 20,
+            max_entries: 100,
+        };
+        assert!(extract_tar_zst(&bytes, dir.path(), &limits).is_err());
+    }
+
+    #[test]
+    fn rejects_too_many_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let many: Vec<(String, Vec<u8>)> =
+            (0..10).map(|i| (format!("f{i}"), vec![0u8])).collect();
+        let refs: Vec<(&str, &[u8])> = many.iter().map(|(p, b)| (p.as_str(), b.as_slice())).collect();
+        let bytes = tar_zst(&refs);
+        let limits = ExtractLimits {
+            max_uncompressed: 1 << 20,
+            max_entries: 3,
+        };
+        assert!(extract_tar_zst(&bytes, dir.path(), &limits).is_err());
+    }
+
+    #[test]
+    fn rejects_oversize_uncompressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = tar_zst(&[("big", &vec![7u8; 4096])]);
+        let limits = ExtractLimits {
+            max_uncompressed: 1024,
+            max_entries: 100,
+        };
+        assert!(extract_tar_zst(&bytes, dir.path(), &limits).is_err());
+    }
+
+    #[test]
+    fn rejects_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        // Build a tar with a symlink entry manually using the tar 0.4 API.
+        let mut tar_buf = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_size(0);
+        h.set_mode(0o777);
+        h.set_username("root").unwrap();
+        h.set_link_name("/etc/passwd").unwrap();
+        h.set_cksum();
+        tar_buf
+            .append_data(&mut h, "evil_link", std::io::empty())
+            .unwrap();
+        let tar_bytes = tar_buf.into_inner().unwrap();
+        let compressed = zstd::stream::encode_all(&tar_bytes[..], 0).unwrap();
+        let limits = ExtractLimits {
+            max_uncompressed: 1 << 20,
+            max_entries: 100,
+        };
+        assert!(
+            extract_tar_zst(&compressed, dir.path(), &limits).is_err(),
+            "symlink entry must be rejected"
+        );
+    }
+
+    // ── Handler integration tests ───────────────────────────────────────────
+
     #[tokio::test]
     async fn operator_upload_returns_upload_id() {
         let uploads_dir = tempfile::tempdir().unwrap();
         let state = test_state_with_uploads_dir(uploads_dir.path());
         let service = make_service(&state);
 
-        let payload = make_tar_zst(&[("Dockerfile", b"FROM scratch\n")]);
+        let payload = tar_zst(&[("Dockerfile", b"FROM scratch\n")]);
 
         let resp = build_router(state)
             .oneshot(
@@ -291,7 +424,7 @@ mod tests {
             .token;
         let service = make_service(&state);
 
-        let payload = make_tar_zst(&[("Dockerfile", b"FROM scratch\n")]);
+        let payload = tar_zst(&[("Dockerfile", b"FROM scratch\n")]);
 
         let resp = build_router(state)
             .oneshot(
@@ -332,5 +465,44 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn malicious_archive_returns_400() {
+        let uploads_dir = tempfile::tempdir().unwrap();
+        let state = test_state_with_uploads_dir(uploads_dir.path());
+        let service = make_service(&state);
+
+        // Build a tar.zst with a path-traversal entry: ../escape
+        let payload = raw_tar_zst_with_name("../escape", b"evil content");
+
+        let resp = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/services/{}/uploads", service.id))
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/octet-stream")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Verify no escape file was written outside any staging dir under uploads_dir
+        let escaped = uploads_dir.path().join("escape");
+        assert!(
+            !escaped.exists(),
+            "traversal file must not exist at {}",
+            escaped.display()
+        );
+    }
+
+    // Suppress unused warning for test_state helper kept for future tests
+    #[allow(dead_code)]
+    fn _use_test_state() {
+        let _ = test_state();
     }
 }
