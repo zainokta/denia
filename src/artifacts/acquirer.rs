@@ -49,6 +49,11 @@ pub enum ArtifactAcquireRequest {
     ExternalImage {
         image: String,
     },
+    Upload {
+        upload_id: String,
+        dockerfile_path: String,
+        context_path: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -158,6 +163,19 @@ impl ArtifactAcquirer {
                     .await?;
                 Ok(ArtifactRecord::new(digest, ArtifactKind::OciImage, source)?)
             }
+            ArtifactAcquireRequest::Upload {
+                upload_id,
+                dockerfile_path,
+                context_path,
+            } => {
+                let source = ArtifactSource::UploadedContext {
+                    upload_id,
+                    dockerfile_path,
+                    context_path,
+                };
+                let digest = self.acquire_staged(runner, &source).await?;
+                Ok(ArtifactRecord::new(digest, ArtifactKind::OciImage, source)?)
+            }
         }
     }
 
@@ -202,7 +220,7 @@ impl ArtifactAcquirer {
                 };
                 self.pull_and_unpack_external(&source, auth).await
             }
-            ArtifactAcquireRequest::Git { .. } => {
+            ArtifactAcquireRequest::Git { .. } | ArtifactAcquireRequest::Upload { .. } => {
                 let _ = auth;
                 let image_artifact = self.acquire(runner, request).await?;
                 let _bundle_dir = self
@@ -384,6 +402,44 @@ impl ArtifactAcquirer {
         Ok(output.stdout.trim().to_string())
     }
 
+    async fn acquire_staged(
+        &self,
+        runner: &dyn CommandRunner,
+        source: &ArtifactSource,
+    ) -> Result<String, ArtifactAcquireError> {
+        let ArtifactSource::UploadedContext {
+            upload_id,
+            dockerfile_path,
+            context_path,
+        } = source
+        else {
+            unreachable!("staged acquisition requires an uploaded-context source");
+        };
+        let staged = self.config.uploads_dir.join(upload_id).join("context");
+        let context_dir = confine_under(&staged, context_path)?;
+        let dockerfile_dir = confine_under(&staged, dockerfile_path)?;
+        let context = format!("context={}", context_dir.to_string_lossy());
+        let dockerfile = format!("dockerfile={}", dockerfile_dir.to_string_lossy());
+        let output = format!(
+            "type=oci,dest={}",
+            self.config.artifact_dir.to_string_lossy()
+        );
+        let program = self.config.buildkit_binary.to_string_lossy();
+        let args = [
+            "build",
+            "--frontend",
+            "dockerfile.v0",
+            "--local",
+            context.as_str(),
+            "--local",
+            dockerfile.as_str(),
+            "--output",
+            output.as_str(),
+        ];
+        let out = runner.run(program.as_ref(), &args).await?;
+        Ok(out.stdout.trim().to_string())
+    }
+
     async fn acquire_external_image(
         &self,
         _runner: &dyn CommandRunner,
@@ -482,4 +538,80 @@ fn safe_artifact_name(digest: &str) -> String {
 
 fn default_workdir() -> String {
     "/".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::{
+        command::{CommandOutput, FakeCommandRunner},
+        config::AppConfig,
+        oci::{LayerBlob, OciError, OciImagePuller, OciRootfsUnpacker, PulledImage, RegistryAuth},
+    };
+
+    struct FakePuller;
+    #[async_trait]
+    impl OciImagePuller for FakePuller {
+        async fn pull(&self, _image: &str, _auth: RegistryAuth) -> Result<PulledImage, OciError> {
+            unreachable!("FakePuller::pull not expected in staged tests")
+        }
+        async fn read_layout(&self, _d: &Path) -> Result<PulledImage, OciError> {
+            unreachable!("FakePuller::read_layout not expected in staged tests")
+        }
+    }
+
+    struct FakeUnpacker;
+    impl OciRootfsUnpacker for FakeUnpacker {
+        fn unpack(&self, _layers: &[LayerBlob], _rootfs_dir: &Path) -> Result<(), OciError> {
+            unreachable!("FakeUnpacker::unpack not expected in staged tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn acquire_staged_builds_from_upload_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let uploads_dir = tmp.path().join("uploads");
+        let upload_id = "test-upload-id-001";
+        let context_subdir = uploads_dir.join(upload_id).join("context");
+        std::fs::create_dir_all(&context_subdir).unwrap();
+        std::fs::write(context_subdir.join("Dockerfile"), b"FROM scratch\n").unwrap();
+
+        let mut config = AppConfig::for_test("test-token");
+        config.uploads_dir = uploads_dir.clone();
+
+        let acquirer = ArtifactAcquirer::with_traits(
+            config,
+            Arc::new(FakePuller),
+            Arc::new(FakeUnpacker),
+        );
+
+        let runner = FakeCommandRunner::new(vec![CommandOutput {
+            stdout: "sha256:abc123staged".to_string(),
+            stderr: String::new(),
+            status: 0,
+        }]);
+
+        let source = ArtifactSource::UploadedContext {
+            upload_id: upload_id.to_string(),
+            dockerfile_path: ".".to_string(),
+            context_path: ".".to_string(),
+        };
+
+        let digest = acquirer.acquire_staged(&runner, &source).await.unwrap();
+
+        assert!(!digest.is_empty(), "digest must be non-empty");
+
+        let commands = runner.commands();
+        assert_eq!(commands.len(), 1);
+        let cmd = &commands[0];
+        assert!(
+            cmd.contains(&format!("uploads/{upload_id}/context")),
+            "buildctl invocation must reference uploads/<id>/context, got: {cmd}"
+        );
+    }
 }
