@@ -40,6 +40,7 @@ function HostedRegistryPage() {
   const auth = useAuth()
   const queryClient = useQueryClient()
   const toast = useActionToasts()
+  const [guideOpen, setGuideOpen] = useState(false)
 
   const statusQuery = useQuery({
     queryKey: ['registry', 'status'],
@@ -65,7 +66,7 @@ function HostedRegistryPage() {
 
   return (
     <div className="page-wrap px-4 pb-16 pt-10">
-      <Header />
+      <Header onShowGuide={() => setGuideOpen(true)} />
 
       {auth.isSuperAdmin ? (
         <section className="panel panel-pad" style={{ marginBottom: '1.5rem' }}>
@@ -107,22 +108,39 @@ function HostedRegistryPage() {
             />
           </div>
         ) : reposQuery.data ? (
-          <RepositoriesTable repositories={reposQuery.data} />
+          <RepositoriesTable
+            repositories={reposQuery.data}
+            onShowGuide={() => setGuideOpen(true)}
+          />
         ) : null}
       </section>
+
+      <PushCommandsModal open={guideOpen} onClose={() => setGuideOpen(false)} />
     </div>
   )
 }
 
-function Header() {
+function Header({ onShowGuide }: { readonly onShowGuide: () => void }) {
   return (
-    <header style={{ marginBottom: '1.5rem' }}>
-      <p className="kicker">settings</p>
-      <h1 className="t-display">Hosted registry</h1>
-      <p className="text-faint" style={{ marginTop: 6, maxWidth: '60ch' }}>
-        Push and pull container images on this node. Layers live on local disk;
-        garbage collection reclaims unreferenced blobs.
-      </p>
+    <header className="panel-head" style={{ marginBottom: '1.5rem', alignItems: 'flex-start' }}>
+      <div>
+        <p className="kicker">settings</p>
+        <h1 className="t-display">Hosted registry</h1>
+        <p className="text-faint" style={{ marginTop: 6, maxWidth: '60ch' }}>
+          Push and pull container images on this node. Layers live on local disk;
+          garbage collection reclaims unreferenced blobs.
+        </p>
+      </div>
+      <button
+        type="button"
+        className="btn"
+        style={{ gap: '0.4rem', whiteSpace: 'nowrap' }}
+        onClick={onShowGuide}
+        title="How to push an image"
+      >
+        <Terminal size={14} aria-hidden="true" />
+        How to push
+      </button>
     </header>
   )
 }
@@ -193,18 +211,27 @@ export function PushCommandsModal({
   open,
   onClose,
 }: {
-  readonly repository: string
+  // Omit `repository` for the page-level guide: it falls back to the
+  // `<project>/<service>` placeholder so a first-time user (no repos yet) still
+  // learns the naming scheme. A concrete repo row fills it in.
+  readonly repository?: string
   readonly open: boolean
   readonly onClose: () => void
 }) {
   const host = registryHost()
+  const generic = repository === undefined
+  const repo = repository ?? '<project>/<service>'
   const login = `docker login ${host} -u denia -p <API_TOKEN>`
-  const tag = `docker tag <local-image>:latest ${host}/${repository}:latest`
-  const push = `docker push ${host}/${repository}:latest`
-  const pull = `docker pull ${host}/${repository}:latest`
+  const tag = `docker tag <local-image>:latest ${host}/${repo}:latest`
+  const push = `docker push ${host}/${repo}:latest`
+  const pull = `docker pull ${host}/${repo}:latest`
 
   return (
-    <Modal open={open} onClose={onClose} title={`Push commands — ${repository}`}>
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={generic ? 'How to push an image' : `Push commands — ${repository}`}
+    >
       <div style={{ display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
         <p
           className="text-faint"
@@ -213,6 +240,17 @@ export function PushCommandsModal({
           Authenticate with any username and a Denia API token as the password
           (create one under Settings → API tokens).
         </p>
+
+        {generic ? (
+          <p
+            className="text-faint"
+            style={{ fontSize: 'var(--text-body)', margin: 0, lineHeight: 1.55 }}
+          >
+            Repositories are named <code>&lt;project&gt;/&lt;service&gt;</code> and are
+            created on first push. You need the Operator role on the project to push,
+            Viewer to pull.
+          </p>
+        ) : null}
 
         <CommandLine label="login" command={login} />
         <CommandLine label="tag" command={tag} />
@@ -233,8 +271,10 @@ export function PushCommandsModal({
 // Exported for tests: renders the repository table (or empty state).
 export function RepositoriesTable({
   repositories,
+  onShowGuide,
 }: {
   readonly repositories: ReadonlyArray<HostedRepository>
+  readonly onShowGuide?: () => void
 }) {
   if (repositories.length === 0) {
     return (
@@ -242,6 +282,19 @@ export function RepositoriesTable({
         icon={<Boxes size={22} />}
         title="No repositories yet"
         hint="Push an image to the hosted registry to see repositories here."
+        action={
+          onShowGuide ? (
+            <button
+              type="button"
+              className="btn"
+              style={{ gap: '0.4rem' }}
+              onClick={onShowGuide}
+            >
+              <Terminal size={14} aria-hidden="true" />
+              How to push
+            </button>
+          ) : undefined
+        }
       />
     )
   }
