@@ -120,8 +120,8 @@ function Header() {
       <p className="kicker">settings</p>
       <h1 className="t-display">Hosted registry</h1>
       <p className="text-faint" style={{ marginTop: 6, maxWidth: '60ch' }}>
-        Push and pull container images on this node at <code>/v2</code>. Layers
-        live on local disk; garbage collection reclaims unreferenced blobs.
+        Push and pull container images on this node. Layers live on local disk;
+        garbage collection reclaims unreferenced blobs.
       </p>
     </header>
   )
