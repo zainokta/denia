@@ -70,22 +70,49 @@ impl ClientConfig {
     /// Atomically write the config to `path` with 0o600 permissions.
     ///
     /// Creates parent directories as needed, writes to a `.toml.tmp` sibling
-    /// first, then renames into place.
+    /// first, then renames into place. On Unix the temp file is created with
+    /// mode 0o600 from the start so the token is never world-readable.
     pub fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let toml = toml::to_string_pretty(self)?;
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, toml.as_bytes())?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(toml.as_bytes())?;
+            f.sync_all().ok();
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&tmp, toml.as_bytes())?;
         }
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
+}
+
+/// Path to the client config file. Honors `DENIA_CLIENT_CONFIG`, else falls back
+/// to `$XDG_CONFIG_HOME/denia/client.toml` (or `$HOME/.config/denia/client.toml`).
+pub fn config_path() -> anyhow::Result<PathBuf> {
+    if let Some(path) = std::env::var_os("DENIA_CLIENT_CONFIG") {
+        return Ok(PathBuf::from(path));
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .ok_or_else(|| {
+            anyhow::anyhow!("cannot determine config directory; set DENIA_CLIENT_CONFIG")
+        })?;
+    Ok(base.join("denia").join("client.toml"))
 }
 
 #[cfg(test)]
@@ -117,19 +144,4 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
     }
-}
-
-/// Path to the client config file. Honors `DENIA_CLIENT_CONFIG`, else falls back
-/// to `$XDG_CONFIG_HOME/denia/client.toml` (or `$HOME/.config/denia/client.toml`).
-pub fn config_path() -> anyhow::Result<PathBuf> {
-    if let Some(path) = std::env::var_os("DENIA_CLIENT_CONFIG") {
-        return Ok(PathBuf::from(path));
-    }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .ok_or_else(|| {
-            anyhow::anyhow!("cannot determine config directory; set DENIA_CLIENT_CONFIG")
-        })?;
-    Ok(base.join("denia").join("client.toml"))
 }

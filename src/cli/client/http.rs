@@ -50,16 +50,34 @@ struct ConsoleTicketRequest {
     rows: u16,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct LoginResponse {
     pub token: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+impl std::fmt::Debug for LoginResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginResponse")
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(serde::Deserialize)]
 pub struct ApiTokenResponse {
     pub id: String,
     pub name: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for ApiTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiTokenResponse")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 pub struct ClientApi {
