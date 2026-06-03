@@ -6,12 +6,17 @@
 //! resolution are implemented in Tasks 4 (uploads) and 5 (manifests); they
 //! return 501 for now after auth + resolution succeed.
 
+use std::collections::HashMap;
+
 use axum::{
     Router,
-    extract::{Path, State},
-    http::StatusCode,
+    body::Bytes,
+    extract::{Path, Query, State},
+    http::{StatusCode, header, HeaderName, HeaderValue},
+    response::{IntoResponse, Response},
     routing::{get, patch, post},
 };
+use uuid::Uuid;
 
 use crate::api::ApiError;
 use crate::app::AppState;
@@ -83,6 +88,23 @@ fn resolve_repo(
     Ok(repo)
 }
 
+fn storage_err(e: crate::registry::storage::RegistryStorageError) -> ApiError {
+    use crate::registry::storage::RegistryStorageError as E;
+    match e {
+        E::InvalidDigest => ApiError::BadRequest("invalid digest".to_string()),
+        E::Io(_) => ApiError::Conflict("registry storage error".to_string()),
+    }
+}
+
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, crate::registry::storage::RegistryStorageError> + Send + 'static,
+) -> Result<T, ApiError> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ApiError::Conflict(format!("join error: {e}")))?
+        .map_err(storage_err)
+}
+
 async fn get_manifest(
     State(state): State<AppState>,
     principal: Principal,
@@ -104,44 +126,183 @@ async fn put_manifest(
 async fn get_blob(
     State(state): State<AppState>,
     principal: Principal,
-    Path((project, service, _digest)): Path<(String, String, String)>,
-) -> Result<StatusCode, ApiError> {
-    let _repo = resolve_repo(&state, &principal, &project, &service, Role::Viewer)?;
-    Ok(StatusCode::NOT_IMPLEMENTED)
+    Path((project, service, digest)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    let repo = resolve_repo(&state, &principal, &project, &service, Role::Viewer)?;
+    if !state.registry.has_blob(repo.id, &digest)? {
+        return Err(ApiError::NotFound("blob unknown".to_string()));
+    }
+    let storage = state.registry_storage.clone();
+    let dg = digest.clone();
+    let bytes = blocking(move || storage.read_blob(&dg)).await?;
+    let mut resp = (StatusCode::OK, bytes).into_response();
+    let h = resp.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    h.insert(
+        HeaderName::from_static("docker-content-digest"),
+        HeaderValue::from_str(&digest).map_err(|_| ApiError::Conflict("header".into()))?,
+    );
+    Ok(resp)
 }
 
 async fn head_blob(
     State(state): State<AppState>,
     principal: Principal,
-    Path((project, service, _digest)): Path<(String, String, String)>,
-) -> Result<StatusCode, ApiError> {
-    let _repo = resolve_repo(&state, &principal, &project, &service, Role::Viewer)?;
-    Ok(StatusCode::NOT_IMPLEMENTED)
+    Path((project, service, digest)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    let repo = resolve_repo(&state, &principal, &project, &service, Role::Viewer)?;
+    if !state.registry.has_blob(repo.id, &digest)? {
+        return Err(ApiError::NotFound("blob unknown".to_string()));
+    }
+    let storage = state.registry_storage.clone();
+    let dg = digest.clone();
+    let size_opt = blocking(move || storage.blob_size(&dg)).await?;
+    match size_opt {
+        Some(n) => {
+            let mut resp = StatusCode::OK.into_response();
+            let h = resp.headers_mut();
+            h.insert(
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(&n.to_string())
+                    .map_err(|_| ApiError::Conflict("header".into()))?,
+            );
+            h.insert(
+                HeaderName::from_static("docker-content-digest"),
+                HeaderValue::from_str(&digest)
+                    .map_err(|_| ApiError::Conflict("header".into()))?,
+            );
+            Ok(resp)
+        }
+        None => Err(ApiError::NotFound("blob unknown".to_string())),
+    }
 }
 
 async fn start_upload(
     State(state): State<AppState>,
     principal: Principal,
     Path((project, service)): Path<(String, String)>,
-) -> Result<StatusCode, ApiError> {
-    let _repo = resolve_repo(&state, &principal, &project, &service, Role::Operator)?;
-    Ok(StatusCode::NOT_IMPLEMENTED)
+) -> Result<Response, ApiError> {
+    let repo = resolve_repo(&state, &principal, &project, &service, Role::Operator)?;
+    let upload_id = Uuid::now_v7();
+    let storage = state.registry_storage.clone();
+    let data_path = blocking(move || storage.create_upload(upload_id)).await?;
+    state.registry.create_upload(upload_id, repo.id, &data_path.to_string_lossy())?;
+    let location = format!("/v2/{project}/{service}/blobs/uploads/{upload_id}");
+    let mut resp = StatusCode::ACCEPTED.into_response();
+    let h = resp.headers_mut();
+    h.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&location).map_err(|_| ApiError::Conflict("header".into()))?,
+    );
+    h.insert(
+        HeaderName::from_static("docker-upload-uuid"),
+        HeaderValue::from_str(&upload_id.to_string())
+            .map_err(|_| ApiError::Conflict("header".into()))?,
+    );
+    h.insert(header::RANGE, HeaderValue::from_static("0-0"));
+    Ok(resp)
 }
 
 async fn patch_upload(
     State(state): State<AppState>,
     principal: Principal,
-    Path((project, service, _upload_id)): Path<(String, String, String)>,
-) -> Result<StatusCode, ApiError> {
-    let _repo = resolve_repo(&state, &principal, &project, &service, Role::Operator)?;
-    Ok(StatusCode::NOT_IMPLEMENTED)
+    Path((project, service, upload_id_str)): Path<(String, String, String)>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let repo = resolve_repo(&state, &principal, &project, &service, Role::Operator)?;
+    let upload_id = Uuid::parse_str(&upload_id_str)
+        .map_err(|_| ApiError::BadRequest("invalid upload id".to_string()))?;
+    let session = state
+        .registry
+        .upload(upload_id)?
+        .ok_or_else(|| ApiError::NotFound("upload unknown".to_string()))?;
+    if session.repository_id != repo.id {
+        return Err(ApiError::NotFound("upload unknown".to_string()));
+    }
+    let storage = state.registry_storage.clone();
+    let bytes = body.to_vec();
+    let new_len = blocking(move || storage.append_upload(upload_id, &bytes)).await?;
+    let location = format!("/v2/{project}/{service}/blobs/uploads/{upload_id}");
+    let range = format!("0-{}", new_len.saturating_sub(1));
+    let mut resp = StatusCode::ACCEPTED.into_response();
+    let h = resp.headers_mut();
+    h.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&location).map_err(|_| ApiError::Conflict("header".into()))?,
+    );
+    h.insert(
+        header::RANGE,
+        HeaderValue::from_str(&range).map_err(|_| ApiError::Conflict("header".into()))?,
+    );
+    h.insert(
+        HeaderName::from_static("docker-upload-uuid"),
+        HeaderValue::from_str(&upload_id.to_string())
+            .map_err(|_| ApiError::Conflict("header".into()))?,
+    );
+    Ok(resp)
 }
 
 async fn commit_upload(
     State(state): State<AppState>,
     principal: Principal,
-    Path((project, service, _upload_id)): Path<(String, String, String)>,
-) -> Result<StatusCode, ApiError> {
-    let _repo = resolve_repo(&state, &principal, &project, &service, Role::Operator)?;
-    Ok(StatusCode::NOT_IMPLEMENTED)
+    Path((project, service, upload_id_str)): Path<(String, String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let repo = resolve_repo(&state, &principal, &project, &service, Role::Operator)?;
+    let upload_id = Uuid::parse_str(&upload_id_str)
+        .map_err(|_| ApiError::BadRequest("invalid upload id".to_string()))?;
+    let session = state
+        .registry
+        .upload(upload_id)?
+        .ok_or_else(|| ApiError::NotFound("upload unknown".to_string()))?;
+    if session.repository_id != repo.id {
+        return Err(ApiError::NotFound("upload unknown".to_string()));
+    }
+    let digest = params
+        .get("digest")
+        .ok_or_else(|| ApiError::BadRequest("missing digest".to_string()))?
+        .clone();
+
+    // Append any trailing body bytes
+    if !body.is_empty() {
+        let storage = state.registry_storage.clone();
+        let bytes = body.to_vec();
+        blocking(move || storage.append_upload(upload_id, &bytes)).await?;
+    }
+
+    // Compute the actual digest
+    let storage = state.registry_storage.clone();
+    let (actual, size) = blocking(move || storage.hash_upload(upload_id)).await?;
+
+    if actual != digest {
+        // Clean up on mismatch
+        let s = state.registry_storage.clone();
+        let _ = blocking(move || s.delete_upload(upload_id)).await;
+        let _ = state.registry.delete_upload(upload_id);
+        return Err(ApiError::BadRequest("digest mismatch".to_string()));
+    }
+
+    // Commit
+    let s = state.registry_storage.clone();
+    let dg = digest.clone();
+    blocking(move || s.commit_blob(upload_id, &dg)).await?;
+    state.registry.put_blob(repo.id, &digest, size)?;
+    state.registry.delete_upload(upload_id)?;
+
+    let location = format!("/v2/{project}/{service}/blobs/{digest}");
+    let mut resp = StatusCode::CREATED.into_response();
+    let h = resp.headers_mut();
+    h.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&location).map_err(|_| ApiError::Conflict("header".into()))?,
+    );
+    h.insert(
+        HeaderName::from_static("docker-content-digest"),
+        HeaderValue::from_str(&digest).map_err(|_| ApiError::Conflict("header".into()))?,
+    );
+    Ok(resp)
 }
