@@ -1,4 +1,5 @@
 use std::path::{Component, Path};
+use std::time::Duration;
 
 use axum::{Json, Router, body::Body, extract::{Path as AxumPath, State}, routing::post};
 use chrono::Utc;
@@ -10,6 +11,60 @@ use crate::api::ApiError;
 use crate::app::AppState;
 use crate::auth::{Principal, ensure_role};
 use crate::domain::Role;
+
+/// Remove upload staging dirs whose mtime is older than `max_age`.
+///
+/// Blocking filesystem sweep — intended to run inside `tokio::task::spawn_blocking`
+/// or a periodic maintenance tick (see `upload_sweep_run_until_shutdown`).
+pub fn sweep_expired_uploads(uploads_dir: &Path, max_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(uploads_dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        if now
+            .duration_since(modified)
+            .map(|age| age >= max_age)
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// Background task: tick on `interval`, sweep expired upload staging dirs.
+/// Mirrors the registry GC `gc_run_until_shutdown` pattern.
+pub async fn upload_sweep_run_until_shutdown(
+    uploads_dir: std::path::PathBuf,
+    max_age: Duration,
+    interval: Duration,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = ticker.tick() => {
+                let dir = uploads_dir.clone();
+                let res = tokio::task::spawn_blocking(move || sweep_expired_uploads(&dir, max_age)).await;
+                if let Err(e) = res {
+                    eprintln!("upload-sweep task join error: {e}");
+                }
+            }
+        }
+    }
+}
 
 pub struct ExtractLimits {
     pub max_uncompressed: u64,
@@ -504,5 +559,27 @@ mod tests {
     #[allow(dead_code)]
     fn _use_test_state() {
         let _ = test_state();
+    }
+
+    // ── sweep_expired_uploads unit tests ───────────────────────────────────
+
+    #[test]
+    fn sweep_removes_old_and_keeps_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old-upload");
+        std::fs::create_dir_all(&old).unwrap();
+        // max_age = 0 → every dir is "expired"
+        sweep_expired_uploads(dir.path(), std::time::Duration::ZERO);
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn sweep_keeps_fresh_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("fresh-upload");
+        std::fs::create_dir_all(&fresh).unwrap();
+        // max_age = 1 hour → nothing is old enough to delete
+        sweep_expired_uploads(dir.path(), std::time::Duration::from_secs(3600));
+        assert!(fresh.exists());
     }
 }
