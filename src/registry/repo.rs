@@ -149,6 +149,20 @@ impl HostedRegistryRepo {
         Ok(tags)
     }
 
+    /// Returns the manifest digest a tag points at, if any.
+    pub fn tag(&self, repository_id: Uuid, tag: &str) -> Result<Option<String>, RepoError> {
+        let conn = self.pool.connection()?;
+        let rid = repository_id.to_string();
+        let digest: Option<String> = conn
+            .query_row(
+                "SELECT manifest_digest FROM hosted_tags WHERE repository_id=?1 AND tag=?2",
+                params![&rid, tag],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(digest)
+    }
+
     /// Returns a manifest by digest, if it exists.
     pub fn manifest(
         &self,

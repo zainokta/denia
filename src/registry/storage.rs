@@ -101,6 +101,17 @@ impl RegistryStorage {
         }
     }
 
+    /// Write `bytes` to the content-addressed path for `digest` (atomic).
+    /// Returns the number of bytes written.
+    pub fn put_content(&self, digest: &str, bytes: &[u8]) -> Result<u64, RegistryStorageError> {
+        let path = self.blob_path(digest)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, bytes)?;
+        Ok(bytes.len() as u64)
+    }
+
     pub fn delete_upload(&self, upload_id: Uuid) -> Result<(), RegistryStorageError> {
         let dir = self.upload_dir(upload_id);
         match std::fs::remove_dir_all(&dir) {
