@@ -742,6 +742,11 @@ fn deployment_request(service: &ServiceConfig, artifact: &ArtifactRecord) -> Dep
             repo_url: repo_url.clone(),
             git_ref: git_ref.clone(),
         },
+        ArtifactSource::UploadedContext { upload_id, .. } => {
+            // Upload-based deployments are wired in a later task (T3.2).
+            // This arm is unreachable until then; keep it compiling.
+            DeploymentRequest::external_image(service.id, upload_id.clone())
+        }
     }
 }
 
