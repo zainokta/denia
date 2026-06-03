@@ -18,7 +18,9 @@ const config = defineConfig({
   resolve: { tsconfigPaths: true },
   server: {
     proxy: {
-      '/v1': { target: 'http://127.0.0.1:7180', changeOrigin: true },
+      // `ws: true` so the service-console websocket upgrade
+      // (`/v1/services/:id/console/ws`) is proxied in dev (ADR-033).
+      '/v1': { target: 'http://127.0.0.1:7180', changeOrigin: true, ws: true },
       '/healthz': { target: 'http://127.0.0.1:7180', changeOrigin: true },
     },
   },
