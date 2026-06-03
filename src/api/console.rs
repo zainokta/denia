@@ -37,11 +37,14 @@ const TICKET_TTL: Duration = Duration::from_secs(30);
 const MAX_CONSOLE_SESSIONS: usize = 16;
 const MAX_CONSOLE_SESSIONS_PER_SERVICE: usize = 2;
 
-static TICKETS: LazyLock<Arc<Mutex<HashMap<String, ConsoleTicket>>>> =
+type TicketStore = Arc<Mutex<HashMap<String, ConsoleTicket>>>;
+type ServiceLimitStore = Arc<Mutex<HashMap<Uuid, Arc<Semaphore>>>>;
+
+static TICKETS: LazyLock<TicketStore> =
     LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 static CONSOLE_LIMIT: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_CONSOLE_SESSIONS)));
-static SERVICE_LIMITS: LazyLock<Arc<Mutex<HashMap<Uuid, Arc<Semaphore>>>>> =
+static SERVICE_LIMITS: LazyLock<ServiceLimitStore> =
     LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 #[derive(Debug, Clone)]
@@ -457,7 +460,10 @@ mod tests {
     async fn operator_can_create_console_ticket_for_running_replica() {
         let state = test_state();
         let project_id = state.projects.default_project_id().unwrap();
-        let service = state.services.put_service(service_body(project_id)).unwrap();
+        let service = state
+            .services
+            .put_service(service_body(project_id))
+            .unwrap();
         start_running_replica(&state, &service).await;
 
         let resp = build_router(state)
@@ -500,7 +506,10 @@ mod tests {
             .create_api_token(viewer.id, "viewer")
             .unwrap()
             .token;
-        let service = state.services.put_service(service_body(project_id)).unwrap();
+        let service = state
+            .services
+            .put_service(service_body(project_id))
+            .unwrap();
 
         let resp = build_router(state)
             .oneshot(
@@ -522,7 +531,10 @@ mod tests {
     async fn stopped_service_returns_conflict_for_console_ticket() {
         let state = test_state();
         let project_id = state.projects.default_project_id().unwrap();
-        let service = state.services.put_service(service_body(project_id)).unwrap();
+        let service = state
+            .services
+            .put_service(service_body(project_id))
+            .unwrap();
 
         let resp = build_router(state)
             .oneshot(

@@ -53,7 +53,11 @@ impl tokio::io::AsyncRead for PtyMaster {
             let dst = buf.initialize_unfilled();
             match guard.try_io(|inner| {
                 let n = unsafe {
-                    libc::read(inner.get_ref().as_raw_fd(), dst.as_mut_ptr().cast(), dst.len())
+                    libc::read(
+                        inner.get_ref().as_raw_fd(),
+                        dst.as_mut_ptr().cast(),
+                        dst.len(),
+                    )
                 };
                 if n < 0 {
                     Err(io::Error::last_os_error())
@@ -85,7 +89,11 @@ impl tokio::io::AsyncWrite for PtyMaster {
             };
             match guard.try_io(|inner| {
                 let n = unsafe {
-                    libc::write(inner.get_ref().as_raw_fd(), bytes.as_ptr().cast(), bytes.len())
+                    libc::write(
+                        inner.get_ref().as_raw_fd(),
+                        bytes.as_ptr().cast(),
+                        bytes.len(),
+                    )
                 };
                 if n < 0 {
                     Err(io::Error::last_os_error())

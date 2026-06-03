@@ -1,6 +1,9 @@
 import '@xterm/xterm/css/xterm.css'
 import { useEffect, useRef, useState } from 'react'
-import { Terminal } from '@xterm/xterm'
+// Type-only import keeps the CommonJS `@xterm/xterm` package out of the SSR
+// prerender bundle; the runtime constructor is pulled in via dynamic import
+// inside the (client-only) mount effect below.
+import type { Terminal } from '@xterm/xterm'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
@@ -55,24 +58,29 @@ export function ServiceConsole({ serviceId }: { readonly serviceId: string }) {
   }, [replicas, selectedReplica])
 
   useEffect(() => {
-    const terminal = new Terminal({
-      cols: 120,
-      rows: 32,
-      cursorBlink: true,
-      convertEol: true,
-      fontFamily: 'JetBrains Mono, ui-monospace, SFMono-Regular, monospace',
-      fontSize: 13,
-      theme: {
-        background: '#121115',
-        foreground: '#f4eff7',
-        cursor: '#ff4fa3',
-      },
+    let disposed = false
+    void import('@xterm/xterm').then(({ Terminal }) => {
+      if (disposed) return
+      const terminal = new Terminal({
+        cols: 120,
+        rows: 32,
+        cursorBlink: true,
+        convertEol: true,
+        fontFamily: 'JetBrains Mono, ui-monospace, SFMono-Regular, monospace',
+        fontSize: 13,
+        theme: {
+          background: '#121115',
+          foreground: '#f4eff7',
+          cursor: '#ff4fa3',
+        },
+      })
+      termRef.current = terminal
+      if (hostRef.current) terminal.open(hostRef.current)
     })
-    termRef.current = terminal
-    if (hostRef.current) terminal.open(hostRef.current)
     return () => {
+      disposed = true
       socketRef.current?.close()
-      terminal.dispose()
+      termRef.current?.dispose()
     }
   }, [])
 

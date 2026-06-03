@@ -1101,7 +1101,13 @@ async fn registry_api_admin_can_crud_no_credential_leak() {
         credential_ref.starts_with("registry-"),
         "ref should be generated: {credential_ref}"
     );
-    for needle in ["password", "username", "example-redacted-token-prefix", "zainokta", "\"value\""] {
+    for needle in [
+        "password",
+        "username",
+        "example-redacted-token-prefix",
+        "zainokta",
+        "\"value\"",
+    ] {
         assert!(
             !body_text.contains(needle),
             "response leaks credential field {needle}: {body_text}"

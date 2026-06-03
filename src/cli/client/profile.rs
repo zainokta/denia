@@ -31,7 +31,10 @@ impl ClientConfig {
             )
         })?;
         let config: ClientConfig = toml::from_str(&raw).map_err(|error| {
-            anyhow::anyhow!("invalid client profile config at {}: {error}", path.display())
+            anyhow::anyhow!(
+                "invalid client profile config at {}: {error}",
+                path.display()
+            )
         })?;
         Ok(config)
     }
@@ -48,7 +51,9 @@ impl ClientConfig {
         match self.profiles.len() {
             1 => Ok(self.profiles.values().next().expect("one profile")),
             0 => anyhow::bail!("no client profile configured; set DENIA_CLIENT_CONFIG"),
-            _ => anyhow::bail!("multiple client profiles configured but none is active; set `active`"),
+            _ => anyhow::bail!(
+                "multiple client profiles configured but none is active; set `active`"
+            ),
         }
     }
 }
