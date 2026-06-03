@@ -62,7 +62,7 @@ export class LoginResult extends Schema.Class<LoginResult>('LoginResult')({
 }) {}
 
 export class ApiToken extends Schema.Class<ApiToken>('ApiToken')({
-  id: Schema.Number,
+  id: Schema.String,
   name: Schema.String,
   token: Schema.String,
   created_at: Schema.String,
