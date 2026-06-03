@@ -398,5 +398,60 @@ pub fn run_migrations(pool: &SqlitePool) -> Result<(), RepoError> {
         connection.execute("INSERT INTO schema_version (version) VALUES (11)", [])?;
     }
 
+    if current < 12 {
+        connection.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS hosted_repositories (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              service_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE(project_id, service_id)
+            );
+            CREATE TABLE IF NOT EXISTS hosted_manifests (
+              repository_id TEXT NOT NULL,
+              digest TEXT NOT NULL,
+              media_type TEXT NOT NULL,
+              size INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY(repository_id, digest)
+            );
+            CREATE TABLE IF NOT EXISTS hosted_tags (
+              repository_id TEXT NOT NULL,
+              tag TEXT NOT NULL,
+              manifest_digest TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(repository_id, tag)
+            );
+            CREATE TABLE IF NOT EXISTS hosted_blobs (
+              repository_id TEXT NOT NULL,
+              digest TEXT NOT NULL,
+              size INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY(repository_id, digest)
+            );
+            CREATE TABLE IF NOT EXISTS hosted_uploads (
+              id TEXT PRIMARY KEY,
+              repository_id TEXT NOT NULL,
+              path TEXT NOT NULL,
+              started_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS hosted_registry_gc_runs (
+              id TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              scanned_blobs INTEGER NOT NULL,
+              deleted_blobs INTEGER NOT NULL,
+              deleted_bytes INTEGER NOT NULL,
+              started_at TEXT NOT NULL,
+              finished_at TEXT
+            );
+            "#,
+        )?;
+        connection.execute("DELETE FROM schema_version", [])?;
+        connection.execute("INSERT INTO schema_version (version) VALUES (12)", [])?;
+    }
+
     Ok(())
 }
