@@ -156,6 +156,13 @@ fn request_host(session: &Session) -> String {
     String::new()
 }
 
+/// The `X-Forwarded-For` value for a proxied request: the client IP only (no
+/// port). Overwriting with this (not appending) prevents a downstream client
+/// from spoofing the value the loopback-trusting rate limiter keys on.
+fn forwarded_for(client: Option<std::net::SocketAddr>) -> Option<String> {
+    client.map(|addr| addr.ip().to_string())
+}
+
 /// Strip a trailing `:port` from a host authority. IPv6 literals are returned
 /// verbatim (Denia only routes DNS names; bracketed literals never match a
 /// validated route key anyway).
@@ -273,6 +280,21 @@ impl ProxyHttp for DeniaProxy {
                 Err(Error::new(ErrorType::HTTPStatus(404)))
             }
         }
+    }
+
+    async fn upstream_request_filter(
+        &self,
+        session: &mut Session,
+        upstream_request: &mut pingora::http::RequestHeader,
+        _ctx: &mut Self::CTX,
+    ) -> pingora::Result<()> {
+        let client = session.client_addr().and_then(|a| a.as_inet()).copied();
+        if let Some(value) = forwarded_for(client) {
+            // Overwrite (not append): strip any client-supplied X-Forwarded-For
+            // so the rate-limit key cannot be spoofed.
+            let _ = upstream_request.insert_header("X-Forwarded-For", &value);
+        }
+        Ok(())
     }
 
     async fn logging(&self, session: &mut Session, _e: Option<&Error>, ctx: &mut Self::CTX) {
@@ -394,6 +416,14 @@ mod classify_tests {
             classify_resolution(Err(ActivationError::Failed("boom".into()))),
             UpstreamChoice::Unavailable
         );
+    }
+
+    #[test]
+    fn forwarded_for_uses_client_ip_only() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let client = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 54321);
+        assert_eq!(forwarded_for(Some(client)).as_deref(), Some("203.0.113.7"));
+        assert_eq!(forwarded_for(None), None);
     }
 
     #[test]
