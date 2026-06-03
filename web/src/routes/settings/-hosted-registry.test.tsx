@@ -66,4 +66,13 @@ describe('PushCommandsModal', () => {
     // Modal returns null when closed — container should have no push command text.
     expect(container.querySelector('code')).toBeNull()
   })
+
+  it('renders a generic guide with the <project>/<service> placeholder when no repository is given', () => {
+    render(<PushCommandsModal open={true} onClose={() => {}} />)
+    expect(screen.getByText('How to push an image')).toBeTruthy()
+    // Scope to the placeholder so it doesn't collide with concrete-repo modals
+    // left mounted by earlier tests (this file has no afterEach cleanup).
+    const el = screen.getByText(/docker push .*<project>\/<service>:latest/)
+    expect(el).toBeTruthy()
+  })
 })
