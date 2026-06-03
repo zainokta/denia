@@ -103,6 +103,16 @@ Add web console visibility:
   tokens and project RBAC; Docker-compatible login can map to scoped tokens
   later.
 
+## Amendment (2026-06-03): Docker Basic auth for push/pull
+
+`/v2` additionally accepts HTTP Basic auth where the password is a Denia API
+token (`docker login <host> -u <user> -p <api-token>`); the username is ignored.
+Unauthenticated `/v2` responses now advertise `WWW-Authenticate: Basic
+realm="Denia Registry"` so standard docker clients perform the login handshake.
+This is the first increment of the "Docker-compatible login" future work noted
+above; OAuth2 token-endpoint exchange remains out of scope. Adds the `base64`
+dependency for decoding Basic credentials.
+
 ## References
 
 - [Spec: client CLI and hosted registry](../superpowers/specs/2026-06-03-client-cli-and-hosted-registry-design.md)
