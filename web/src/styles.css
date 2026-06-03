@@ -1604,3 +1604,21 @@ a,
     transform: none;
   }
 }
+
+/* Service console terminal (ADR-033): xterm host panel. */
+.terminal-panel {
+  min-height: 34rem;
+  height: min(68vh, 42rem);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #121115;
+  padding: 0.75rem;
+}
+
+.terminal-panel .xterm {
+  height: 100%;
+}
+
+.terminal-panel .xterm-viewport {
+  scrollbar-color: var(--fg-faint) transparent;
+}
