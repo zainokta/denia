@@ -821,7 +821,6 @@ impl Runtime for LinuxRuntime {
         let config = ConsoleLaunchConfig {
             target_pid,
             cgroup_path: tracked.plan.cgroup_path.clone(),
-            rootfs: tracked.plan.merged.clone(),
             workdir: tracked.plan.namespace.workdir.clone(),
             env: tracked.plan.namespace.env.clone(),
             shell: "/bin/sh".to_string(),
