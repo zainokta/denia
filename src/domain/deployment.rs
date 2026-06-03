@@ -2,6 +2,27 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_request_round_trips_and_exposes_service_id() {
+        let sid = Uuid::now_v7();
+        let req = DeploymentRequest::Upload {
+            service_id: sid,
+            upload_id: "abc".into(),
+            dockerfile_path: "Dockerfile".into(),
+            context_path: ".".into(),
+        };
+        assert_eq!(req.service_id(), sid);
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"source\":\"upload\""));
+        let back: DeploymentRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, req);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum DeploymentRequest {
@@ -14,12 +35,20 @@ pub enum DeploymentRequest {
         service_id: Uuid,
         image: String,
     },
+    Upload {
+        service_id: Uuid,
+        upload_id: String,
+        dockerfile_path: String,
+        context_path: String,
+    },
 }
 
 impl DeploymentRequest {
     pub fn service_id(&self) -> Uuid {
         match self {
-            Self::Git { service_id, .. } | Self::ExternalImage { service_id, .. } => *service_id,
+            Self::Git { service_id, .. }
+            | Self::ExternalImage { service_id, .. }
+            | Self::Upload { service_id, .. } => *service_id,
         }
     }
 
