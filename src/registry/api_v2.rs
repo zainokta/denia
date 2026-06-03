@@ -8,6 +8,8 @@
 
 use std::collections::HashMap;
 
+use sha2::Digest as _;
+
 use axum::{
     Router,
     body::Bytes,
@@ -105,22 +107,82 @@ async fn blocking<T: Send + 'static>(
         .map_err(storage_err)
 }
 
+fn is_digest_reference(reference: &str) -> bool {
+    reference.starts_with("sha256:")
+}
+
+const DEFAULT_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+
 async fn get_manifest(
     State(state): State<AppState>,
     principal: Principal,
-    Path((project, service, _reference)): Path<(String, String, String)>,
-) -> Result<StatusCode, ApiError> {
-    let _repo = resolve_repo(&state, &principal, &project, &service, Role::Viewer)?;
-    Ok(StatusCode::NOT_IMPLEMENTED)
+    Path((project, service, reference)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    let repo = resolve_repo(&state, &principal, &project, &service, Role::Viewer)?;
+    let digest = if is_digest_reference(&reference) {
+        reference.clone()
+    } else {
+        state
+            .registry
+            .tag(repo.id, &reference)?
+            .ok_or_else(|| ApiError::NotFound("manifest unknown".to_string()))?
+    };
+    let manifest = state
+        .registry
+        .manifest(repo.id, &digest)?
+        .ok_or_else(|| ApiError::NotFound("manifest unknown".to_string()))?;
+    let storage = state.registry_storage.clone();
+    let dg = digest.clone();
+    let bytes = blocking(move || storage.read_blob(&dg)).await?;
+    let mut resp = (StatusCode::OK, bytes).into_response();
+    let h = resp.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&manifest.media_type)
+            .map_err(|_| ApiError::Conflict("header".into()))?,
+    );
+    h.insert(
+        HeaderName::from_static("docker-content-digest"),
+        HeaderValue::from_str(&digest).map_err(|_| ApiError::Conflict("header".into()))?,
+    );
+    Ok(resp)
 }
 
 async fn put_manifest(
     State(state): State<AppState>,
     principal: Principal,
-    Path((project, service, _reference)): Path<(String, String, String)>,
-) -> Result<StatusCode, ApiError> {
-    let _repo = resolve_repo(&state, &principal, &project, &service, Role::Operator)?;
-    Ok(StatusCode::NOT_IMPLEMENTED)
+    Path((project, service, reference)): Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let repo = resolve_repo(&state, &principal, &project, &service, Role::Operator)?;
+    let media_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_MANIFEST_MEDIA_TYPE)
+        .to_string();
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&body)));
+    let storage = state.registry_storage.clone();
+    let dg = digest.clone();
+    let bytes = body.to_vec();
+    let size = blocking(move || storage.put_content(&dg, &bytes)).await?;
+    state.registry.put_manifest(repo.id, &digest, &media_type, size)?;
+    if !is_digest_reference(&reference) {
+        state.registry.put_tag(repo.id, &reference, &digest)?;
+    }
+    let location = format!("/v2/{project}/{service}/manifests/{digest}");
+    let mut resp = StatusCode::CREATED.into_response();
+    let h = resp.headers_mut();
+    h.insert(
+        HeaderName::from_static("docker-content-digest"),
+        HeaderValue::from_str(&digest).map_err(|_| ApiError::Conflict("header".into()))?,
+    );
+    h.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&location).map_err(|_| ApiError::Conflict("header".into()))?,
+    );
+    Ok(resp)
 }
 
 async fn get_blob(

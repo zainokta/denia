@@ -113,6 +113,73 @@ async fn upload_lifecycle() {
 }
 
 #[tokio::test]
+async fn manifest_roundtrip() {
+    use sha2::{Digest, Sha256};
+    let app = test_app_with_project_service().await;
+    let token = "Bearer test-token";
+    let media_type = "application/vnd.oci.image.manifest.v1+json";
+    let manifest = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000","size":0},"layers":[]}"#.to_vec();
+    let digest = format!("sha256:{}", hex::encode(Sha256::digest(&manifest)));
+
+    // PUT by tag -> 201 + Docker-Content-Digest
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v2/default/api/manifests/latest")
+                .header("authorization", token)
+                .header("content-type", media_type)
+                .body(Body::from(manifest.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(
+        resp.headers().get("docker-content-digest").unwrap().to_str().unwrap(),
+        digest
+    );
+
+    // GET by tag -> 200, same bytes + media type
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v2/default/api/manifests/latest")
+                .header("authorization", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap().to_str().unwrap(),
+        media_type
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), manifest.as_slice());
+
+    // GET by digest -> 200, same bytes
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v2/default/api/manifests/{digest}"))
+                .header("authorization", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), manifest.as_slice());
+}
+
+#[tokio::test]
 async fn v2_requires_bearer_auth() {
     let app = test_app_with_project_service().await;
     let resp = app
