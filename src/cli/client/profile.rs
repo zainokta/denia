@@ -2,7 +2,7 @@
 //! written owner-only where the platform supports it. See ADR-030.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -49,6 +49,29 @@ impl ClientConfig {
             .find(|p| p.name == self.active)
             .ok_or_else(|| ProfileError::ActiveMissing(self.active.clone()))
     }
+}
+
+/// Resolve the client config file path. `DENIA_CLIENT_CONFIG` overrides the
+/// default; otherwise `$XDG_CONFIG_HOME/denia/client.toml`, then
+/// `$HOME/.config/denia/client.toml` (Unix), then `%APPDATA%\denia\client.toml`
+/// (Windows).
+pub fn config_path() -> std::io::Result<PathBuf> {
+    if let Some(path) = std::env::var_os("DENIA_CLIENT_CONFIG") {
+        return Ok(PathBuf::from(path));
+    }
+    let base = if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg)
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".config")
+    } else if let Some(appdata) = std::env::var_os("APPDATA") {
+        PathBuf::from(appdata)
+    } else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no config home: set DENIA_CLIENT_CONFIG",
+        ));
+    };
+    Ok(base.join("denia").join("client.toml"))
 }
 
 #[cfg(unix)]

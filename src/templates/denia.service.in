@@ -21,7 +21,7 @@ Environment=DENIA_CONFIG_FILE={{config_file}}
 Environment=SOPS_AGE_KEY_FILE={{age_key_file}}
 EnvironmentFile={{token_file}}
 
-ExecStart={{denia_bin}}
+ExecStart={{denia_bin}} server run
 Restart=on-failure
 RestartSec=3s
 LimitNOFILE=1048576
