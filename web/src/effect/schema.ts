@@ -400,3 +400,27 @@ export class OciCacheGcRun extends Schema.Class<OciCacheGcRun>('OciCacheGcRun')(
   kept_in_use_entries: Schema.Number,
   kept_recent_entries: Schema.Number,
 }) {}
+
+// Hosted OCI registry (ADR-030). Mirrors src/api/registry.rs::RegistryStatusView.
+export class HostedRegistryStatus extends Schema.Class<HostedRegistryStatus>('HostedRegistryStatus')({
+  repositories: Schema.Number,
+  blobs: Schema.Number,
+  total_bytes: Schema.Number,
+  last_gc_at: Schema.NullOr(Schema.String),
+  last_gc_deleted_bytes: Schema.Number,
+}) {}
+
+// Single repository entry returned by GET /v1/registry/repositories.
+export class HostedRepository extends Schema.Class<HostedRepository>('HostedRepository')({
+  project_id: Schema.String,
+  project_name: Schema.String,
+  service_id: Schema.String,
+  service_name: Schema.String,
+  repository: Schema.String,
+  tags: Schema.Array(Schema.Struct({
+    tag: Schema.String,
+    digest: Schema.String,
+    size: Schema.Number,
+    updated_at: Schema.String,
+  })),
+}) {}

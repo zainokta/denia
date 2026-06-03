@@ -23,6 +23,8 @@ import {
   Node,
   NodeSnapshot,
   Nodes,
+  HostedRegistryStatus,
+  HostedRepository,
   OciCacheGcRun,
   OciCacheStatus,
   Project,
@@ -244,6 +246,9 @@ export class ApiClient extends Context.Service<
     ) => Effect.Effect<void, ApiError>
     readonly getOciCache: Effect.Effect<OciCacheStatus, ApiError | DecodeError>
     readonly runOciCacheGc: Effect.Effect<OciCacheGcRun, ApiError | DecodeError>
+    readonly getHostedRegistryStatus: Effect.Effect<HostedRegistryStatus, ApiError | DecodeError>
+    readonly listHostedRepositories: Effect.Effect<ReadonlyArray<HostedRepository>, ApiError | DecodeError>
+    readonly runHostedRegistryGc: Effect.Effect<HostedRegistryStatus, ApiError | DecodeError>
   }
 >()('ApiClient') {}
 
@@ -886,6 +891,27 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       return yield* parseResponse(response, OciCacheGcRun)
     })
 
+    const getHostedRegistryStatus = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/registry/status'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, HostedRegistryStatus)
+    })
+
+    const listHostedRepositories = Effect.gen(function* () {
+      const response = yield* http
+        .get(url('/v1/registry/repositories'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, Schema.Array(HostedRepository))
+    })
+
+    const runHostedRegistryGc = Effect.gen(function* () {
+      const response = yield* http
+        .post(url('/v1/registry/gc'), { headers: authHeaders() })
+        .pipe(Effect.mapError(httpError))
+      return yield* parseResponse(response, HostedRegistryStatus)
+    })
+
     return {
       listNodes,
       login,
@@ -941,6 +967,9 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       deleteRegistry,
       getOciCache,
       runOciCacheGc,
+      getHostedRegistryStatus,
+      listHostedRepositories,
+      runHostedRegistryGc,
     }
   }),
 )

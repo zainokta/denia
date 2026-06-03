@@ -5,6 +5,7 @@ pub mod deployments;
 pub mod domains;
 pub mod error;
 pub mod health;
+pub mod hosted_registry;
 pub mod ingress;
 pub mod jobs;
 pub mod members;
