@@ -268,12 +268,7 @@ impl HostedRegistryRepo {
     }
 
     /// Upserts a blob record for a repository.
-    pub fn put_blob(
-        &self,
-        repository_id: Uuid,
-        digest: &str,
-        size: u64,
-    ) -> Result<(), RepoError> {
+    pub fn put_blob(&self, repository_id: Uuid, digest: &str, size: u64) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         let rid = repository_id.to_string();
         let now = Utc::now().to_rfc3339();
@@ -296,5 +291,109 @@ impl HostedRegistryRepo {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    /// Returns the distinct set of manifest digests across all repositories.
+    /// The garbage collector treats these — plus the config/layer digests
+    /// parsed from each manifest body — as the live reference set.
+    pub fn all_manifest_digests(&self) -> Result<Vec<String>, RepoError> {
+        let conn = self.pool.connection()?;
+        let mut stmt = conn.prepare("SELECT DISTINCT digest FROM hosted_manifests")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut digests = Vec::new();
+        for row in rows {
+            digests.push(row?);
+        }
+        Ok(digests)
+    }
+
+    /// Deletes every blob row for `digest` across all repositories. Called by
+    /// the GC after the on-disk blob file has been removed.
+    pub fn delete_blob_rows(&self, digest: &str) -> Result<(), RepoError> {
+        let conn = self.pool.connection()?;
+        conn.execute("DELETE FROM hosted_blobs WHERE digest=?1", params![digest])?;
+        Ok(())
+    }
+
+    /// Records a completed garbage-collection run for observability.
+    pub fn record_gc_run(
+        &self,
+        scanned: u64,
+        deleted: u64,
+        deleted_bytes: u64,
+    ) -> Result<(), RepoError> {
+        let conn = self.pool.connection()?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO hosted_registry_gc_runs \
+             (id, status, scanned_blobs, deleted_blobs, deleted_bytes, started_at, finished_at) \
+             VALUES (?1, 'completed', ?2, ?3, ?4, ?5, ?5)",
+            params![
+                Uuid::now_v7().to_string(),
+                scanned as i64,
+                deleted as i64,
+                deleted_bytes as i64,
+                &now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Total number of repositories.
+    pub fn count_repositories(&self) -> Result<u64, RepoError> {
+        let conn = self.pool.connection()?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM hosted_repositories", [], |row| {
+            row.get(0)
+        })?;
+        Ok(count as u64)
+    }
+
+    /// Total number of blob rows.
+    pub fn count_blobs(&self) -> Result<u64, RepoError> {
+        let conn = self.pool.connection()?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM hosted_blobs", [], |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
+    /// Sum of all recorded blob sizes (bytes).
+    pub fn total_blob_bytes(&self) -> Result<u64, RepoError> {
+        let conn = self.pool.connection()?;
+        let total: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(size), 0) FROM hosted_blobs",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(total.max(0) as u64)
+    }
+
+    /// All repositories ordered by name.
+    pub fn list_repositories(&self) -> Result<Vec<HostedRepository>, RepoError> {
+        let conn = self.pool.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, service_id, name, created_at \
+             FROM hosted_repositories ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut repositories = Vec::new();
+        for row in rows {
+            let (id, pid, sid, name, created_at) = row?;
+            repositories.push(HostedRepository {
+                id: Uuid::parse_str(&id)?,
+                project_id: Uuid::parse_str(&pid)?,
+                service_id: Uuid::parse_str(&sid)?,
+                name,
+                created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
+            });
+        }
+        Ok(repositories)
     }
 }

@@ -85,6 +85,12 @@ pub struct AppConfig {
     /// Retention threshold: blobs with `.lastref` mtime older than this and
     /// no live reference are eligible for deletion. Default = 7 days.
     pub oci_gc_retention_secs: u64,
+    /// Hosted registry garbage-collection scan interval. Default = 24 hours.
+    pub registry_gc_interval_secs: u64,
+    /// Hosted registry grace period: unreferenced blobs younger than this are
+    /// not deleted (guards against an in-flight push between blob upload and
+    /// manifest commit). Default = 1 hour.
+    pub registry_gc_grace_secs: u64,
     /// Age public key used to encrypt control-plane-managed secrets (registry
     /// credentials, etc.). Required at the point of first encryption; absence
     /// is reported as a 400/500 at API time, not at boot. See ADR-021.
@@ -513,6 +519,14 @@ impl AppConfig {
             .and_then(|v| v.parse().ok())
             .or(file_cfg.oci_gc_retention_secs)
             .unwrap_or(7 * 24 * 60 * 60);
+        let registry_gc_interval_secs = env::var("DENIA_REGISTRY_GC_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(24 * 60 * 60);
+        let registry_gc_grace_secs = env::var("DENIA_REGISTRY_GC_GRACE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60 * 60);
         let age_key_file = env::var("DENIA_AGE_KEY_FILE")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -565,6 +579,8 @@ impl AppConfig {
             oci_cache_verify_on_hit,
             oci_gc_interval_secs,
             oci_gc_retention_secs,
+            registry_gc_interval_secs,
+            registry_gc_grace_secs,
             age_recipient,
             age_key_file,
         })
@@ -610,6 +626,8 @@ impl AppConfig {
             // calls `sweep_once` synchronously.
             oci_gc_interval_secs: 7 * 24 * 60 * 60,
             oci_gc_retention_secs: 7 * 24 * 60 * 60,
+            registry_gc_interval_secs: 24 * 60 * 60,
+            registry_gc_grace_secs: 60 * 60,
             age_recipient: Some("age1test".into()),
             age_key_file: data_dir.join("age.key"),
         }

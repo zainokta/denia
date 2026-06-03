@@ -201,6 +201,20 @@ pub async fn run() -> anyhow::Result<()> {
         (tx, handle)
     });
 
+    // Hosted OCI registry garbage collector (ADR-031). Same cancel-safe loop
+    // as the layer cache GC. Conservative: never deletes blobs referenced by a
+    // manifest or younger than the grace period, never touches active uploads.
+    let registry_gc_task = {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let interval = std::time::Duration::from_secs(config.registry_gc_interval_secs);
+        let handle = tokio::spawn(crate::registry::gc::gc_run_until_shutdown(
+            state.registry_gc.clone(),
+            interval,
+            rx,
+        ));
+        (tx, handle)
+    };
+
     let autoscale_interval = config.autoscale_interval_s;
     let autoscaler_task = if let Some((ingress, controller)) = state.autoscaler_handle() {
         ingress
@@ -276,6 +290,11 @@ pub async fn run() -> anyhow::Result<()> {
         let _ = handle.await;
     }
     if let Some((tx, handle)) = oci_gc_task {
+        let _ = tx.send(());
+        let _ = handle.await;
+    }
+    {
+        let (tx, handle) = registry_gc_task;
         let _ = tx.send(());
         let _ = handle.await;
     }
