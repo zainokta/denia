@@ -443,8 +443,10 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/v1", auth_public.merge(authed))
         .nest(
             "/v2",
-            crate::registry::api_v2::router()
-                .route_layer(middleware::from_fn_with_state(state.clone(), require_auth)),
+            crate::registry::api_v2::router().route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::registry::api_v2::registry_auth,
+            )),
         )
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(security_headers))
