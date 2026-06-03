@@ -46,6 +46,10 @@ about, opening it only to do a thing and leave.
   live in SOPS-encrypted files encrypted to a host-local age identity (ADR-021/ADR-023).
 - **Embedded web console** — a static SPA served from the same binary on the same
   origin as `/v1` (ADR-004).
+- **Live service console** — `kubectl exec`-style interactive `/bin/sh` into a
+  running replica, from the web console's terminal or `denia console`. A
+  PTY-backed `setns` joins the replica's namespaces + cgroup; auth is a single-use
+  ticket, never a token in the URL (ADR-033).
 
 ## Quick Start
 
@@ -119,6 +123,7 @@ privilege model.
 | `denia status` | Print service state (systemctl status + recent journal lines). |
 | `denia doctor` | Diagnose host requirements and install health (no privilege needed). |
 | `denia rotate-token` | Rotate the admin token and restart the service. |
+| `denia console [service]` | Open an interactive `/bin/sh` inside a running service replica (ticket + websocket). |
 
 Running `denia` with no subcommand starts the control-plane daemon.
 
@@ -253,6 +258,9 @@ token from `/v1/auth/login`. Routes enforce a project-scoped role minimum
 - `/v2/...` OCI Distribution routes (hosted registry; see below)
 - `GET /v1/registry/status`, `POST /v1/registry/gc` (super-admin),
   `GET /v1/registry/repositories` (project-filtered)
+- `GET /v1/services/{id}/console/replicas`, `POST /v1/services/{id}/console/tickets`
+  (Operator); `GET /v1/services/{id}/console/ws` (single-use ticket, outside bearer
+  auth — browser websockets can't send an `Authorization` header)
 
 ## Hosted registry
 
@@ -280,6 +288,33 @@ external pull registries (ADR-014/ADR-021). See [ADR-031](docs/adr/031-hosted-oc
   `POST /v1/registry/gc`. Tunable with `DENIA_REGISTRY_GC_INTERVAL_SECS`
   (default 24h) and `DENIA_REGISTRY_GC_GRACE_SECS` (default 1h). Storage and GC
   status are visible in the web console under Settings → Hosted registry.
+
+## Service console
+
+An interactive shell into a live service replica — `kubectl exec`-style, but
+through Denia's own runtime isolation rather than a Docker/containerd exec. Open
+it from the web console's terminal or the CLI (see [ADR-033](docs/adr/033-service-console.md)):
+
+```bash
+denia console <service> [--project <name>] [--replica <index>]
+```
+
+- **Live replica attach** — attaches to a running replica of the service's
+  **promoted** deployment. The runtime launches `/bin/sh` through a PTY-backed
+  `setns` path that joins the replica's namespaces and cgroup; the existing
+  service/job launcher is untouched.
+- **Ticket + websocket auth** — the browser/CLI first mints a short-lived (30s)
+  single-use console ticket over bearer-authenticated HTTP, then opens the
+  websocket with that ticket. Bearer tokens never appear in a websocket URL.
+  Minting a ticket requires project **Operator**. Binary frames carry terminal
+  I/O; JSON text frames carry readiness, resize, exit, and error control messages.
+- **Bounded sessions** — at most 16 concurrent console sessions process-wide and
+  2 per service.
+- **No transcript persistence** — terminal input/output is never stored. Denia
+  records metadata-only audit events (principal, service/deployment id, replica
+  index, session id, start/end, exit reason).
+- **`/bin/sh` only (v1)** — images without `/bin/sh` (e.g. distroless) return a
+  clear console error until an explicit command mode is added.
 
 ## Security
 
