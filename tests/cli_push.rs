@@ -65,7 +65,11 @@ fn push_no_follow_existing_service_succeeds() {
     });
 
     let deploy_mock = server.mock(|when, then| {
-        when.method(POST).path("/v1/deployments");
+        when.method(POST)
+            .path("/v1/deployments")
+            .body_includes(r#""source":"upload""#)
+            .body_includes(r#""dockerfile_path""#)
+            .body_includes(r#""context_path""#);
         then.status(202)
             .header("content-type", "application/json")
             .body(format!(

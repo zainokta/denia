@@ -21,7 +21,6 @@ async fn node_info(State(state): State<AppState>, _principal: Principal) -> Json
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;

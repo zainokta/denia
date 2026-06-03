@@ -1,7 +1,7 @@
 //! `denia push`: pack the local working tree and deploy it to a remote service.
 //! See ADR-034.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::Args;
 
@@ -227,8 +227,8 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
         "source": "upload",
         "service_id": service_id,
         "upload_id": up.upload_id,
-        "dockerfile": dockerfile_rel,
-        "context": context_rel
+        "dockerfile_path": dockerfile_rel,
+        "context_path": context_rel
     });
     let dep = api.create_deployment(&token, &deploy_body).await?;
     println!("Deployment {} created", dep.id);
@@ -277,9 +277,3 @@ fn uuid_v7_hex() -> String {
     hex::encode(id.as_bytes())
 }
 
-/// Resolve the absolute path of a Dockerfile given a project root, a context
-/// dir (relative to root), and a Dockerfile path (relative to context).
-#[allow(dead_code)]
-fn dockerfile_abs(root: &Path, context: &str, dockerfile: &str) -> PathBuf {
-    root.join(context).join(dockerfile)
-}
