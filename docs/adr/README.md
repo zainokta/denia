@@ -47,11 +47,11 @@ Each ADR should include:
 | [027](027-daemon-lifecycle-stop-all-and-autostart.md) | Workload Lifecycle Bound to the Daemon (Stop-All on Shutdown, Autostart on Boot) | Accepted | 2026-05-29 |
 | [028](028-deploy-autoscale-ownership-handoff.md) | Deploy→Autoscale Replica Ownership Handoff | Accepted | 2026-05-29 |
 | [029](029-self-update-from-github-release.md) | Self-Update From Signed GitHub Release Binaries | Accepted | 2026-06-01 |
-| [030](030-cross-platform-client-cli.md) | Cross-Platform Client CLI | Superseded by ADR-034 | 2026-06-03 |
+| [030](030-cross-platform-client-cli.md) | Cross-Platform Client CLI | Superseded by ADR-035 | 2026-06-03 |
 | [031](031-hosted-oci-registry.md) | Hosted OCI Registry | Accepted | 2026-06-03 |
 | [032](032-http2-ingress-hardening.md) | HTTP/2 Ingress Hardening | Accepted | 2026-06-03 |
 | [033](033-service-console.md) | Service Console | Accepted | 2026-06-03 |
-| [034](034-client-driven-deploy-upload.md) | Client-Driven Deploy via Working-Tree Upload | Accepted | 2026-06-03 |
+| [035](035-client-driven-deploy-upload.md) | Client-Driven Deploy via Working-Tree Upload | Accepted | 2026-06-03 |
 
 ## Contributing
 
