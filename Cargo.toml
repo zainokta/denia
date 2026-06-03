@@ -23,6 +23,8 @@ crossterm = "0.29"
 flate2 = "1.1.9"
 futures-util = "0.3"
 hex = "0.4.3"
+# gitignore/.dockerignore-aware working-tree walking for `denia push` (ADR-034).
+ignore = "0.4"
 instant-acme = { version = "0.8", features = ["rcgen"] }
 libc = "0.2"
 oci-client = "0.17.0"
