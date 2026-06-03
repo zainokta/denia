@@ -3,3 +3,4 @@
 //! systemd, cgroup, and syscall code paths.
 
 pub mod manifest;
+pub mod profile;
