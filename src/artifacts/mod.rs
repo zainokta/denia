@@ -23,6 +23,11 @@ pub enum ArtifactSource {
     ExternalRegistry {
         image: String,
     },
+    UploadedContext {
+        upload_id: String,
+        dockerfile_path: String,
+        context_path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
