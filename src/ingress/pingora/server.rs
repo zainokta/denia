@@ -141,7 +141,12 @@ pub fn build_server(
     // :80 — challenge interception, redirect, plain-HTTP proxying.
     let mut http_service = http_proxy_service(
         &conf,
-        DeniaProxy::http(state.clone(), cfg.control_backend, cfg.control_domain.clone(), cfg.control_tls),
+        DeniaProxy::http(
+            state.clone(),
+            cfg.control_backend,
+            cfg.control_domain.clone(),
+            cfg.control_tls,
+        ),
     );
     http_service.add_tcp(&cfg.http_addr.to_string());
     server.add_service(http_service);
@@ -149,7 +154,12 @@ pub fn build_server(
     // :443 — TLS terminated via the dynamic per-SNI cert callback.
     let mut https_service = http_proxy_service(
         &conf,
-        DeniaProxy::https(state.clone(), cfg.control_backend, cfg.control_domain.clone(), cfg.control_tls),
+        DeniaProxy::https(
+            state.clone(),
+            cfg.control_backend,
+            cfg.control_domain.clone(),
+            cfg.control_tls,
+        ),
     );
     let resolver = Box::new(DeniaCertResolver::new(state));
     let tls_settings =
@@ -177,7 +187,13 @@ mod tests {
     #[test]
     fn from_ports_carries_control_domain() {
         let backend = SocketAddr::from(([127, 0, 0, 1], 7180));
-        let cfg = IngressServerConfig::from_ports(80, 443, backend, Some("denia.example.com".into()), true);
+        let cfg = IngressServerConfig::from_ports(
+            80,
+            443,
+            backend,
+            Some("denia.example.com".into()),
+            true,
+        );
         assert_eq!(cfg.control_domain.as_deref(), Some("denia.example.com"));
         assert!(cfg.control_tls);
     }

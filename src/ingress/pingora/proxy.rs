@@ -133,7 +133,13 @@ impl DeniaProxy {
         control_domain: Option<String>,
         control_tls: bool,
     ) -> Self {
-        Self { state, control_backend, is_http: true, control_domain, control_tls }
+        Self {
+            state,
+            control_backend,
+            is_http: true,
+            control_domain,
+            control_tls,
+        }
     }
 
     /// Build a `:443` proxy (TLS already terminated by the listener; no
@@ -144,7 +150,13 @@ impl DeniaProxy {
         control_domain: Option<String>,
         control_tls: bool,
     ) -> Self {
-        Self { state, control_backend, is_http: false, control_domain, control_tls }
+        Self {
+            state,
+            control_backend,
+            is_http: false,
+            control_domain,
+            control_tls,
+        }
     }
 }
 
@@ -497,8 +509,14 @@ mod classify_tests {
 
     #[test]
     fn is_control_host_matches_exact_lowercased() {
-        assert!(is_control_host("denia.example.com", Some("denia.example.com")));
-        assert!(!is_control_host("other.example.com", Some("denia.example.com")));
+        assert!(is_control_host(
+            "denia.example.com",
+            Some("denia.example.com")
+        ));
+        assert!(!is_control_host(
+            "other.example.com",
+            Some("denia.example.com")
+        ));
         assert!(!is_control_host("denia.example.com", None));
     }
 
@@ -513,7 +531,12 @@ mod classify_tests {
             Some(false)
         );
         assert_eq!(
-            control_tls_for_host("svc.example.com", Some("denia.example.com"), true, Some(true)),
+            control_tls_for_host(
+                "svc.example.com",
+                Some("denia.example.com"),
+                true,
+                Some(true)
+            ),
             Some(true)
         );
         assert_eq!(
