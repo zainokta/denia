@@ -99,6 +99,21 @@ pub struct AppConfig {
     /// when decrypting secrets at deploy time. Resolved from `DENIA_AGE_KEY_FILE`
     /// / config `age_key_file` / the operator-home default. See ADR-021/ADR-023.
     pub age_key_file: PathBuf,
+    /// Staging area for push-upload tarballs before extraction. Defaults to
+    /// `<data_dir>/uploads`. See ADR-034.
+    pub uploads_dir: PathBuf,
+    /// Maximum compressed (on-the-wire) body size accepted for a push upload.
+    /// Default = 512 MiB. Override with `DENIA_UPLOAD_MAX_BYTES`.
+    pub upload_max_bytes: u64,
+    /// Maximum uncompressed size of the extracted tarball. Default = 2 GiB.
+    /// Override with `DENIA_UPLOAD_MAX_UNCOMPRESSED_BYTES`.
+    pub upload_max_uncompressed_bytes: u64,
+    /// Maximum number of tar entries allowed in a single upload archive.
+    /// Default = 200 000. Override with `DENIA_UPLOAD_MAX_ENTRIES`.
+    pub upload_max_entries: u64,
+    /// Seconds before a staged upload is eligible for garbage collection.
+    /// Default = 3600 (1 hour). Override with `DENIA_UPLOAD_TTL_SECS`.
+    pub upload_ttl_secs: u64,
 }
 
 /// How aggressively a cache hit is re-verified before reuse (ADR-022).
@@ -225,6 +240,11 @@ pub struct FileConfig {
     pub oci_gc_retention_secs: Option<u64>,
     pub age_recipient: Option<String>,
     pub age_key_file: Option<PathBuf>,
+    pub uploads_dir: Option<PathBuf>,
+    pub upload_max_bytes: Option<u64>,
+    pub upload_max_uncompressed_bytes: Option<u64>,
+    pub upload_max_entries: Option<u64>,
+    pub upload_ttl_secs: Option<u64>,
 }
 
 /// Resolve the on-disk config file path. `DENIA_CONFIG_FILE` (and thus the
@@ -300,6 +320,11 @@ fn default_file_template() -> FileConfig {
         oci_gc_retention_secs: Some(7 * 24 * 60 * 60),
         age_recipient: None,
         age_key_file: None,
+        uploads_dir: None,
+        upload_max_bytes: Some(536_870_912),
+        upload_max_uncompressed_bytes: Some(2_147_483_648),
+        upload_max_entries: Some(200_000),
+        upload_ttl_secs: Some(3_600),
     }
 }
 
@@ -543,6 +568,31 @@ impl AppConfig {
                     .filter(|v| !v.trim().is_empty())
             })
             .or_else(|| read_age_public_key(&age_key_file));
+        let uploads_dir = env::var("DENIA_UPLOADS_DIR")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| file_cfg.uploads_dir.clone())
+            .unwrap_or_else(|| data_dir.join("uploads"));
+        let upload_max_bytes = env::var("DENIA_UPLOAD_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .or(file_cfg.upload_max_bytes)
+            .unwrap_or(536_870_912);
+        let upload_max_uncompressed_bytes = env::var("DENIA_UPLOAD_MAX_UNCOMPRESSED_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .or(file_cfg.upload_max_uncompressed_bytes)
+            .unwrap_or(2_147_483_648);
+        let upload_max_entries = env::var("DENIA_UPLOAD_MAX_ENTRIES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .or(file_cfg.upload_max_entries)
+            .unwrap_or(200_000);
+        let upload_ttl_secs = env::var("DENIA_UPLOAD_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .or(file_cfg.upload_ttl_secs)
+            .unwrap_or(3_600);
 
         let mut admin_token_hmac_key = [0u8; 32];
         rand::rng().fill(&mut admin_token_hmac_key);
@@ -583,6 +633,11 @@ impl AppConfig {
             registry_gc_grace_secs,
             age_recipient,
             age_key_file,
+            uploads_dir,
+            upload_max_bytes,
+            upload_max_uncompressed_bytes,
+            upload_max_entries,
+            upload_ttl_secs,
         })
     }
 
@@ -630,6 +685,11 @@ impl AppConfig {
             registry_gc_grace_secs: 60 * 60,
             age_recipient: Some("age1test".into()),
             age_key_file: data_dir.join("age.key"),
+            uploads_dir: data_dir.join("uploads"),
+            upload_max_bytes: 536_870_912,
+            upload_max_uncompressed_bytes: 2_147_483_648,
+            upload_max_entries: 200_000,
+            upload_ttl_secs: 3_600,
         }
     }
 
@@ -971,5 +1031,13 @@ control_tls = true
         let path = dir.path().join("age.key");
         std::fs::write(&path, "AGE-SECRET-KEY-1QQQQQQ\n").unwrap();
         assert!(read_age_public_key(&path).is_none());
+    }
+
+    #[test]
+    fn upload_staging_defaults() {
+        let c = AppConfig::for_test("0123456789012345678901234567890123");
+        assert_eq!(c.uploads_dir, c.data_dir.join("uploads"));
+        assert_eq!(c.upload_max_bytes, 536_870_912);
+        assert_eq!(c.upload_max_entries, 200_000);
     }
 }
