@@ -359,7 +359,7 @@ mod tests {
         out.extend_from_slice(body);
         // Pad data block to 512-byte boundary
         let pad = (512 - body.len() % 512) % 512;
-        out.extend(std::iter::repeat(0u8).take(pad));
+        out.extend(std::iter::repeat_n(0u8, pad));
         // Two 512-byte zero blocks = end-of-archive
         out.extend([0u8; 1024]);
         out

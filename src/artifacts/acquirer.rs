@@ -72,6 +72,8 @@ pub enum ArtifactAcquireError {
     InvalidEnvironmentEntry { entry: String },
     #[error("oci error: {0}")]
     Oci(#[from] OciError),
+    #[error("invalid upload id")]
+    InvalidUploadId,
 }
 
 #[derive(Clone)]
@@ -415,7 +417,13 @@ impl ArtifactAcquirer {
         else {
             unreachable!("staged acquisition requires an uploaded-context source");
         };
-        let staged = self.config.uploads_dir.join(upload_id).join("context");
+        let upload_uuid = uuid::Uuid::parse_str(upload_id)
+            .map_err(|_| ArtifactAcquireError::InvalidUploadId)?;
+        let staged = self
+            .config
+            .uploads_dir
+            .join(upload_uuid.to_string())
+            .join("context");
         let context_dir = confine_under(&staged, context_path)?;
         let dockerfile_dir = confine_under(&staged, dockerfile_path)?;
         let context = format!("context={}", context_dir.to_string_lossy());
@@ -573,11 +581,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acquire_staged_rejects_path_traversal_upload_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let uploads_dir = tmp.path().join("uploads");
+        std::fs::create_dir_all(&uploads_dir).unwrap();
+
+        let mut config = AppConfig::for_test("test-token");
+        config.uploads_dir = uploads_dir.clone();
+
+        let acquirer =
+            ArtifactAcquirer::with_traits(config, Arc::new(FakePuller), Arc::new(FakeUnpacker));
+
+        let runner = FakeCommandRunner::new(vec![]);
+
+        let source = ArtifactSource::UploadedContext {
+            upload_id: "../../../../tmp/escape".to_string(),
+            dockerfile_path: ".".to_string(),
+            context_path: ".".to_string(),
+        };
+
+        let result = acquirer.acquire_staged(&runner, &source).await;
+        assert!(
+            result.is_err(),
+            "acquire_staged must reject non-UUID upload_id (path traversal attempt)"
+        );
+        assert!(
+            runner.commands().is_empty(),
+            "buildctl must NOT be invoked for a rejected upload_id"
+        );
+    }
+
+    #[tokio::test]
     async fn acquire_staged_builds_from_upload_dir() {
         let tmp = tempfile::TempDir::new().unwrap();
         let uploads_dir = tmp.path().join("uploads");
-        let upload_id = "test-upload-id-001";
-        let context_subdir = uploads_dir.join(upload_id).join("context");
+        let upload_id = uuid::Uuid::now_v7().to_string();
+        let context_subdir = uploads_dir.join(&upload_id).join("context");
         std::fs::create_dir_all(&context_subdir).unwrap();
         std::fs::write(context_subdir.join("Dockerfile"), b"FROM scratch\n").unwrap();
 
