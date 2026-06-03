@@ -95,9 +95,8 @@ fn child_exec_console_inner(
         .env
         .iter()
         .map(|(key, value)| {
-            CString::new(format!("{key}={value}")).map_err(|_| {
-                SyscallError::Capability("environment entry contains nul".to_string())
-            })
+            CString::new(format!("{key}={value}"))
+                .map_err(|_| SyscallError::Capability("environment entry contains nul".to_string()))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut env_ptrs = env.iter().map(|value| value.as_ptr()).collect::<Vec<_>>();

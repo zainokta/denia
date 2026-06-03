@@ -799,7 +799,10 @@ impl Runtime for LinuxRuntime {
             replica_index: request.replica_index,
         };
         let tracked = {
-            let children = self.children.lock().map_err(|_| RuntimeError::LockPoisoned)?;
+            let children = self
+                .children
+                .lock()
+                .map_err(|_| RuntimeError::LockPoisoned)?;
             children
                 .get(&instance)
                 .ok_or_else(|| RuntimeError::InvalidServiceName {

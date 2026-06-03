@@ -188,7 +188,10 @@ mod tests {
         let url = api
             .websocket_url("/v1/services/abc/console/ws?ticket=xyz")
             .unwrap();
-        assert_eq!(url, "ws://denia.example.com/v1/services/abc/console/ws?ticket=xyz");
+        assert_eq!(
+            url,
+            "ws://denia.example.com/v1/services/abc/console/ws?ticket=xyz"
+        );
     }
 
     #[test]
