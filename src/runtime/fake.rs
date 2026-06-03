@@ -2,11 +2,20 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
+use tokio::io::DuplexStream;
+
 use crate::domain::{
     JobOutcome, JobRunRequest, RuntimeInstanceId, RuntimeStartRequest, RuntimeStatus,
 };
+use crate::runtime::console::{ConsolePty, RuntimeConsoleRequest, RuntimeConsoleSession};
 use crate::runtime::error::RuntimeError;
 use crate::runtime::runtime_trait::Runtime;
+
+impl ConsolePty for DuplexStream {
+    fn resize(&self, _cols: u16, _rows: u16) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct FakeRuntime {
@@ -87,6 +96,20 @@ impl Runtime for FakeRuntime {
             exit_code: 0,
             started_at: now,
             finished_at: now,
+        })
+    }
+
+    async fn open_console(
+        &self,
+        request: RuntimeConsoleRequest,
+    ) -> Result<RuntimeConsoleSession, RuntimeError> {
+        let (_client, server): (DuplexStream, DuplexStream) = tokio::io::duplex(4096);
+        Ok(RuntimeConsoleSession {
+            session_id: request.session_id,
+            replica_index: request.replica_index,
+            child_pid: 4321,
+            cgroup_path: "/sys/fs/cgroup/denia/fake".into(),
+            pty: Box::new(server),
         })
     }
 }

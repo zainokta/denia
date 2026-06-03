@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use crate::domain::{
     JobOutcome, JobRunRequest, RuntimeInstanceId, RuntimeStartRequest, RuntimeStatus,
 };
+use crate::runtime::console::{RuntimeConsoleRequest, RuntimeConsoleSession};
 use crate::runtime::error::RuntimeError;
 
 #[async_trait]
@@ -27,6 +28,18 @@ pub trait Runtime: Send + Sync {
     async fn run_to_completion(&self, _request: JobRunRequest) -> Result<JobOutcome, RuntimeError> {
         Err(RuntimeError::InvalidServiceName {
             name: "run_to_completion not implemented".to_string(),
+        })
+    }
+
+    /// Open an interactive PTY-backed console against a tracked replica. The
+    /// default rejects the request; only runtimes that can join a replica's
+    /// namespaces implement this. See ADR-033.
+    async fn open_console(
+        &self,
+        _request: RuntimeConsoleRequest,
+    ) -> Result<RuntimeConsoleSession, RuntimeError> {
+        Err(RuntimeError::InvalidServiceName {
+            name: "open_console not implemented".to_string(),
         })
     }
 }
@@ -54,5 +67,12 @@ where
 
     async fn run_to_completion(&self, request: JobRunRequest) -> Result<JobOutcome, RuntimeError> {
         (**self).run_to_completion(request).await
+    }
+
+    async fn open_console(
+        &self,
+        request: RuntimeConsoleRequest,
+    ) -> Result<RuntimeConsoleSession, RuntimeError> {
+        (**self).open_console(request).await
     }
 }

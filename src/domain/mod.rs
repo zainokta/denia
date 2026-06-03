@@ -1,3 +1,4 @@
+pub mod console;
 pub mod credential;
 pub mod deployment;
 pub mod error;
@@ -8,6 +9,7 @@ pub mod service;
 pub mod service_domain;
 pub mod user;
 
+pub use console::*;
 pub use credential::*;
 pub use deployment::*;
 pub use error::*;
