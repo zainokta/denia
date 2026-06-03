@@ -117,26 +117,68 @@ pub struct DeniaProxy {
     /// Whether this instance is the `:80` listener (challenge interception +
     /// HTTP→HTTPS redirect run only here; `:443` falls straight through).
     is_http: bool,
+    /// The configured control domain (e.g. `denia.example.com`), if any.
+    /// Requests for this host are routed directly to `control_backend`.
+    control_domain: Option<String>,
+    /// Whether the control domain is TLS-enabled (used for redirect decisions
+    /// on `:80` when the host matches `control_domain`).
+    control_tls: bool,
 }
 
 impl DeniaProxy {
     /// Build a `:80` proxy (challenge interception + redirect enabled).
-    pub fn http(state: Arc<IngressState>, control_backend: SocketAddr) -> Self {
+    pub fn http(
+        state: Arc<IngressState>,
+        control_backend: SocketAddr,
+        control_domain: Option<String>,
+        control_tls: bool,
+    ) -> Self {
         Self {
             state,
             control_backend,
             is_http: true,
+            control_domain,
+            control_tls,
         }
     }
 
     /// Build a `:443` proxy (TLS already terminated by the listener; no
     /// challenge/redirect special-casing).
-    pub fn https(state: Arc<IngressState>, control_backend: SocketAddr) -> Self {
+    pub fn https(
+        state: Arc<IngressState>,
+        control_backend: SocketAddr,
+        control_domain: Option<String>,
+        control_tls: bool,
+    ) -> Self {
         Self {
             state,
             control_backend,
             is_http: false,
+            control_domain,
+            control_tls,
         }
+    }
+}
+
+/// Whether `host` is the configured control domain (exact, already-lowercased
+/// match; both sides are lowercased at their sources — `request_host` lowercases
+/// the request Host, config lowercases `control_domain`).
+pub fn is_control_host(host: &str, control_domain: Option<&str>) -> bool {
+    control_domain == Some(host)
+}
+
+/// The effective `tls_for_host` fed to [`classify_port80`]: the control domain
+/// uses `control_tls`; everything else uses its route's tls flag.
+pub fn control_tls_for_host(
+    host: &str,
+    control_domain: Option<&str>,
+    control_tls: bool,
+    route_tls: Option<bool>,
+) -> Option<bool> {
+    if is_control_host(host, control_domain) {
+        Some(control_tls)
+    } else {
+        route_tls
     }
 }
 
@@ -154,6 +196,13 @@ fn request_host(session: &Session) -> String {
         return strip_port(authority.as_str()).to_ascii_lowercase();
     }
     String::new()
+}
+
+/// The `X-Forwarded-For` value for a proxied request: the client IP only (no
+/// port). Overwriting with this (not appending) prevents a downstream client
+/// from spoofing the value the loopback-trusting rate limiter keys on.
+fn forwarded_for(client: Option<std::net::SocketAddr>) -> Option<String> {
+    client.map(|addr| addr.ip().to_string())
 }
 
 /// Strip a trailing `:port` from a host authority. IPv6 literals are returned
@@ -194,7 +243,13 @@ impl ProxyHttp for DeniaProxy {
 
         let path = request_path(session);
         let host = request_host(session);
-        let tls_for_host = self.state.routes().resolve(&host).map(|r| r.tls);
+        let route_tls = self.state.routes().resolve(&host).map(|r| r.tls);
+        let tls_for_host = control_tls_for_host(
+            &host,
+            self.control_domain.as_deref(),
+            self.control_tls,
+            route_tls,
+        );
 
         match classify_port80(&path, &host, tls_for_host) {
             Port80Decision::ToControlBackend => {
@@ -230,6 +285,15 @@ impl ProxyHttp for DeniaProxy {
         }
 
         let host = request_host(session);
+
+        if is_control_host(&host, self.control_domain.as_deref()) {
+            return Ok(Box::new(HttpPeer::new(
+                self.control_backend,
+                false,
+                self.control_backend.ip().to_string(),
+            )));
+        }
+
         // Resolve the Host to its route, capturing BOTH the pool lookup key
         // (`service_id` = `service.id.to_string()`, what `add_replica` keys by
         // and the activator parses as a UUID) and the human `service_name` (for
@@ -273,6 +337,21 @@ impl ProxyHttp for DeniaProxy {
                 Err(Error::new(ErrorType::HTTPStatus(404)))
             }
         }
+    }
+
+    async fn upstream_request_filter(
+        &self,
+        session: &mut Session,
+        upstream_request: &mut pingora::http::RequestHeader,
+        _ctx: &mut Self::CTX,
+    ) -> pingora::Result<()> {
+        let client = session.client_addr().and_then(|a| a.as_inet()).copied();
+        if let Some(value) = forwarded_for(client) {
+            // Overwrite (not append): strip any client-supplied X-Forwarded-For
+            // so the rate-limit key cannot be spoofed.
+            let _ = upstream_request.insert_header("X-Forwarded-For", &value);
+        }
+        Ok(())
     }
 
     async fn logging(&self, session: &mut Session, _e: Option<&Error>, ctx: &mut Self::CTX) {
@@ -397,6 +476,14 @@ mod classify_tests {
     }
 
     #[test]
+    fn forwarded_for_uses_client_ip_only() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let client = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 54321);
+        assert_eq!(forwarded_for(Some(client)).as_deref(), Some("203.0.113.7"));
+        assert_eq!(forwarded_for(None), None);
+    }
+
+    #[test]
     fn strip_port_removes_trailing_port() {
         assert_eq!(strip_port("api.example.com:8080"), "api.example.com");
         assert_eq!(strip_port("api.example.com"), "api.example.com");
@@ -418,5 +505,43 @@ mod classify_tests {
         assert_eq!(entry.status, 200);
         assert_eq!(entry.bytes, Some(1234));
         assert!(!entry.recorded_at.is_empty());
+    }
+
+    #[test]
+    fn is_control_host_matches_exact_lowercased() {
+        assert!(is_control_host(
+            "denia.example.com",
+            Some("denia.example.com")
+        ));
+        assert!(!is_control_host(
+            "other.example.com",
+            Some("denia.example.com")
+        ));
+        assert!(!is_control_host("denia.example.com", None));
+    }
+
+    #[test]
+    fn control_tls_for_host_overrides_route_lookup() {
+        assert_eq!(
+            control_tls_for_host("denia.example.com", Some("denia.example.com"), true, None),
+            Some(true)
+        );
+        assert_eq!(
+            control_tls_for_host("denia.example.com", Some("denia.example.com"), false, None),
+            Some(false)
+        );
+        assert_eq!(
+            control_tls_for_host(
+                "svc.example.com",
+                Some("denia.example.com"),
+                true,
+                Some(true)
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            control_tls_for_host("nope.example.com", Some("denia.example.com"), true, None),
+            None
+        );
     }
 }

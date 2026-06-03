@@ -141,8 +141,13 @@ pub async fn run() -> anyhow::Result<()> {
     // ISOLATED — it logs a clear `:80`/`:443`-in-use message and the control
     // plane keeps serving `bind_addr` (axum), never aborting the process (A6).
     let (pingora_shutdown_tx, pingora_shutdown_rx) = tokio::sync::watch::channel(false);
-    let pingora_cfg =
-        IngressServerConfig::from_ports(config.http_port, config.https_port, config.bind_addr);
+    let pingora_cfg = IngressServerConfig::from_ports(
+        config.http_port,
+        config.https_port,
+        config.bind_addr,
+        config.control_domain.clone(),
+        config.control_tls,
+    );
     let pingora_thread = {
         let ingress = state.ingress.clone();
         std::thread::Builder::new()
@@ -167,10 +172,18 @@ pub async fn run() -> anyhow::Result<()> {
         let tls_dir = config.tls_dir.clone();
         let services = state.services.clone();
         let domains = state.domains.clone();
+        let control_domain = config.control_domain.clone();
+        let control_tls = config.control_tls;
         let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
         let handle = tokio::spawn(async move {
             // Initial issuance pass for verified TLS hostnames lacking a cert.
             issue_missing_certs(&driver, &ingress, &tls_dir, &services, &domains).await;
+            if let Some(cd) = control_domain_to_issue(control_domain.as_deref(), control_tls) {
+                let store = ingress.certs();
+                if store.get(cd).is_none() {
+                    reissue(&driver, &ingress, &tls_dir, cd).await;
+                }
+            }
             let mut ticker = tokio::time::interval(Duration::from_secs(12 * 60 * 60));
             loop {
                 tokio::select! {
@@ -181,6 +194,12 @@ pub async fn run() -> anyhow::Result<()> {
                             reissue(&driver, &ingress, &tls_dir, &domain).await;
                         }
                         issue_missing_certs(&driver, &ingress, &tls_dir, &services, &domains).await;
+                        if let Some(cd) = control_domain_to_issue(control_domain.as_deref(), control_tls) {
+                            let store = ingress.certs();
+                            if store.get(cd).is_none() {
+                                reissue(&driver, &ingress, &tls_dir, cd).await;
+                            }
+                        }
                     }
                 }
             }
@@ -215,7 +234,7 @@ pub async fn run() -> anyhow::Result<()> {
         (tx, handle)
     };
 
-    // Staged upload directory sweep (ADR-035). Removes abandoned upload dirs
+    // Staged upload directory sweep (ADR-034). Removes abandoned upload dirs
     // older than `upload_ttl_secs`. Mirrors the registry GC task pattern.
     let upload_sweep_task = {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -486,6 +505,14 @@ fn relocate_daemon_cgroup(cgroup_root: &std::path::Path) -> std::io::Result<()> 
     Ok(())
 }
 
+/// The control domain to ACME-issue, if TLS is enabled for it. Renewal is
+/// automatic once the cert is in the store (`select_renewals` covers any SNI);
+/// only the initial issuance needs this branch (the control domain has no
+/// service row, so `issue_missing_certs` does not cover it).
+fn control_domain_to_issue(control_domain: Option<&str>, control_tls: bool) -> Option<&str> {
+    if control_tls { control_domain } else { None }
+}
+
 /// Issue certs for every verified hostname of a TLS-enabled service that does
 /// not yet have one in the cert store. Persists atomically and swaps into the
 /// live store. Never logs secret material.
@@ -531,5 +558,23 @@ async fn reissue(
             ingress.swap_certs(load_certs_from_disk(tls_dir));
         }
         Err(e) => eprintln!("acme issuance failed for {domain}: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::control_domain_to_issue;
+
+    #[test]
+    fn control_domain_issued_only_when_tls_enabled() {
+        assert_eq!(
+            control_domain_to_issue(Some("denia.example.com"), true),
+            Some("denia.example.com")
+        );
+        assert_eq!(
+            control_domain_to_issue(Some("denia.example.com"), false),
+            None
+        );
+        assert_eq!(control_domain_to_issue(None, true), None);
     }
 }
