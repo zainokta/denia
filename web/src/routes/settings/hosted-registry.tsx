@@ -120,8 +120,8 @@ function Header() {
       <p className="kicker">settings</p>
       <h1 className="t-display">Hosted registry</h1>
       <p className="text-faint" style={{ marginTop: 6, maxWidth: '60ch' }}>
-        Denia-hosted OCI images served under <code>/v2</code>, stored locally,
-        and garbage-collected to reclaim unreferenced blobs.
+        Push and pull container images on this node at <code>/v2</code>. Layers
+        live on local disk; garbage collection reclaims unreferenced blobs.
       </p>
     </header>
   )
