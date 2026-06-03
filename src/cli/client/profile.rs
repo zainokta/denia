@@ -124,7 +124,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("client.toml");
         let mut cfg = ClientConfig::default();
-        cfg.upsert_profile("prod", Profile { url: "https://x".into(), token: "t".into() });
+        cfg.upsert_profile(
+            "prod",
+            Profile {
+                url: "https://x".into(),
+                token: "t".into(),
+            },
+        );
         cfg.set_active("prod");
         cfg.save_to(&path).unwrap();
         let back = ClientConfig::load_from(&path).unwrap();
@@ -139,7 +145,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("client.toml");
         let mut cfg = ClientConfig::default();
-        cfg.upsert_profile("p", Profile { url: "u".into(), token: "t".into() });
+        cfg.upsert_profile(
+            "p",
+            Profile {
+                url: "u".into(),
+                token: "t".into(),
+            },
+        );
         cfg.save_to(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);

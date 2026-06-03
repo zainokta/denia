@@ -237,8 +237,12 @@ impl ClientApi {
         bearer: &str,
         name: &str,
     ) -> Result<ApiTokenResponse, ClientApiError> {
-        self.post_json("/v1/api-tokens", bearer, &serde_json::json!({ "name": name }))
-            .await
+        self.post_json(
+            "/v1/api-tokens",
+            bearer,
+            &serde_json::json!({ "name": name }),
+        )
+        .await
     }
 
     /// GET /v1/me — used to verify a token works. Returns the raw JSON.
@@ -543,7 +547,10 @@ mod tests {
             .await;
         let api = ClientApi::new(&server.base_url());
         let deploy_ref = api
-            .create_deployment("tok", &serde_json::json!({"source":"external_image","service_id":"s1","image":"nginx"}))
+            .create_deployment(
+                "tok",
+                &serde_json::json!({"source":"external_image","service_id":"s1","image":"nginx"}),
+            )
             .await
             .unwrap();
         assert_eq!(deploy_ref.id, "d1");

@@ -123,12 +123,25 @@ mod tests {
         write(src.path(), ".dockerignore", "*.log\n");
         write(src.path(), "Dockerfile", "FROM scratch\n");
 
-        let out_dir = pack_to_tmp(&src, "Dockerfile", &PackLimits { max_files: 100, max_bytes: 1 << 30 });
+        let out_dir = pack_to_tmp(
+            &src,
+            "Dockerfile",
+            &PackLimits {
+                max_files: 100,
+                max_bytes: 1 << 30,
+            },
+        );
         let dest = extract(&out_dir);
 
         assert!(dest.path().join("a.txt").exists(), "a.txt must be present");
-        assert!(dest.path().join("Dockerfile").exists(), "Dockerfile must be present");
-        assert!(!dest.path().join("skip.log").exists(), "skip.log must be absent");
+        assert!(
+            dest.path().join("Dockerfile").exists(),
+            "Dockerfile must be present"
+        );
+        assert!(
+            !dest.path().join("skip.log").exists(),
+            "skip.log must be absent"
+        );
     }
 
     #[test]
@@ -138,10 +151,20 @@ mod tests {
         write(src.path(), ".dockerignore", "Dockerfile\n");
         write(src.path(), "Dockerfile", "FROM scratch\n");
 
-        let out_dir = pack_to_tmp(&src, "Dockerfile", &PackLimits { max_files: 100, max_bytes: 1 << 30 });
+        let out_dir = pack_to_tmp(
+            &src,
+            "Dockerfile",
+            &PackLimits {
+                max_files: 100,
+                max_bytes: 1 << 30,
+            },
+        );
         let dest = extract(&out_dir);
 
-        assert!(dest.path().join("Dockerfile").exists(), "Dockerfile must be present even when in .dockerignore");
+        assert!(
+            dest.path().join("Dockerfile").exists(),
+            "Dockerfile must be present even when in .dockerignore"
+        );
     }
 
     #[test]
@@ -156,9 +179,15 @@ mod tests {
             src.path(),
             "Dockerfile",
             &out,
-            &PackLimits { max_files: 1, max_bytes: 1 << 30 },
+            &PackLimits {
+                max_files: 1,
+                max_bytes: 1 << 30,
+            },
         );
-        assert!(result.is_err(), "should fail when file count exceeds max_files");
+        assert!(
+            result.is_err(),
+            "should fail when file count exceeds max_files"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("limit"), "error should mention 'limit': {msg}");
     }

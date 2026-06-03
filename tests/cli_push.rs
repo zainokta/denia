@@ -82,7 +82,12 @@ fn push_no_follow_existing_service_succeeds() {
     Command::cargo_bin("denia")
         .unwrap()
         .env("DENIA_CLIENT_CONFIG", &cfg_path)
-        .args(["push", "--no-follow", "--path", dir.path().to_str().unwrap()])
+        .args([
+            "push",
+            "--no-follow",
+            "--path",
+            dir.path().to_str().unwrap(),
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Deployment d1 created"));

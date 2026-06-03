@@ -91,22 +91,28 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
             )
         })?;
 
-    let dockerfile_rel = args
-        .dockerfile
-        .clone()
-        .unwrap_or_else(|| manifest.as_ref().map(|m| m.dockerfile().to_string()).unwrap_or_else(|| "Dockerfile".to_string()));
-    let context_rel = args
-        .context
-        .clone()
-        .unwrap_or_else(|| manifest.as_ref().map(|m| m.context().to_string()).unwrap_or_else(|| ".".to_string()));
+    let dockerfile_rel = args.dockerfile.clone().unwrap_or_else(|| {
+        manifest
+            .as_ref()
+            .map(|m| m.dockerfile().to_string())
+            .unwrap_or_else(|| "Dockerfile".to_string())
+    });
+    let context_rel = args.context.clone().unwrap_or_else(|| {
+        manifest
+            .as_ref()
+            .map(|m| m.context().to_string())
+            .unwrap_or_else(|| ".".to_string())
+    });
 
     // 3. Resolve the target service.
     let projects = api.list_projects(&token).await?;
     let services = api.list_services(&token).await?;
 
     // Build a map of project_id → name for fast lookup.
-    let project_id_to_name: std::collections::HashMap<String, String> =
-        projects.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
+    let project_id_to_name: std::collections::HashMap<String, String> = projects
+        .iter()
+        .map(|p| (p.id.clone(), p.name.clone()))
+        .collect();
 
     let found_svc = services.iter().find(|s| {
         s.name == service
@@ -129,10 +135,12 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
             .control_domain
             .as_deref()
             .filter(|d| !d.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!(
-                "--create requires a control domain configured on the node \
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--create requires a control domain configured on the node \
                  (hosted registry unavailable); create the service in the web console instead"
-            ))?;
+                )
+            })?;
 
         // Resolve or create project.
         let project_id = if let Some(p) = projects.iter().find(|p| p.name == project) {
@@ -196,10 +204,7 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
     let context_root = args.path.join(&context_rel);
     let dockerfile_abs = context_root.join(&dockerfile_rel);
     if !dockerfile_abs.is_file() {
-        anyhow::bail!(
-            "no Dockerfile at {} (required)",
-            dockerfile_abs.display()
-        );
+        anyhow::bail!("no Dockerfile at {} (required)", dockerfile_abs.display());
     }
 
     // 5. Pack the context.
@@ -276,4 +281,3 @@ fn uuid_v7_hex() -> String {
     let id = uuid::Uuid::now_v7();
     hex::encode(id.as_bytes())
 }
-
