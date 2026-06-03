@@ -61,11 +61,22 @@ export class LoginResult extends Schema.Class<LoginResult>('LoginResult')({
   expires_at: Schema.String,
 }) {}
 
+// List/metadata shape. The server never returns the raw secret on list
+// (`token` is `#[serde(skip_serializing)]`); it is only stored hashed.
 export class ApiToken extends Schema.Class<ApiToken>('ApiToken')({
   id: Schema.String,
   name: Schema.String,
-  token: Schema.String,
   created_at: Schema.String,
+}) {}
+
+// Create response shape. The raw secret is returned exactly once, at mint
+// time; this payload carries `token` but no `created_at`.
+export class ApiTokenSecret extends Schema.Class<ApiTokenSecret>(
+  'ApiTokenSecret',
+)({
+  id: Schema.String,
+  name: Schema.String,
+  token: Schema.String,
 }) {}
 
 export class Session extends Schema.Class<Session>('Session')({
