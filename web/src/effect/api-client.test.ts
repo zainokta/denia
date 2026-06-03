@@ -250,6 +250,9 @@ const mockApi = (success = true) =>
     addMember: ((_pid: string, _uid: string, _r: string) => emptyApi()) as never,
     removeMember: ((_pid: string, _uid: string) => emptyApi()) as never,
     listServices: emptyApi() as never,
+    listConsoleReplicas: ((_id: string) => emptyApi()) as never,
+    createConsoleTicket: ((_id: string, _r: number, _c: number, _w: number) =>
+      emptyApi()) as never,
     getService: ((_id: string) => emptyApi()) as never,
     deleteService: ((_id: string) => Effect.void) as never,
     getServiceDeployments: ((_id: number) => emptyApi()) as never,
@@ -415,6 +418,9 @@ describe('ApiClient jobs', () => {
     addMember: ((_pid: string, _uid: string, _r: string) => emptyApi()) as never,
     removeMember: ((_pid: string, _uid: string) => emptyApi()) as never,
     listServices: emptyApi() as never,
+    listConsoleReplicas: ((_id: string) => emptyApi()) as never,
+    createConsoleTicket: ((_id: string, _r: number, _c: number, _w: number) =>
+      emptyApi()) as never,
     getService: ((_id: string) => emptyApi()) as never,
     deleteService: ((_id: string) => Effect.void) as never,
     getServiceDeployments: ((_id: number) => emptyApi()) as never,
@@ -743,6 +749,9 @@ const mockIngressApi = () =>
     addMember: ((_pid: string, _uid: string, _r: string) => emptyApi()) as never,
     removeMember: ((_pid: string, _uid: string) => emptyApi()) as never,
     listServices: emptyApi() as never,
+    listConsoleReplicas: ((_id: string) => emptyApi()) as never,
+    createConsoleTicket: ((_id: string, _r: number, _c: number, _w: number) =>
+      emptyApi()) as never,
     getService: ((_id: string) => emptyApi()) as never,
     deleteService: ((_id: string) => Effect.void) as never,
     getServiceDeployments: ((_id: number) => emptyApi()) as never,
@@ -892,6 +901,9 @@ describe('putService', () => {
           addMember: ((_pid: string, _uid: string, _r: string) => emptyApi()) as never,
           removeMember: ((_pid: string, _uid: string) => emptyApi()) as never,
           listServices: emptyApi() as never,
+          listConsoleReplicas: ((_id: string) => emptyApi()) as never,
+          createConsoleTicket: ((_id: string, _r: number, _c: number, _w: number) =>
+            emptyApi()) as never,
           getService: ((_id: string) => emptyApi()) as never,
           deleteService: ((_id: string) => Effect.void) as never,
           getServiceDeployments: ((_id: number) => emptyApi()) as never,

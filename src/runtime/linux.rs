@@ -12,6 +12,7 @@ use crate::artifacts::ArtifactKind;
 use crate::domain::{
     JobOutcome, JobRunRequest, RuntimeInstanceId, RuntimeStartRequest, RuntimeStatus,
 };
+use crate::runtime::console::{RuntimeConsoleRequest, RuntimeConsoleSession};
 use crate::runtime::error::RuntimeError;
 use crate::runtime::fs_helpers::{
     cpu_max, create_dir_all, create_runtime_directory, exit_code_from_process_status, path_io,
@@ -29,7 +30,9 @@ use crate::runtime::validation::{
 };
 use crate::syscall::caps;
 use crate::syscall::chown;
+use crate::syscall::console::{ConsoleLaunchConfig, spawn_console_process};
 use crate::syscall::ns::{NamespaceConfig, OverlaySpec, RoBind, spawn_namespaced_process};
+use crate::syscall::pty::open_pty;
 use crate::syscall::signal;
 
 #[derive(Debug, Clone)]
@@ -784,6 +787,57 @@ impl Runtime for LinuxRuntime {
         self.sweep_socket_aliases();
         Ok(swept)
     }
+
+    async fn open_console(
+        &self,
+        request: RuntimeConsoleRequest,
+    ) -> Result<RuntimeConsoleSession, RuntimeError> {
+        self.reap_exited_children()?;
+        let instance = RuntimeInstanceId {
+            service_id: request.service_id,
+            service_name: request.service_name.clone(),
+            replica_index: request.replica_index,
+        };
+        let tracked = {
+            let children = self
+                .children
+                .lock()
+                .map_err(|_| RuntimeError::LockPoisoned)?;
+            children
+                .get(&instance)
+                .ok_or_else(|| RuntimeError::InvalidServiceName {
+                    name: "selected replica is not running".to_string(),
+                })?
+                .clone_for_console()
+        };
+        let TrackedProcess::NativePid(target_pid) = tracked.process;
+        if target_pid == 0 {
+            return Err(RuntimeError::InvalidServiceName {
+                name: "selected replica has exited".to_string(),
+            });
+        }
+
+        let (pty, slave) = open_pty(request.cols, request.rows).map_err(RuntimeError::Io)?;
+        let config = ConsoleLaunchConfig {
+            target_pid,
+            cgroup_path: tracked.plan.cgroup_path.clone(),
+            rootfs: tracked.plan.merged.clone(),
+            workdir: tracked.plan.namespace.workdir.clone(),
+            env: tracked.plan.namespace.env.clone(),
+            shell: "/bin/sh".to_string(),
+        };
+        let child_pid = tokio::task::spawn_blocking(move || spawn_console_process(&config, slave))
+            .await?
+            .map_err(RuntimeError::Syscall)?;
+
+        Ok(RuntimeConsoleSession {
+            session_id: request.session_id,
+            replica_index: request.replica_index,
+            child_pid,
+            cgroup_path: tracked.plan.cgroup_path,
+            pty: Box::new(pty),
+        })
+    }
 }
 
 impl LinuxRuntime {
@@ -1449,5 +1503,30 @@ mod tests {
         remove_cgroup_dir(&path).expect("remove cgroup tree");
 
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn open_console_rejects_missing_replica() {
+        use crate::runtime::Runtime;
+        use crate::runtime::console::RuntimeConsoleRequest;
+
+        let runtime = LinuxRuntime::new_with_paths(
+            tempfile::tempdir().unwrap().path().join("runtime"),
+            tempfile::tempdir().unwrap().path().join("artifacts"),
+            tempfile::tempdir().unwrap().path().join("cgroup"),
+        );
+        let err = runtime
+            .open_console(RuntimeConsoleRequest {
+                session_id: uuid::Uuid::now_v7(),
+                service_id: uuid::Uuid::now_v7(),
+                service_name: "web".to_string(),
+                deployment_id: uuid::Uuid::now_v7(),
+                replica_index: 0,
+                cols: 120,
+                rows: 32,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("selected replica"));
     }
 }

@@ -48,6 +48,7 @@ Each ADR should include:
 | [028](028-deploy-autoscale-ownership-handoff.md) | Deploy→Autoscale Replica Ownership Handoff | Accepted | 2026-05-29 |
 | [029](029-self-update-from-github-release.md) | Self-Update From Signed GitHub Release Binaries | Accepted | 2026-06-01 |
 | [031](031-hosted-oci-registry.md) | Hosted OCI Registry | Accepted | 2026-06-03 |
+| [033](033-service-console.md) | Service Console | Accepted | 2026-06-03 |
 
 ## Contributing
 

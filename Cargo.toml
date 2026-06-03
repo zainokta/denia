@@ -14,12 +14,14 @@ arc-swap = "1"
 boring = "=4.22.0"
 argon2 = "0.5.3"
 async-trait = "0.1"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 cron = "0.16.0"
+crossterm = "0.29"
 flate2 = "1.1.9"
+futures-util = "0.3"
 hex = "0.4.3"
 instant-acme = { version = "0.8", features = ["rcgen"] }
 libc = "0.2"
@@ -39,6 +41,7 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time", "test-util"] }
 tokio-stream = "0.1"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
 toml = "1.1"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
@@ -46,7 +49,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v7"] }
 zstd = "0.13.3"
-reqwest = { version = "0.13.3", default-features = false, features = ["http2", "rustls"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["http2", "json", "rustls"] }
 subtle = "2"
 semver = "1"
 # Pure-Rust, verify-only minisign. Used by `denia update` to authenticate the
@@ -61,3 +64,4 @@ test-support = []
 assert_cmd = "2"
 http = "1.4.1"
 httpmock = "0.8.3"
+predicates = "3"

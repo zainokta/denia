@@ -6,6 +6,7 @@ use axum::{
 
 use crate::{
     deploy::DeployError, metrics::MetricsError, node_metrics::NodeMetricsError, repo::RepoError,
+    runtime::RuntimeError,
 };
 
 #[derive(Debug)]
@@ -21,6 +22,7 @@ pub enum ApiError {
     Conflict(String),
     TooManyRequests(String),
     Deploy(DeployError),
+    Runtime(RuntimeError),
     Log(std::io::Error),
     Metrics(MetricsError),
     NodeMetrics(NodeMetricsError),
@@ -56,6 +58,12 @@ impl From<RepoError> for ApiError {
 impl From<DeployError> for ApiError {
     fn from(value: DeployError) -> Self {
         Self::Deploy(value)
+    }
+}
+
+impl From<RuntimeError> for ApiError {
+    fn from(value: RuntimeError) -> Self {
+        Self::Runtime(value)
     }
 }
 
@@ -139,6 +147,10 @@ impl IntoResponse for ApiError {
                     "internal server error".to_string(),
                 ),
             },
+            Self::Runtime(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error".to_string(),
+            ),
             Self::Log(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal server error".to_string(),

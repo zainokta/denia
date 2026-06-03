@@ -7,6 +7,9 @@ afterEach(() => {
   cleanup()
   logsState.lines = []
   logsState.error = null
+  authState.isSuperAdmin = true
+  authState.role = 'admin'
+  authState.canResult = true
 })
 
 const navigateMock = vi.fn()
@@ -29,14 +32,22 @@ vi.mock('@tanstack/react-router', async () => {
   }
 })
 
+// Mutable auth state so individual tests can drop from operator to viewer and
+// assert operator-only tabs (e.g. console) appear/disappear. Reset in afterEach.
+const authState = vi.hoisted(() => ({
+  isSuperAdmin: true,
+  role: 'admin' as string,
+  canResult: true,
+}))
+
 vi.mock('#/hooks/useAuth', () => ({
   useAuth: () => ({
-    isSuperAdmin: true,
-    roleForActiveProject: () => 'admin',
+    isSuperAdmin: authState.isSuperAdmin,
+    roleForActiveProject: () => authState.role,
     token: 'test',
     me: undefined,
   }),
-  can: (_required: string, _userRole: string) => true,
+  can: (_required: string, _userRole: string) => authState.canResult,
 }))
 
 // The Logs tab renders <LogStream>, which streams over useLogStream (an SSE
@@ -276,5 +287,22 @@ describe('ServiceDetail', () => {
       expect(mockRunQuery).toHaveBeenCalled()
       expect(navigateMock).toHaveBeenCalledWith({ to: '/services' })
     })
+  })
+
+  it('shows the console tab for operators', async () => {
+    setReturns({})
+    render(<ServiceDetail />, { wrapper: makeWrapper() })
+    await screen.findByRole('heading', { name: 'web' })
+    expect(screen.getByRole('tab', { name: 'console' })).toBeTruthy()
+  })
+
+  it('hides the console tab from viewers', async () => {
+    authState.isSuperAdmin = false
+    authState.role = 'viewer'
+    authState.canResult = false
+    setReturns({})
+    render(<ServiceDetail />, { wrapper: makeWrapper() })
+    await screen.findByRole('heading', { name: 'web' })
+    expect(screen.queryByRole('tab', { name: 'console' })).toBeNull()
   })
 })
