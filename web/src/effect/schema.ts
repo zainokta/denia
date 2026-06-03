@@ -62,7 +62,7 @@ export class LoginResult extends Schema.Class<LoginResult>('LoginResult')({
 }) {}
 
 export class ApiToken extends Schema.Class<ApiToken>('ApiToken')({
-  id: Schema.Number,
+  id: Schema.String,
   name: Schema.String,
   token: Schema.String,
   created_at: Schema.String,
@@ -148,7 +148,7 @@ export class Deployment extends Schema.Class<Deployment>('Deployment')({
   service_id: Schema.String,
   status: Schema.String,
   created_at: Schema.String,
-  artifact: Schema.optional(ArtifactRef),
+  artifact: Schema.optional(Schema.NullOr(ArtifactRef)),
 }) {}
 
 export const Deployments = Schema.Array(Deployment)

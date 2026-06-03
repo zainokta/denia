@@ -6,7 +6,7 @@ import {
   useNavigate,
   useRouterState,
 } from '@tanstack/react-router'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import Footer from '../components/Footer'
 import Header from '../components/Header'
 import Sidebar from '../components/Sidebar'
@@ -91,7 +91,16 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 function Chrome({ children }: { children: React.ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname })
 
-  if (pathname === '/login' || pathname === '/setup') {
+  // The static SPA shell (`_shell.html`) is prerendered token-less, so the root
+  // `beforeLoad` redirects `/` -> `/login` and the shell bakes this bare-`<main>`
+  // layout. An authenticated client first-renders `/` with the full app-shell
+  // (Header/Sidebar), so the hydrated `<body>` subtree diverges from the shell
+  // -> React hydration error #418. Match the shell on the first client render,
+  // then swap to the real layout after mount (two-pass render).
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => setMounted(true), [])
+
+  if (!mounted || pathname === '/login' || pathname === '/setup') {
     return <main id="main">{children}</main>
   }
 

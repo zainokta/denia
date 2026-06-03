@@ -25,7 +25,7 @@ const createToken = (name: string) =>
     return yield* api.createApiToken(name)
   })
 
-const deleteToken = (id: number) =>
+const deleteToken = (id: string) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
     return yield* api.deleteApiToken(id)
@@ -78,7 +78,7 @@ function SettingsTokens() {
   })
 
   const deleteMut = useMutation({
-    mutationFn: (id: number) => runQuery(deleteToken(id)),
+    mutationFn: (id: string) => runQuery(deleteToken(id)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['api-tokens'] })
       toast.ok('Token revoked.')
