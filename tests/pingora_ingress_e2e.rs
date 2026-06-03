@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Live end-to-end test of the in-process Pingora ingress (ADR-020).
 //!
 //! Spins up the real Pingora `Server` (via `build_server`/`run_server`) on

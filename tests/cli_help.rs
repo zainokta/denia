@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 use assert_cmd::Command;
 
 #[test]

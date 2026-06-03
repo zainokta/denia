@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 use denia::{
     artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource},
     domain::{RuntimeInstanceId, RuntimeStartRequest},

@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! End-to-end autoscaler integration test.
 //!
 //! Drives a real [`Controller`] with REAL collaborators — the loopback bridge

@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Integration test for the async deploy contract introduced by ADR-024.
 //!
 //! Task 4 only covers the synchronous `POST /v1/deployments` → 202 + persisted

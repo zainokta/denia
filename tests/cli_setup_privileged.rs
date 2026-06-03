@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Round-trip the `denia setup` happy path against a tempdir-rooted layout.
 //! Requires root + cgroup v2 + userns. Opt-in via:
 //!   DENIA_RUN_PRIVILEGED_TESTS=1 cargo test --test cli_setup_privileged -- --ignored

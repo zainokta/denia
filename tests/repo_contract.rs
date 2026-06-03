@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Contract tests for the per-aggregate repository traits, run against the
 //! real `Sqlite*Repo` implementations backed by an in-memory SQLite pool.
 //!

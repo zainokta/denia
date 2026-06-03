@@ -5,56 +5,101 @@ edition = "2024"
 description = "Docker-free single-node PaaS with Denia-owned Linux runtime isolation"
 license = "Apache-2.0"
 
+# Cross-platform client/server split (ADR-030). The `server` feature gates every
+# Linux-runtime, ingress (Pingora/boringssl), persistence, and host-provisioning
+# dependency so a `--no-default-features --features client` build compiles on
+# macOS/Windows with only the shared client deps below.
 [dependencies]
-age = { version = "0.10", default-features = false }
+# --- Shared (client + server) ---
 anyhow = "1"
-arc-swap = "1"
-# Pinned to match the boringssl backend re-exported by pingora-boringssl 0.8 so
-# `X509`/`Asn1Time` are the same types; used for cert `notAfter` renewal checks.
-boring = "=4.22.0"
-argon2 = "0.5.3"
-async-trait = "0.1"
-axum = "0.8"
-chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-cron = "0.16.0"
-flate2 = "1.1.9"
-hex = "0.4.3"
-instant-acme = { version = "0.8", features = ["rcgen"] }
-libc = "0.2"
-oci-client = "0.17.0"
-pingora = { version = "0.8", default-features = false, features = ["boringssl"] }
-pingora-proxy = { version = "0.8", default-features = false, features = ["boringssl"] }
-rand = "0.10.1"
-rusqlite = { version = "0.40", features = ["bundled"] }
-rustls-pki-types = "1"
-rust-embed = { version = "8", features = ["mime-guess"] }
-rustix = { version = "1.1.4", features = ["event", "fs", "mount", "net", "pipe", "process", "thread"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.11.0"
-tar = "0.4.46"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time", "test-util"] }
-tokio-stream = "0.1"
 toml = "1.1"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["trace"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["serde", "v7"] }
-zstd = "0.13.3"
-reqwest = { version = "0.13.3", default-features = false, features = ["http2", "rustls"] }
-subtle = "2"
-semver = "1"
+reqwest = { version = "0.13.3", default-features = false, features = ["http2", "json", "rustls"] }
+
+# --- Server-only (gated behind the `server` feature) ---
+age = { version = "0.10", default-features = false, optional = true }
+arc-swap = { version = "1", optional = true }
+# Pinned to match the boringssl backend re-exported by pingora-boringssl 0.8 so
+# `X509`/`Asn1Time` are the same types; used for cert `notAfter` renewal checks.
+boring = { version = "=4.22.0", optional = true }
+argon2 = { version = "0.5.3", optional = true }
+async-trait = { version = "0.1", optional = true }
+axum = { version = "0.8", optional = true }
+chrono = { version = "0.4", features = ["serde"], optional = true }
+cron = { version = "0.16.0", optional = true }
+flate2 = { version = "1.1.9", optional = true }
+hex = { version = "0.4.3", optional = true }
+instant-acme = { version = "0.8", features = ["rcgen"], optional = true }
+libc = { version = "0.2", optional = true }
+oci-client = { version = "0.17.0", optional = true }
+pingora = { version = "0.8", default-features = false, features = ["boringssl"], optional = true }
+pingora-proxy = { version = "0.8", default-features = false, features = ["boringssl"], optional = true }
+rand = { version = "0.10.1", optional = true }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
+rustls-pki-types = { version = "1", optional = true }
+rust-embed = { version = "8", features = ["mime-guess"], optional = true }
+rustix = { version = "1.1.4", features = ["event", "fs", "mount", "net", "pipe", "process", "thread"], optional = true }
+sha2 = { version = "0.11.0", optional = true }
+tar = { version = "0.4.46", optional = true }
+tokio-stream = { version = "0.1", optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", features = ["trace"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+uuid = { version = "1", features = ["serde", "v7"], optional = true }
+zstd = { version = "0.13.3", optional = true }
+subtle = { version = "2", optional = true }
+semver = { version = "1", optional = true }
 # Pure-Rust, verify-only minisign. Used by `denia update` to authenticate the
 # SHA256SUMS manifest of a GitHub release against a pinned public key (ADR-029).
-minisign-verify = "0.2"
+minisign-verify = { version = "0.2", optional = true }
 
 [features]
-default = []
-test-support = []
+# `server` is the Linux host build (control plane + ingress + runtime). It is the
+# default so `cargo build`/`cargo test` behave as before. `client` is the
+# cross-platform deploy CLI (`auth`, `push`, `profile`) with no server deps.
+default = ["server"]
+client = []
+server = [
+    "dep:age",
+    "dep:arc-swap",
+    "dep:boring",
+    "dep:argon2",
+    "dep:async-trait",
+    "dep:axum",
+    "dep:chrono",
+    "dep:cron",
+    "dep:flate2",
+    "dep:hex",
+    "dep:instant-acme",
+    "dep:libc",
+    "dep:oci-client",
+    "dep:pingora",
+    "dep:pingora-proxy",
+    "dep:rand",
+    "dep:rusqlite",
+    "dep:rustls-pki-types",
+    "dep:rust-embed",
+    "dep:rustix",
+    "dep:sha2",
+    "dep:tar",
+    "dep:tokio-stream",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:uuid",
+    "dep:zstd",
+    "dep:subtle",
+    "dep:semver",
+    "dep:minisign-verify",
+]
+test-support = ["server"]
 
 [dev-dependencies]
 assert_cmd = "2"

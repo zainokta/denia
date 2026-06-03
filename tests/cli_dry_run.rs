@@ -1,4 +1,6 @@
-//! Dry-run integration tests for `denia setup` and `denia uninstall`.
+#![cfg(feature = "server")]
+//! Dry-run integration tests for `denia server setup` and
+//! `denia server uninstall`.
 
 use assert_cmd::Command;
 
@@ -16,7 +18,7 @@ fn setup_dry_run_lists_expected_steps() {
         // Strategy: run, capture stderr+stdout, assert that EITHER:
         //   (a) stderr says "must run as root"  (typical CI path), OR
         //   (b) stdout contains every plan step (root-CI path).
-        .args(["setup", "--dry-run"])
+        .args(["server", "setup", "--dry-run"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -43,7 +45,7 @@ fn uninstall_dry_run_purge_lists_expected_steps() {
     let output = Command::cargo_bin("denia")
         .unwrap()
         .env("SUDO_USER", "rakei")
-        .args(["uninstall", "--dry-run", "--purge"])
+        .args(["server", "uninstall", "--dry-run", "--purge"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);

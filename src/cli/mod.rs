@@ -1,18 +1,34 @@
 //! Subcommand surface for the denia binary. See ADR-025 + spec
 //! 2026-05-28-denia-binary-subcommands-design.md, and ADR-030 for the
 //! client/server command split.
+//!
+//! Client commands (`auth`, `push`, `profile`) compile on every platform. The
+//! `denia server ...` group and its modules are gated behind the `server`
+//! feature so a client-only build pulls no Linux-runtime/ingress code.
 
 pub mod client;
+
+#[cfg(feature = "server")]
 pub mod common;
+#[cfg(feature = "server")]
 pub mod doctor;
+#[cfg(feature = "server")]
 pub mod rotate_token;
+#[cfg(feature = "server")]
 pub mod setup;
+#[cfg(feature = "server")]
 pub mod status;
+#[cfg(feature = "server")]
 pub mod uninstall;
+#[cfg(feature = "server")]
 pub mod update;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
+#[cfg(feature = "server")]
+use clap::Subcommand;
+#[cfg(feature = "server")]
 use setup::SetupArgs;
+#[cfg(feature = "server")]
 use uninstall::UninstallArgs;
 
 #[derive(Parser, Debug)]
@@ -32,7 +48,11 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
-#[derive(Subcommand, Debug)]
+// The command enum is defined twice so clap never has to reason about a
+// `#[cfg]`-gated variant: server builds expose the `server` group, client builds
+// do not.
+#[cfg(feature = "server")]
+#[derive(clap::Subcommand, Debug)]
 pub enum Commands {
     /// Authenticate this machine to a Denia control plane.
     Auth(client::auth::AuthArgs),
@@ -45,6 +65,18 @@ pub enum Commands {
     Server(ServerCommands),
 }
 
+#[cfg(not(feature = "server"))]
+#[derive(clap::Subcommand, Debug)]
+pub enum Commands {
+    /// Authenticate this machine to a Denia control plane.
+    Auth(client::auth::AuthArgs),
+    /// Deploy the current pushed Git branch using `.denia`.
+    Push(client::push::PushArgs),
+    /// Manage client profiles.
+    Profile(client::profile_command::ProfileArgs),
+}
+
+#[cfg(feature = "server")]
 #[derive(Subcommand, Debug)]
 pub enum ServerCommands {
     /// Provision the host: user, dirs, keys, config, systemd unit, start.
@@ -63,21 +95,14 @@ pub enum ServerCommands {
     Run,
 }
 
-/// Entry point called from main.rs.
+/// Entry point called from main.rs (server build).
 ///
-/// Client commands (`auth`, `push`, `profile`) run on any platform. Server
-/// commands run the host-only paths under `denia server ...`. For migration,
-/// invoking the binary with no subcommand still starts the daemon on
-/// server-capable Linux builds, but `denia server run` is the documented
-/// entrypoint (the systemd unit uses it).
+/// For migration, invoking the binary with no subcommand still starts the
+/// daemon, but `denia server run` is the documented entrypoint (the systemd
+/// unit uses it).
+#[cfg(feature = "server")]
 pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
-    if let Some(path) = cli.config.as_ref() {
-        // SAFETY: single-threaded here; dispatch runs before the daemon's
-        // tokio runtime (or any other threads) is created.
-        unsafe {
-            std::env::set_var("DENIA_CONFIG_FILE", path);
-        }
-    }
+    apply_config_override(cli.config.as_ref());
     match cli.command {
         Some(Commands::Auth(args)) => block_on(crate::cli::client::auth::run(args)),
         Some(Commands::Push(args)) => block_on(crate::cli::client::push::run(args)),
@@ -87,6 +112,29 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
+/// Entry point called from main.rs (client-only build).
+#[cfg(not(feature = "server"))]
+pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
+    match cli.command {
+        Some(Commands::Auth(args)) => block_on(crate::cli::client::auth::run(args)),
+        Some(Commands::Push(args)) => block_on(crate::cli::client::push::run(args)),
+        Some(Commands::Profile(args)) => crate::cli::client::profile_command::run(args),
+        None => anyhow::bail!("no command given; run `denia --help`"),
+    }
+}
+
+#[cfg(feature = "server")]
+fn apply_config_override(config: Option<&std::path::PathBuf>) {
+    if let Some(path) = config {
+        // SAFETY: single-threaded here; dispatch runs before the daemon's
+        // tokio runtime (or any other threads) is created.
+        unsafe {
+            std::env::set_var("DENIA_CONFIG_FILE", path);
+        }
+    }
+}
+
+#[cfg(feature = "server")]
 fn dispatch_server(command: ServerCommands) -> anyhow::Result<()> {
     match command {
         ServerCommands::Setup(args) => crate::cli::setup::run(args),
@@ -101,6 +149,7 @@ fn dispatch_server(command: ServerCommands) -> anyhow::Result<()> {
 
 /// Run the async daemon on a freshly built tokio runtime so non-daemon
 /// subcommands never pay for one.
+#[cfg(feature = "server")]
 fn run_daemon() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(crate::daemon::run())

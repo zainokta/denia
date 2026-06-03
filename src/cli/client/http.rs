@@ -98,17 +98,11 @@ impl ClientApi {
         self.get_json("/v1/me", bearer).await
     }
 
-    pub async fn list_projects(
-        &self,
-        bearer: &str,
-    ) -> Result<Vec<ProjectView>, ClientApiError> {
+    pub async fn list_projects(&self, bearer: &str) -> Result<Vec<ProjectView>, ClientApiError> {
         self.get_json("/v1/projects", bearer).await
     }
 
-    pub async fn list_services(
-        &self,
-        bearer: &str,
-    ) -> Result<Vec<ServiceView>, ClientApiError> {
+    pub async fn list_services(&self, bearer: &str) -> Result<Vec<ServiceView>, ClientApiError> {
         self.get_json("/v1/services", bearer).await
     }
 
