@@ -385,6 +385,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(api::jobs::router())
         .merge(api::credentials::router())
         .merge(api::services::router())
+        .merge(api::console::router())
         .merge(api::deployments::router())
         .merge(api::domains::router())
         .merge(api::projects::router())
@@ -474,7 +475,7 @@ async fn security_headers(request: Request, next: Next) -> Response {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         header::HeaderValue::from_static(
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
         ),
     );
     headers.insert(
