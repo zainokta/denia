@@ -119,6 +119,12 @@ async fn create_deployment(
         state.routes.clone(),
     );
     let autoscaler = state.autoscaler.clone();
+    let upload_cleanup = match &request {
+        crate::domain::DeploymentRequest::Upload { upload_id, .. } => {
+            Some(state.config.uploads_dir.join(upload_id))
+        }
+        _ => None,
+    };
 
     tokio::spawn(async move {
         let deps = crate::deploy::coordinator::RunDeps {
@@ -146,6 +152,12 @@ async fn create_deployment(
             for ev in &events {
                 let _ = log.write("AUTOSCALE", &format!("{ev:?}"));
             }
+        }
+        // Best-effort remove the staged upload directory after the deploy
+        // pipeline finishes (success OR failure). The directory is no longer
+        // needed once the build context has been consumed by `run_with_deps`.
+        if let Some(dir) = upload_cleanup {
+            let _ = std::fs::remove_dir_all(&dir);
         }
     });
 
