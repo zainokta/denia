@@ -50,6 +50,18 @@ struct ConsoleTicketRequest {
     rows: u16,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct LoginResponse {
+    pub token: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ApiTokenResponse {
+    pub id: String,
+    pub name: String,
+    pub token: String,
+}
+
 pub struct ClientApi {
     base_url: String,
     http: reqwest::Client,
@@ -147,6 +159,43 @@ impl ClientApi {
         .await
     }
 
+    /// POST /v1/auth/login without bearer. Returns the session token.
+    pub async fn login(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<LoginResponse, ClientApiError> {
+        let response = self
+            .http
+            .post(format!("{}/v1/auth/login", self.base_url))
+            .json(&serde_json::json!({ "username": username, "password": password }))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ClientApiError::Api {
+                status,
+                body: response.text().await.unwrap_or_default(),
+            });
+        }
+        Ok(response.json::<LoginResponse>().await?)
+    }
+
+    /// POST /v1/api-tokens with bearer; returns the freshly-minted long-lived token (shown once).
+    pub async fn create_api_token(
+        &self,
+        bearer: &str,
+        name: &str,
+    ) -> Result<ApiTokenResponse, ClientApiError> {
+        self.post_json("/v1/api-tokens", bearer, &serde_json::json!({ "name": name }))
+            .await
+    }
+
+    /// GET /v1/me — used to verify a token works. Returns the raw JSON.
+    pub async fn me(&self, bearer: &str) -> Result<serde_json::Value, ClientApiError> {
+        self.get_json("/v1/me", bearer).await
+    }
+
     /// Turn a `ws_path` (e.g. `/v1/services/{id}/console/ws?ticket=...`) into an
     /// absolute `ws://`/`wss://` URL against the profile's base URL.
     pub fn websocket_url(&self, ws_path: &str) -> Result<String, ClientApiError> {
@@ -181,6 +230,60 @@ fn scheme_error(message: &str) -> ClientApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn login_returns_token() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let _m = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/v1/auth/login");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"token":"sess","expires_at":"2026-01-01T00:00:00Z"}"#);
+            })
+            .await;
+        let api = ClientApi::new(&server.base_url());
+        let resp = api.login("u", "p").await.unwrap();
+        assert_eq!(resp.token, "sess");
+    }
+
+    #[tokio::test]
+    async fn create_api_token_returns_token() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let _m = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1/api-tokens")
+                    .header("Authorization", "Bearer mybearer")
+                    .json_body(serde_json::json!({ "name": "denia-cli" }));
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"abc","name":"denia-cli","token":"tok"}"#);
+            })
+            .await;
+        let api = ClientApi::new(&server.base_url());
+        let resp = api.create_api_token("mybearer", "denia-cli").await.unwrap();
+        assert_eq!(resp.token, "tok");
+        assert_eq!(resp.name, "denia-cli");
+    }
+
+    #[tokio::test]
+    async fn me_succeeds_with_token() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let _m = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/v1/me");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body("{}");
+            })
+            .await;
+        let api = ClientApi::new(&server.base_url());
+        assert!(api.me("tok").await.is_ok());
+    }
 
     #[test]
     fn websocket_url_swaps_http_to_ws() {
