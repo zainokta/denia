@@ -215,6 +215,20 @@ pub async fn run() -> anyhow::Result<()> {
         (tx, handle)
     };
 
+    // Staged upload directory sweep (ADR-035). Removes abandoned upload dirs
+    // older than `upload_ttl_secs`. Mirrors the registry GC task pattern.
+    let upload_sweep_task = {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let ttl = std::time::Duration::from_secs(config.upload_ttl_secs);
+        let handle = tokio::spawn(crate::api::uploads::upload_sweep_run_until_shutdown(
+            config.uploads_dir.clone(),
+            ttl,
+            ttl,
+            rx,
+        ));
+        (tx, handle)
+    };
+
     let autoscale_interval = config.autoscale_interval_s;
     let autoscaler_task = if let Some((ingress, controller)) = state.autoscaler_handle() {
         ingress
@@ -295,6 +309,11 @@ pub async fn run() -> anyhow::Result<()> {
     }
     {
         let (tx, handle) = registry_gc_task;
+        let _ = tx.send(());
+        let _ = handle.await;
+    }
+    {
+        let (tx, handle) = upload_sweep_task;
         let _ = tx.send(());
         let _ = handle.await;
     }
