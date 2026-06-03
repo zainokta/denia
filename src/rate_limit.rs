@@ -84,9 +84,10 @@ fn extract_client_ip(request: &Request) -> String {
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip());
 
-    // Only trust X-Forwarded-For when the TCP peer is loopback (our own Traefik
-    // reverse proxy). A directly-connected client could otherwise spoof the
-    // header and evade or poison the rate-limit buckets.
+    // Only trust X-Forwarded-For when the TCP peer is loopback (our own
+    // in-process Pingora ingress, which overwrites the header with the real
+    // client IP). A directly-connected client could otherwise spoof the header
+    // and evade or poison the rate-limit buckets.
     if peer.map(|ip| ip.is_loopback()).unwrap_or(false)
         && let Some(forwarded) = request
             .headers()
@@ -130,4 +131,34 @@ pub async fn rate_limit_admin(
     }
 
     next.run(request).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+
+    fn req_with(peer: &str, xff: Option<&str>) -> Request {
+        let mut b = Request::builder().uri("/");
+        if let Some(v) = xff {
+            b = b.header("x-forwarded-for", v);
+        }
+        let mut req = b.body(axum::body::Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+        req
+    }
+
+    #[test]
+    fn loopback_peer_trusts_forwarded_for() {
+        let req = req_with("127.0.0.1:5000", Some("203.0.113.9, 10.0.0.1"));
+        assert_eq!(extract_client_ip(&req), "203.0.113.9");
+    }
+
+    #[test]
+    fn non_loopback_peer_ignores_forwarded_for() {
+        let req = req_with("198.51.100.4:5000", Some("203.0.113.9"));
+        assert_eq!(extract_client_ip(&req), "198.51.100.4");
+    }
 }

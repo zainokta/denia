@@ -13,6 +13,12 @@ use crate::auth::{Principal, ensure_role};
 use crate::domain::{DomainStatus, Role, ServiceDomain};
 use crate::repo::RepoError;
 
+/// A service may not claim the control-plane hostname. Both sides are
+/// lowercased at their sources (`validate_hostname` and config validation).
+pub(crate) fn is_reserved_control_hostname(hostname: &str, control_domain: Option<&str>) -> bool {
+    control_domain == Some(hostname)
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
@@ -101,6 +107,12 @@ async fn create_service_domain(
     let hostname = crate::verification::validate_hostname(&body.hostname)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
+    if is_reserved_control_hostname(&hostname, state.config.control_domain.as_deref()) {
+        return Err(ApiError::Conflict(
+            "hostname is reserved for the control plane".into(),
+        ));
+    }
+
     let token = crate::verification::generate_token();
     let now = chrono::Utc::now();
     let d = ServiceDomain {
@@ -157,6 +169,11 @@ async fn verify_service_domain(
         .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
     if d.service_id != service_id {
         return Err(ApiError::NotFound("domain not found".into()));
+    }
+    if is_reserved_control_hostname(&d.hostname, state.config.control_domain.as_deref()) {
+        return Err(ApiError::Conflict(
+            "hostname is reserved for the control plane".into(),
+        ));
     }
     if d.status == DomainStatus::Verified {
         return Ok(Json(d));
@@ -241,6 +258,20 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    #[test]
+    fn control_hostname_is_reserved() {
+        use super::is_reserved_control_hostname;
+        assert!(is_reserved_control_hostname(
+            "denia.example.com",
+            Some("denia.example.com")
+        ));
+        assert!(!is_reserved_control_hostname(
+            "svc.example.com",
+            Some("denia.example.com")
+        ));
+        assert!(!is_reserved_control_hostname("denia.example.com", None));
+    }
 
     const ADMIN_TOKEN: &str = "test-admin-token-0123456789abcdef";
 

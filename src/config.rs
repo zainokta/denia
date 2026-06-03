@@ -369,6 +369,8 @@ pub enum ConfigError {
     ConfigFileParse(PathBuf, #[source] toml::de::Error),
     #[error("config file serialize error: {0}")]
     ConfigFileSerialize(String),
+    #[error("invalid DENIA_CONTROL_DOMAIN: {0}")]
+    InvalidControlDomain(String),
 }
 
 impl AppConfig {
@@ -453,7 +455,13 @@ impl AppConfig {
             .unwrap_or(65_536);
         let control_domain = env::var("DENIA_CONTROL_DOMAIN")
             .ok()
-            .or_else(|| file_cfg.control_domain.clone());
+            .or_else(|| file_cfg.control_domain.clone())
+            .filter(|v| !v.trim().is_empty())
+            .map(|d| {
+                crate::ingress::pingora::state::validate_domain(&d)
+                    .map_err(|e| ConfigError::InvalidControlDomain(e.to_string()))
+            })
+            .transpose()?;
         let control_tls = env::var("DENIA_CONTROL_TLS")
             .ok()
             .map(|v| v == "1" || v == "true")
@@ -971,5 +979,29 @@ control_tls = true
         let path = dir.path().join("age.key");
         std::fs::write(&path, "AGE-SECRET-KEY-1QQQQQQ\n").unwrap();
         assert!(read_age_public_key(&path).is_none());
+    }
+
+    #[test]
+    fn invalid_control_domain_is_rejected() {
+        let _lock = FROM_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_cfg_dir, _cfg_file) = isolated_config_file();
+        let _admin = EnvGuard::set("DENIA_ADMIN_TOKEN", "x".repeat(64));
+        let _key_file = EnvGuard::set("DENIA_AGE_KEY_FILE", "/nonexistent/denia-test/age.key");
+        let _cd = EnvGuard::set("DENIA_CONTROL_DOMAIN", "has space.example.com");
+        assert!(matches!(
+            AppConfig::from_env(),
+            Err(ConfigError::InvalidControlDomain(_))
+        ));
+    }
+
+    #[test]
+    fn valid_control_domain_is_lowercased() {
+        let _lock = FROM_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_cfg_dir, _cfg_file) = isolated_config_file();
+        let _admin = EnvGuard::set("DENIA_ADMIN_TOKEN", "x".repeat(64));
+        let _key_file = EnvGuard::set("DENIA_AGE_KEY_FILE", "/nonexistent/denia-test/age.key");
+        let _cd = EnvGuard::set("DENIA_CONTROL_DOMAIN", "Denia.Example.COM");
+        let cfg = AppConfig::from_env().expect("valid control domain");
+        assert_eq!(cfg.control_domain.as_deref(), Some("denia.example.com"));
     }
 }
