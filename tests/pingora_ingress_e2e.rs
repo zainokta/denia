@@ -111,6 +111,8 @@ async fn proxies_known_host_to_uds_and_404s_unknown() {
         http_addr: SocketAddr::from(([127, 0, 0, 1], http_port)),
         https_addr: SocketAddr::from(([127, 0, 0, 1], https_port)),
         control_backend: SocketAddr::from(([127, 0, 0, 1], control_port)),
+        control_domain: None,
+        control_tls: false,
     };
     let server = build_server(state, &cfg).expect("server builds");
 
