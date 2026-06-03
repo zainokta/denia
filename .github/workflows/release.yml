@@ -1,5 +1,7 @@
 # Builds, checksums, and minisign-signs Denia release binaries, then publishes
-# them as GitHub release assets. Consumed by `denia update` (ADR-029).
+# them as GitHub release assets. The Linux server binaries are consumed by
+# `denia update` (ADR-029); the cross-platform client binaries are the deploy
+# CLI (ADR-030). Both are covered by the signed SHA256SUMS manifest.
 #
 # Trigger: push a tag `vX.Y.Z` whose X.Y.Z equals the Cargo.toml version.
 #
@@ -86,8 +88,63 @@ jobs:
           path: dist/denia-${{ matrix.arch }}-linux-gnu
           if-no-files-found: error
 
+  # Cross-platform client CLI (ADR-030). Client-only build excludes the Linux
+  # runtime, ingress, persistence, and host-provisioning code, so it compiles on
+  # macOS and Windows and needs no web console or Node toolchain.
+  build-client:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: denia-client-x86_64-linux-gnu
+            bin: denia
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: denia-client-aarch64-apple-darwin
+            bin: denia
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: denia-client-x86_64-pc-windows-msvc.exe
+            bin: denia.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo.toml version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}" >&2
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build client binary
+        run: cargo build --release --locked --no-default-features --features client --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
   release:
-    needs: build
+    needs: [build, build-client]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -98,7 +155,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          find artifacts -type f -name 'denia-*-linux-gnu' -exec cp {} dist/ \;
+          find artifacts -type f \( -name 'denia-*-linux-gnu' -o -name 'denia-client-*' \) \
+            -exec cp {} dist/ \;
           ls -l dist
 
       - name: Generate SHA256SUMS
@@ -106,7 +164,7 @@ jobs:
         run: |
           set -euo pipefail
           printf '# denia-release: %s\n' "${GITHUB_REF_NAME}" > SHA256SUMS
-          sha256sum denia-*-linux-gnu >> SHA256SUMS
+          sha256sum denia-* >> SHA256SUMS
 
       - name: Install minisign
         run: |
@@ -132,6 +190,9 @@ jobs:
           files: |
             dist/denia-x86_64-linux-gnu
             dist/denia-aarch64-linux-gnu
+            dist/denia-client-x86_64-linux-gnu
+            dist/denia-client-aarch64-apple-darwin
+            dist/denia-client-x86_64-pc-windows-msvc.exe
             dist/SHA256SUMS
             dist/SHA256SUMS.minisig
           fail_on_unmatched_files: true

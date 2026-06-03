@@ -100,10 +100,10 @@ installs it to `/usr/local/bin/denia`.
 **Step 2 — Provision the host:**
 
 ```bash
-sudo denia setup
+sudo denia server setup
 ```
 
-`denia setup` creates the `denia` system user and group, lays out
+`denia server setup` creates the `denia` system user and group, lays out
 `/var/lib/denia`, generates `~/.config/denia/{config.toml,admin.token,age.key}`
 (owned `<operator>:denia 0640` — editable without sudo), writes and enables the
 systemd unit, and starts the service. See
@@ -112,15 +112,32 @@ privilege model.
 
 ### CLI subcommands
 
+The command surface is split into cross-platform **client** commands and
+Linux-only **server** commands (ADR-030). Client commands ship in every release
+binary; server commands only exist in the Linux server build.
+
+Client (any OS):
+
 | Subcommand | Purpose |
 |------------|---------|
-| `denia setup` | Provision the host (user, dirs, keys, config, systemd unit, start). |
-| `denia uninstall [--purge]` | Stop and remove the service; `--purge` also wipes `/var/lib/denia` and `~/.config/denia`. |
-| `denia status` | Print service state (systemctl status + recent journal lines). |
-| `denia doctor` | Diagnose host requirements and install health (no privilege needed). |
-| `denia rotate-token` | Rotate the admin token and restart the service. |
+| `denia auth` | Authenticate this machine to a control plane and store an API token profile. |
+| `denia push` | Deploy the current pushed Git branch using the project's `.denia` manifest. |
+| `denia profile list \| show \| use <name>` | Inspect and switch stored profiles. |
 
-Running `denia` with no subcommand starts the control-plane daemon.
+Server (Linux host):
+
+| Subcommand | Purpose |
+|------------|---------|
+| `denia server setup` | Provision the host (user, dirs, keys, config, systemd unit, start). |
+| `denia server uninstall [--purge]` | Stop and remove the service; `--purge` also wipes `/var/lib/denia` and `~/.config/denia`. |
+| `denia server status` | Print service state (systemctl status + recent journal lines). |
+| `denia server doctor` | Diagnose host requirements and install health (no privilege needed). |
+| `denia server rotate-token` | Rotate the admin token and restart the service. |
+| `denia server update` | Self-update from the latest signed GitHub release and restart (ADR-029). |
+| `denia server run` | Run the control-plane + ingress daemon in the foreground (the systemd unit uses this). |
+
+The systemd unit runs `denia server run`. For compatibility, invoking the Linux
+server binary with no subcommand also starts the daemon.
 
 ### Bootstrap admin user
 
@@ -135,6 +152,74 @@ curl -fsS -X POST \
   -d '{"username":"admin","password":"<strong-password>"}' \
   http://127.0.0.1:7180/v1/bootstrap
 ```
+
+## Client CLI
+
+The `denia` client runs on Linux, macOS, and Windows and deploys to a remote
+Denia node over the `/v1` API — no Linux runtime, ingress, or host code is
+compiled into it (ADR-030). Download the client binary for your platform from the
+[GitHub release](https://github.com/zainokta/denia/releases) assets
+(`denia-client-<arch>-<os>`) and put it on your `PATH`.
+
+**1. Authenticate once** (stores the profile under
+`$XDG_CONFIG_HOME/denia/client.toml`, owner-only on Unix; override with
+`DENIA_CLIENT_CONFIG`):
+
+```bash
+denia auth --url https://denia.example.com --username admin
+# or, non-interactively:
+printf '%s' "$PASSWORD" | denia auth \
+  --url https://denia.example.com --username admin --password-stdin
+```
+
+`auth` logs in, mints a named API token via `/v1/api-tokens`, verifies it against
+`/v1/me`, and saves it as the active profile. Manage profiles with
+`denia profile list|show|use <name>`.
+
+**2. Add a committed `.denia` manifest** to your project root. It holds no
+secrets — only the deploy settings:
+
+```toml
+version = 1
+project = "default"
+service = "api"
+
+[source]
+type = "git"
+remote = "origin"
+dockerfile = "Dockerfile"
+context = "."
+git_credential_ref = "deploy-key"   # references a credential already on the node
+
+[runtime]
+internal_port = 8080
+
+[health]
+path = "/"
+timeout_seconds = 5
+
+[limits]
+cpu_millis = 500
+memory_bytes = 536870912
+
+[ingress]
+domains = ["api.example.com"]
+tls_enabled = true
+```
+
+**3. Deploy** the current branch:
+
+```bash
+denia push
+```
+
+`push` reads `.denia` and the active profile, requires the local `HEAD` to match
+the configured remote branch (the Denia node builds from Git, so unpushed commits
+would deploy stale code), resolves the project, upserts the service, and starts a
+Git deployment. It prints the deployment id and the console URL.
+
+The first `push` supports **Git + Dockerfile** sources only. Local snapshot
+upload and client-side image builds are deferred (ADR-030).
 
 ## Configuration
 
