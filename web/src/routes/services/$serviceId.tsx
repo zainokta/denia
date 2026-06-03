@@ -22,6 +22,7 @@ import { useActionToasts } from '#/components/Toast'
 import { Num } from '#/components/Num'
 import { useAuth, can } from '#/hooks/useAuth'
 import { LogStream } from '#/components/LogStream'
+import { ServiceConsole } from '#/components/ServiceConsole'
 import {
   formatBytes,
   formatClock,
@@ -328,6 +329,7 @@ export function ServiceDetail() {
     { id: 'environment', label: 'environment' },
     { id: 'deployments', label: 'deployments' },
     { id: 'logs', label: 'logs' },
+    ...(canOperate ? [{ id: 'console', label: 'console' }] : []),
     { id: 'metrics', label: 'metrics' },
   ]
 
@@ -690,6 +692,10 @@ export function ServiceDetail() {
                 />
               </div>
             )
+          }
+
+          if (active === 'console') {
+            return <ServiceConsole serviceId={id} />
           }
 
           // metrics

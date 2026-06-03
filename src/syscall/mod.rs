@@ -1,6 +1,8 @@
 pub mod caps;
 pub mod chown;
+pub mod console;
 pub mod ns;
+pub mod pty;
 pub mod seccomp;
 pub mod signal;
 

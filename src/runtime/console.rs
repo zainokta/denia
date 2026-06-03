@@ -1,0 +1,56 @@
+//! Runtime-facing console session types. The API layer builds a
+//! [`RuntimeConsoleRequest`] and the runtime returns a [`RuntimeConsoleSession`]
+//! carrying a live PTY bound to the target replica. See ADR-033.
+
+use std::path::PathBuf;
+
+use tokio::io::{AsyncRead, AsyncWrite};
+use uuid::Uuid;
+
+/// What the runtime needs to open a console against a tracked replica.
+#[derive(Debug, Clone)]
+pub struct RuntimeConsoleRequest {
+    pub session_id: Uuid,
+    pub service_id: Uuid,
+    pub service_name: String,
+    pub deployment_id: Uuid,
+    pub replica_index: u32,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// A live console session: a PTY master attached to a `/bin/sh` that joined the
+/// replica's namespaces and cgroup.
+pub struct RuntimeConsoleSession {
+    pub session_id: Uuid,
+    pub replica_index: u32,
+    pub child_pid: u32,
+    pub cgroup_path: PathBuf,
+    pub pty: Box<dyn ConsolePty>,
+}
+
+impl std::fmt::Debug for RuntimeConsoleSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeConsoleSession")
+            .field("session_id", &self.session_id)
+            .field("replica_index", &self.replica_index)
+            .field("child_pid", &self.child_pid)
+            .field("cgroup_path", &self.cgroup_path)
+            .field("pty", &"<console pty>")
+            .finish()
+    }
+}
+
+/// A bidirectional console transport with terminal resize support. The blanket
+/// supertraits let the websocket bridge use `AsyncReadExt`/`AsyncWriteExt`
+/// directly on a `Box<dyn ConsolePty>`. Concrete implementations are provided
+/// for the real PTY master and the fake runtime's in-memory pipe.
+pub trait ConsolePty: AsyncRead + AsyncWrite + Unpin + Send {
+    fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()>;
+}
+
+impl ConsolePty for crate::syscall::pty::PtyMaster {
+    fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()> {
+        crate::syscall::pty::PtyMaster::resize(self, cols, rows)
+    }
+}

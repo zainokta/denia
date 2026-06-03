@@ -1,6 +1,7 @@
 //! Subcommand surface for the denia binary. See ADR-025 + spec
 //! 2026-05-28-denia-binary-subcommands-design.md.
 
+pub mod client;
 pub mod common;
 pub mod doctor;
 pub mod rotate_token;
@@ -44,6 +45,8 @@ pub enum Commands {
     RotateToken,
     /// Self-update from the latest signed GitHub release and restart.
     Update(update::UpdateArgs),
+    /// Open an interactive shell inside a running service replica.
+    Console(client::console::ConsoleArgs),
 }
 
 /// Entry point called from main.rs. Subcommand variants return placeholder
@@ -64,6 +67,12 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Doctor) => crate::cli::doctor::run(),
         Some(Commands::RotateToken) => crate::cli::rotate_token::run(),
         Some(Commands::Update(args)) => crate::cli::update::run(args),
+        Some(Commands::Console(args)) => {
+            // Client console is async (websocket + PTY bridge); build a runtime
+            // only for this path, like the daemon arm below.
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(crate::cli::client::console::run(args))
+        }
         None => {
             // Daemon is async; build a runtime here so non-daemon subcommands
             // never pay for one.
