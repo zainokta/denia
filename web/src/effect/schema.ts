@@ -148,7 +148,7 @@ export class Deployment extends Schema.Class<Deployment>('Deployment')({
   service_id: Schema.String,
   status: Schema.String,
   created_at: Schema.String,
-  artifact: Schema.optional(ArtifactRef),
+  artifact: Schema.optional(Schema.NullOr(ArtifactRef)),
 }) {}
 
 export const Deployments = Schema.Array(Deployment)
