@@ -6,4 +6,5 @@ pub mod auth;
 pub mod console;
 pub mod http;
 pub mod manifest;
+pub mod pack;
 pub mod profile;
