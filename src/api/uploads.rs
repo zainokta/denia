@@ -14,6 +14,8 @@ pub enum ExtractError {
 }
 
 /// Extract a `tar.zst` into `dest`, accepting only regular files and dirs.
+///
+/// On error, partially-extracted files may remain in `dest`; cleanup is the caller's responsibility.
 pub fn extract_tar_zst(bytes: &[u8], dest: &Path, limits: &ExtractLimits) -> Result<(), ExtractError> {
     let decoder = zstd::stream::read::Decoder::new(bytes)?;
     let mut archive = tar::Archive::new(decoder);
@@ -100,20 +102,22 @@ mod tests {
         // mode (100..108): octal "0000644\0"
         header[100..107].copy_from_slice(b"0000644");
         header[107] = b'\0';
-        // uid / gid / mtime: leave as zeros (valid enough for reading)
-        // size (136..148): octal of body.len() + NUL
+        // uid / gid: leave as zeros (valid enough for reading)
+        // size (124..136): octal of body.len() + NUL  [POSIX ustar bytes 124–135]
         let size_str = format!("{:011o}\0", body.len());
-        header[136..148].copy_from_slice(size_str.as_bytes());
-        // mtime (148..160): "00000000000\0"
-        header[148..159].copy_from_slice(b"00000000000");
-        header[159] = b'\0';
+        header[124..136].copy_from_slice(size_str.as_bytes());
+        // mtime (136..148): "00000000000\0"  [POSIX ustar bytes 136–147]
+        header[136..147].copy_from_slice(b"00000000000");
+        header[147] = b'\0';
+        // checksum (148..156): computed below  [POSIX ustar bytes 148–155]
         // typeflag (156): '0' = regular file
         header[156] = b'0';
         // magic / version (257..265): "ustar  \0"
         header[257..263].copy_from_slice(b"ustar ");
         header[263..265].copy_from_slice(b" \0");
-        // Checksum (148..156): sum of all header bytes, stored as 6-digit octal + NUL + space.
-        header[148..156].copy_from_slice(b"        "); // placeholder
+        // Checksum (148..156): sum of all header bytes with chksum field treated as spaces,
+        // stored as 6-digit octal + NUL + space.
+        header[148..156].copy_from_slice(b"        "); // placeholder (8 spaces per POSIX)
         let cksum: u32 = header.iter().map(|&b| b as u32).sum();
         let cksum_str = format!("{:06o}\0 ", cksum);
         header[148..156].copy_from_slice(cksum_str.as_bytes());
