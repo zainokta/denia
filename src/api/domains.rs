@@ -108,7 +108,9 @@ async fn create_service_domain(
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     if is_reserved_control_hostname(&hostname, state.config.control_domain.as_deref()) {
-        return Err(ApiError::Conflict("hostname is reserved for the control plane".into()));
+        return Err(ApiError::Conflict(
+            "hostname is reserved for the control plane".into(),
+        ));
     }
 
     let token = crate::verification::generate_token();
@@ -169,7 +171,9 @@ async fn verify_service_domain(
         return Err(ApiError::NotFound("domain not found".into()));
     }
     if is_reserved_control_hostname(&d.hostname, state.config.control_domain.as_deref()) {
-        return Err(ApiError::Conflict("hostname is reserved for the control plane".into()));
+        return Err(ApiError::Conflict(
+            "hostname is reserved for the control plane".into(),
+        ));
     }
     if d.status == DomainStatus::Verified {
         return Ok(Json(d));
@@ -258,8 +262,14 @@ mod tests {
     #[test]
     fn control_hostname_is_reserved() {
         use super::is_reserved_control_hostname;
-        assert!(is_reserved_control_hostname("denia.example.com", Some("denia.example.com")));
-        assert!(!is_reserved_control_hostname("svc.example.com", Some("denia.example.com")));
+        assert!(is_reserved_control_hostname(
+            "denia.example.com",
+            Some("denia.example.com")
+        ));
+        assert!(!is_reserved_control_hostname(
+            "svc.example.com",
+            Some("denia.example.com")
+        ));
         assert!(!is_reserved_control_hostname("denia.example.com", None));
     }
 

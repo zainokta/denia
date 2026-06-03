@@ -548,8 +548,14 @@ mod tests {
 
     #[test]
     fn control_domain_issued_only_when_tls_enabled() {
-        assert_eq!(control_domain_to_issue(Some("denia.example.com"), true), Some("denia.example.com"));
-        assert_eq!(control_domain_to_issue(Some("denia.example.com"), false), None);
+        assert_eq!(
+            control_domain_to_issue(Some("denia.example.com"), true),
+            Some("denia.example.com")
+        );
+        assert_eq!(
+            control_domain_to_issue(Some("denia.example.com"), false),
+            None
+        );
         assert_eq!(control_domain_to_issue(None, true), None);
     }
 }
