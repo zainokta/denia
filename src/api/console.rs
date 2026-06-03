@@ -289,12 +289,87 @@ async fn handle_console_socket(state: AppState, mut socket: WebSocket, ticket: C
     );
 }
 
-async fn bridge_console_socket(_socket: WebSocket, _session: RuntimeConsoleSession) {
-    // Task 5 replaces this body with the bidirectional PTY bridge.
+async fn bridge_console_socket(mut socket: WebSocket, mut session: RuntimeConsoleSession) {
+    use axum::extract::ws::CloseFrame;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut buf = vec![0_u8; 8192];
+    loop {
+        tokio::select! {
+            read = session.pty.read(&mut buf) => {
+                match read {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if socket
+                            .send(Message::Binary(buf[..n].to_vec().into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = send_control(
+                            &mut socket,
+                            ConsoleControlFrame::Error { message: error.to_string() },
+                        )
+                        .await;
+                        break;
+                    }
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        if session.pty.write_all(&bytes).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<ConsoleControlFrame>(text.as_str()) {
+                            Ok(ConsoleControlFrame::Resize { cols, rows }) => {
+                                let _ = session.pty.resize(cols, rows);
+                            }
+                            Ok(ConsoleControlFrame::Close) => break,
+                            _ => {}
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+        }
+    }
+
+    let _ = crate::syscall::signal::kill(session.child_pid, rustix::process::Signal::TERM);
+    let _ = send_control(&mut socket, ConsoleControlFrame::Exit { code: None }).await;
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code: axum::extract::ws::close_code::NORMAL,
+            reason: "console closed".into(),
+        })))
+        .await;
+}
+
+async fn send_control(
+    socket: &mut WebSocket,
+    frame: ConsoleControlFrame,
+) -> Result<(), axum::Error> {
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&frame)
+                .unwrap_or_else(|_| {
+                    "{\"type\":\"error\",\"message\":\"control encode failed\"}".to_string()
+                })
+                .into(),
+        ))
+        .await
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -463,5 +538,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    fn ticket_value(service_id: uuid::Uuid) -> ConsoleTicket {
+        ConsoleTicket {
+            service_id,
+            service_name: "web".to_string(),
+            deployment_id: uuid::Uuid::now_v7(),
+            replica_index: 0,
+            principal_label: "tester".to_string(),
+            cols: 120,
+            rows: 32,
+            expires_at: chrono::Utc::now() + chrono::TimeDelta::seconds(30),
+        }
+    }
+
+    #[test]
+    fn consume_ticket_rejects_wrong_service() {
+        let service_id = uuid::Uuid::now_v7();
+        let other_id = uuid::Uuid::now_v7();
+        let ticket = format!("unit-test-wrong-service-{}", uuid::Uuid::now_v7());
+        TICKETS
+            .lock()
+            .unwrap()
+            .insert(ticket.clone(), ticket_value(service_id));
+        let err = consume_ticket(other_id, &ticket).unwrap_err();
+        assert!(matches!(err, ApiError::Unauthorized(message) if message.contains("mismatch")));
+    }
+
+    #[test]
+    fn consume_ticket_is_single_use() {
+        let service_id = uuid::Uuid::now_v7();
+        let ticket = format!("unit-test-single-use-{}", uuid::Uuid::now_v7());
+        TICKETS
+            .lock()
+            .unwrap()
+            .insert(ticket.clone(), ticket_value(service_id));
+        assert!(consume_ticket(service_id, &ticket).is_ok());
+        assert!(consume_ticket(service_id, &ticket).is_err());
     }
 }
