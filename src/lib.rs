@@ -14,6 +14,7 @@ pub mod ingress;
 pub mod observability;
 pub mod oci;
 pub mod rate_limit;
+pub mod registry;
 pub mod repo;
 pub mod runtime;
 pub mod scheduler;

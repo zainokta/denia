@@ -250,6 +250,36 @@ token from `/v1/auth/login`. Routes enforce a project-scoped role minimum
 - `GET|POST /v1/jobs`, `POST /v1/jobs/{id}/run`, `GET /v1/jobs/{id}/runs`
 - `GET /.well-known/denia-challenge/{token}` (public domain verification;
   token must match the request `Host`)
+- `/v2/...` OCI Distribution routes (hosted registry; see below)
+- `GET /v1/registry/status`, `POST /v1/registry/gc` (super-admin),
+  `GET /v1/registry/repositories` (project-filtered)
+
+## Hosted registry
+
+Denia hosts its own OCI registry as a separate subsystem from the per-project
+external pull registries (ADR-014/ADR-021). See [ADR-031](docs/adr/031-hosted-oci-registry.md).
+
+- **Same-origin `/v2`** — the registry follows the OCI Distribution route shape
+  and is mounted at `/v2` on the same origin as the management API, outside
+  `/v1`. No dedicated registry hostname is required for the single-node install.
+- **Bearer API token auth** — `/v2` reuses the same `Authorization: Bearer
+  <token>` resolution as `/v1`, with its own per-repository role checks: push
+  (`PUT`/`POST`/`PATCH`) requires project **Operator**, pull (`GET`/`HEAD`)
+  requires **Viewer**. Docker-compatible login is a future amendment.
+- **`<project>/<service>` naming** — repository names map to Denia project and
+  service names, e.g. `/v2/default/api/manifests/latest`. Path segments are
+  validated and must resolve to an existing project/service.
+- **Local storage** — blob and manifest bytes are content-addressed under
+  `data_dir/registry` (`blobs/sha256/<hex>`); upload sessions live under
+  `registry/uploads/<uuidv7>/`. SQLite holds repository, manifest, tag, blob,
+  upload, and GC-run metadata. Uploaded blobs are SHA-256-verified against the
+  requested digest before being committed.
+- **Garbage collection** — conservative GC reclaims unreferenced blobs older than
+  a grace period; it never removes a blob referenced by a manifest or an active
+  upload. It runs both on a periodic background task and on demand via
+  `POST /v1/registry/gc`. Tunable with `DENIA_REGISTRY_GC_INTERVAL_SECS`
+  (default 24h) and `DENIA_REGISTRY_GC_GRACE_SECS` (default 1h). Storage and GC
+  status are visible in the web console under Settings → Hosted registry.
 
 ## Security
 

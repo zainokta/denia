@@ -40,6 +40,12 @@ pub struct AppState {
     pub jobs: SqliteJobRepo,
     pub tokens: SqliteTokenRepo,
     pub credentials: SqliteCredentialRepo,
+    pub registry: crate::registry::repo::HostedRegistryRepo,
+    pub registry_storage: crate::registry::storage::RegistryStorage,
+    /// Conservative hosted-registry garbage collector (ADR-031). Cloneable:
+    /// shared status state between the periodic loop and the management
+    /// endpoint.
+    pub registry_gc: crate::registry::gc::RegistryGc,
     pub(crate) runtime: Arc<dyn Runtime>,
     pub(crate) health: Arc<dyn HealthChecker>,
     pub(crate) command_runner: Arc<dyn CommandRunner>,
@@ -214,6 +220,14 @@ impl AppState {
         C: CommandRunner + 'static,
     {
         let pool = store.pool();
+        let registry = crate::registry::repo::HostedRegistryRepo::new(pool.clone());
+        let registry_storage =
+            crate::registry::storage::RegistryStorage::new(config.data_dir.clone());
+        let registry_gc = crate::registry::gc::RegistryGc::new(
+            registry_storage.clone(),
+            registry.clone(),
+            std::time::Duration::from_secs(config.registry_gc_grace_secs),
+        );
         Self {
             config,
             services: SqliteServiceRepo::new(pool.clone()),
@@ -225,6 +239,9 @@ impl AppState {
             jobs: SqliteJobRepo::new(pool.clone()),
             tokens: SqliteTokenRepo::new(pool.clone()),
             credentials: SqliteCredentialRepo::new(pool),
+            registry,
+            registry_storage,
+            registry_gc,
             runtime: Arc::new(runtime),
             health: Arc::new(health),
             command_runner: Arc::new(command_runner),
@@ -303,6 +320,14 @@ impl AppStateBuilder {
         let store = SqliteStore::open_in_memory().expect("open in-memory store");
         store.migrate().expect("run migrations");
         let pool = store.pool();
+        let registry = crate::registry::repo::HostedRegistryRepo::new(pool.clone());
+        let registry_storage =
+            crate::registry::storage::RegistryStorage::new(self.config.data_dir.clone());
+        let registry_gc = crate::registry::gc::RegistryGc::new(
+            registry_storage.clone(),
+            registry.clone(),
+            std::time::Duration::from_secs(self.config.registry_gc_grace_secs),
+        );
         AppState {
             config: self.config,
             services: SqliteServiceRepo::new(pool.clone()),
@@ -314,6 +339,9 @@ impl AppStateBuilder {
             jobs: SqliteJobRepo::new(pool.clone()),
             tokens: SqliteTokenRepo::new(pool.clone()),
             credentials: SqliteCredentialRepo::new(pool),
+            registry,
+            registry_storage,
+            registry_gc,
             runtime: self
                 .runtime
                 .unwrap_or_else(|| Arc::new(crate::runtime::FakeRuntime::default())),
@@ -365,6 +393,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(api::observability::router())
         .merge(api::ingress::router())
         .merge(api::oci::router())
+        .merge(api::hosted_registry::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .route_layer(middleware::from_fn_with_state(
             admin_rate_limiter,
@@ -411,6 +440,11 @@ pub fn build_router(state: AppState) -> Router {
             get(api::domains::acme_challenge_handler),
         )
         .nest("/v1", auth_public.merge(authed))
+        .nest(
+            "/v2",
+            crate::registry::api_v2::router()
+                .route_layer(middleware::from_fn_with_state(state.clone(), require_auth)),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(security_headers))
         .layer(trace_layer)
