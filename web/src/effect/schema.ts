@@ -285,6 +285,23 @@ export class Service extends Schema.Class<Service>('Service')({
 
 export const Services = Schema.Array(Service)
 
+// Service console (ADR-033): live replica view + minted ticket.
+export class ConsoleReplica extends Schema.Class<ConsoleReplica>('ConsoleReplica')({
+  service_id: Schema.String,
+  service_name: Schema.String,
+  deployment_id: Schema.String,
+  replica_index: Schema.Number,
+  state: Schema.String,
+}) {}
+
+export const ConsoleReplicas = Schema.Array(ConsoleReplica)
+
+export class ConsoleTicket extends Schema.Class<ConsoleTicket>('ConsoleTicket')({
+  ticket: Schema.String,
+  expires_at: Schema.String,
+  ws_path: Schema.String,
+}) {}
+
 // Service fields minus `id`, for create requests.
 const { id: _serviceId, ...serviceInputFields } = Service.fields
 export const ServiceInput = Schema.Struct(serviceInputFields)

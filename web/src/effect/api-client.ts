@@ -6,6 +6,9 @@ import {
   AccessEntries,
   AccessEntry,
   ApiToken,
+  ConsoleReplica,
+  ConsoleReplicas,
+  ConsoleTicket,
   Credential,
   type CredentialInput,
   Credentials,
@@ -122,6 +125,15 @@ export class ApiClient extends Context.Service<
       ReadonlyArray<Service>,
       ApiError | DecodeError
     >
+    readonly listConsoleReplicas: (
+      serviceId: string,
+    ) => Effect.Effect<ReadonlyArray<ConsoleReplica>, ApiError | DecodeError>
+    readonly createConsoleTicket: (
+      serviceId: string,
+      replicaIndex: number,
+      cols: number,
+      rows: number,
+    ) => Effect.Effect<ConsoleTicket, ApiError | DecodeError>
     readonly getService: (
       id: string,
     ) => Effect.Effect<Service, ApiError | DecodeError>
@@ -536,6 +548,35 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       return yield* parseResponse(response, Services)
     })
 
+    const listConsoleReplicas = (serviceId: string) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .get(url(`/v1/services/${serviceId}/console/replicas`), {
+            headers: authHeaders(),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, ConsoleReplicas)
+      })
+
+    const createConsoleTicket = (
+      serviceId: string,
+      replicaIndex: number,
+      cols: number,
+      rows: number,
+    ) =>
+      Effect.gen(function* () {
+        const response = yield* http
+          .post(url(`/v1/services/${serviceId}/console/tickets`), {
+            headers: {
+              ...authHeaders(),
+              'content-type': 'application/json',
+            },
+            body: jsonBody({ replica_index: replicaIndex, cols, rows }),
+          })
+          .pipe(Effect.mapError(httpError))
+        return yield* parseResponse(response, ConsoleTicket)
+      })
+
     const getServiceDeployments = (id: string) =>
       Effect.gen(function* () {
         const response = yield* http
@@ -933,6 +974,8 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       addMember,
       removeMember,
       listServices,
+      listConsoleReplicas,
+      createConsoleTicket,
       getService,
       deleteService,
       getServiceDeployments,
