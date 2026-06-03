@@ -2,6 +2,7 @@ import { Link } from '@tanstack/react-router'
 import { useState } from 'react'
 import {
   Activity,
+  Boxes,
   Container,
   FolderTree,
   HardDrive,
@@ -41,6 +42,7 @@ const SETTINGS: ReadonlyArray<NavItem> = [
   { to: '/settings/sessions', label: 'Sessions', icon: Terminal },
   { to: '/settings/users', label: 'Users', icon: Users, superAdmin: true },
   { to: '/settings/oci-cache', label: 'Layer cache', icon: HardDrive, superAdmin: true },
+  { to: '/settings/hosted-registry', label: 'Hosted registry', icon: Boxes },
 ]
 
 const STORAGE_KEY = 'sidebar-collapsed'

@@ -22,6 +22,7 @@ import { Route as SettingsUsersRouteImport } from './routes/settings/users'
 import { Route as SettingsTokensRouteImport } from './routes/settings/tokens'
 import { Route as SettingsSessionsRouteImport } from './routes/settings/sessions'
 import { Route as SettingsOciCacheRouteImport } from './routes/settings/oci-cache'
+import { Route as SettingsHostedRegistryRouteImport } from './routes/settings/hosted-registry'
 import { Route as ServicesServiceIdRouteImport } from './routes/services/$serviceId'
 import { Route as ProjectsProjectIdRouteImport } from './routes/projects/$projectId'
 import { Route as JobsJobIdRouteImport } from './routes/jobs/$jobId'
@@ -92,6 +93,11 @@ const SettingsOciCacheRoute = SettingsOciCacheRouteImport.update({
   path: '/settings/oci-cache',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SettingsHostedRegistryRoute = SettingsHostedRegistryRouteImport.update({
+  id: '/settings/hosted-registry',
+  path: '/settings/hosted-registry',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ServicesServiceIdRoute = ServicesServiceIdRouteImport.update({
   id: '/services/$serviceId',
   path: '/services/$serviceId',
@@ -124,6 +130,7 @@ export interface FileRoutesByFullPath {
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
+  '/settings/hosted-registry': typeof SettingsHostedRegistryRoute
   '/settings/oci-cache': typeof SettingsOciCacheRoute
   '/settings/sessions': typeof SettingsSessionsRoute
   '/settings/tokens': typeof SettingsTokensRoute
@@ -143,6 +150,7 @@ export interface FileRoutesByTo {
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
+  '/settings/hosted-registry': typeof SettingsHostedRegistryRoute
   '/settings/oci-cache': typeof SettingsOciCacheRoute
   '/settings/sessions': typeof SettingsSessionsRoute
   '/settings/tokens': typeof SettingsTokensRoute
@@ -163,6 +171,7 @@ export interface FileRoutesById {
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/services/$serviceId': typeof ServicesServiceIdRoute
+  '/settings/hosted-registry': typeof SettingsHostedRegistryRoute
   '/settings/oci-cache': typeof SettingsOciCacheRoute
   '/settings/sessions': typeof SettingsSessionsRoute
   '/settings/tokens': typeof SettingsTokensRoute
@@ -184,6 +193,7 @@ export interface FileRouteTypes {
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
+    | '/settings/hosted-registry'
     | '/settings/oci-cache'
     | '/settings/sessions'
     | '/settings/tokens'
@@ -203,6 +213,7 @@ export interface FileRouteTypes {
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
+    | '/settings/hosted-registry'
     | '/settings/oci-cache'
     | '/settings/sessions'
     | '/settings/tokens'
@@ -222,6 +233,7 @@ export interface FileRouteTypes {
     | '/jobs/$jobId'
     | '/projects/$projectId'
     | '/services/$serviceId'
+    | '/settings/hosted-registry'
     | '/settings/oci-cache'
     | '/settings/sessions'
     | '/settings/tokens'
@@ -242,6 +254,7 @@ export interface RootRouteChildren {
   JobsJobIdRoute: typeof JobsJobIdRoute
   ProjectsProjectIdRoute: typeof ProjectsProjectIdRoute
   ServicesServiceIdRoute: typeof ServicesServiceIdRoute
+  SettingsHostedRegistryRoute: typeof SettingsHostedRegistryRoute
   SettingsOciCacheRoute: typeof SettingsOciCacheRoute
   SettingsSessionsRoute: typeof SettingsSessionsRoute
   SettingsTokensRoute: typeof SettingsTokensRoute
@@ -344,6 +357,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsOciCacheRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/settings/hosted-registry': {
+      id: '/settings/hosted-registry'
+      path: '/settings/hosted-registry'
+      fullPath: '/settings/hosted-registry'
+      preLoaderRoute: typeof SettingsHostedRegistryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/services/$serviceId': {
       id: '/services/$serviceId'
       path: '/services/$serviceId'
@@ -386,6 +406,7 @@ const rootRouteChildren: RootRouteChildren = {
   JobsJobIdRoute: JobsJobIdRoute,
   ProjectsProjectIdRoute: ProjectsProjectIdRoute,
   ServicesServiceIdRoute: ServicesServiceIdRoute,
+  SettingsHostedRegistryRoute: SettingsHostedRegistryRoute,
   SettingsOciCacheRoute: SettingsOciCacheRoute,
   SettingsSessionsRoute: SettingsSessionsRoute,
   SettingsTokensRoute: SettingsTokensRoute,
