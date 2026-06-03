@@ -47,6 +47,8 @@ pub enum Commands {
     Update(update::UpdateArgs),
     /// Open an interactive shell inside a running service replica.
     Console(client::console::ConsoleArgs),
+    /// Authenticate to a remote Denia instance and save credentials locally.
+    Auth(client::auth::AuthArgs),
 }
 
 /// Entry point called from main.rs. Subcommand variants return placeholder
@@ -72,6 +74,10 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
             // only for this path, like the daemon arm below.
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(crate::cli::client::console::run(args))
+        }
+        Some(Commands::Auth(args)) => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(crate::cli::client::auth::run(args))
         }
         None => {
             // Daemon is async; build a runtime here so non-daemon subcommands
