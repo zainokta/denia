@@ -1,6 +1,7 @@
 //! Subcommand surface for the denia binary. See ADR-025 + spec
 //! 2026-05-28-denia-binary-subcommands-design.md.
 
+pub mod client;
 pub mod common;
 pub mod doctor;
 pub mod rotate_token;
