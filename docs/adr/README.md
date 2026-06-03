@@ -49,6 +49,7 @@ Each ADR should include:
 | [029](029-self-update-from-github-release.md) | Self-Update From Signed GitHub Release Binaries | Accepted | 2026-06-01 |
 | [031](031-hosted-oci-registry.md) | Hosted OCI Registry | Accepted | 2026-06-03 |
 | [033](033-service-console.md) | Service Console | Accepted | 2026-06-03 |
+| [034](034-control-domain-ingress.md) | Control Domain Over Ingress | Accepted | 2026-06-03 |
 
 ## Contributing
 
