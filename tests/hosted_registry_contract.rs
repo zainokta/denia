@@ -3,10 +3,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use denia::app::{AppState, build_router};
 use denia::config::AppConfig;
-use denia::domain::{HealthCheck, ServiceConfig, ServiceSource};
 use denia::domain::service::ExternalImageSource;
+use denia::domain::{HealthCheck, ServiceConfig, ServiceSource};
 use denia::state::SqliteStore;
-use hex;
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
@@ -108,7 +107,9 @@ async fn upload_lifecycle() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     assert_eq!(body.as_ref(), payload.as_slice());
 }
 
@@ -137,7 +138,11 @@ async fn manifest_roundtrip() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
     assert_eq!(
-        resp.headers().get("docker-content-digest").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("docker-content-digest")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         digest
     );
 
@@ -156,10 +161,16 @@ async fn manifest_roundtrip() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
-        resp.headers().get("content-type").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         media_type
     );
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     assert_eq!(body.as_ref(), manifest.as_slice());
 
     // GET by digest -> 200, same bytes
@@ -175,7 +186,9 @@ async fn manifest_roundtrip() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     assert_eq!(body.as_ref(), manifest.as_slice());
 }
 

@@ -14,7 +14,7 @@ use axum::{
     Router,
     body::Bytes,
     extract::{Path, Query, State},
-    http::{StatusCode, header, HeaderName, HeaderValue},
+    http::{HeaderName, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
 };
@@ -84,9 +84,10 @@ fn resolve_repo(
         .find(|s| s.project_id == proj.id && s.name == service)
         .ok_or_else(|| ApiError::NotFound("unknown service".to_string()))?;
     ensure_role(state, principal, proj.id, min)?;
-    let repo = state
-        .registry
-        .ensure_repository(proj.id, svc.id, &format!("{project}/{service}"))?;
+    let repo =
+        state
+            .registry
+            .ensure_repository(proj.id, svc.id, &format!("{project}/{service}"))?;
     Ok(repo)
 }
 
@@ -167,7 +168,9 @@ async fn put_manifest(
     let dg = digest.clone();
     let bytes = body.to_vec();
     let size = blocking(move || storage.put_content(&dg, &bytes)).await?;
-    state.registry.put_manifest(repo.id, &digest, &media_type, size)?;
+    state
+        .registry
+        .put_manifest(repo.id, &digest, &media_type, size)?;
     if !is_digest_reference(&reference) {
         state.registry.put_tag(repo.id, &reference, &digest)?;
     }
@@ -233,8 +236,7 @@ async fn head_blob(
             );
             h.insert(
                 HeaderName::from_static("docker-content-digest"),
-                HeaderValue::from_str(&digest)
-                    .map_err(|_| ApiError::Conflict("header".into()))?,
+                HeaderValue::from_str(&digest).map_err(|_| ApiError::Conflict("header".into()))?,
             );
             Ok(resp)
         }
@@ -251,7 +253,9 @@ async fn start_upload(
     let upload_id = Uuid::now_v7();
     let storage = state.registry_storage.clone();
     let data_path = blocking(move || storage.create_upload(upload_id)).await?;
-    state.registry.create_upload(upload_id, repo.id, &data_path.to_string_lossy())?;
+    state
+        .registry
+        .create_upload(upload_id, repo.id, &data_path.to_string_lossy())?;
     let location = format!("/v2/{project}/{service}/blobs/uploads/{upload_id}");
     let mut resp = StatusCode::ACCEPTED.into_response();
     let h = resp.headers_mut();
