@@ -6,6 +6,7 @@ import {
   AccessEntries,
   AccessEntry,
   ApiToken,
+  ApiTokenSecret,
   ConsoleReplica,
   ConsoleReplicas,
   ConsoleTicket,
@@ -107,7 +108,7 @@ export class ApiClient extends Context.Service<
     >
     readonly createApiToken: (
       name: string,
-    ) => Effect.Effect<ApiToken, ApiError | DecodeError>
+    ) => Effect.Effect<ApiTokenSecret, ApiError | DecodeError>
     readonly deleteApiToken: (id: string) => Effect.Effect<void, ApiError>
     readonly listMembers: (
       projectId: string,
@@ -496,7 +497,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
             body: jsonBody({ name }),
           })
           .pipe(Effect.mapError(httpError))
-        return yield* parseResponse(response, ApiToken)
+        return yield* parseResponse(response, ApiTokenSecret)
       })
 
     const deleteApiToken = (id: string) =>
