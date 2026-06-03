@@ -48,3 +48,9 @@ impl std::fmt::Debug for RuntimeConsoleSession {
 pub trait ConsolePty: AsyncRead + AsyncWrite + Unpin + Send {
     fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()>;
 }
+
+impl ConsolePty for crate::syscall::pty::PtyMaster {
+    fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()> {
+        crate::syscall::pty::PtyMaster::resize(self, cols, rows)
+    }
+}

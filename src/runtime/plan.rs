@@ -49,7 +49,19 @@ pub(crate) struct TrackedChild {
     pub(crate) plan: LinuxRuntimePlan,
 }
 
-#[derive(Debug)]
+impl TrackedChild {
+    /// Snapshot of the tracked child for read-only use (console attach). The
+    /// original entry stays in the runtime's `children` map; the console only
+    /// needs the target pid, cgroup, and rootfs/namespace plan.
+    pub(crate) fn clone_for_console(&self) -> Self {
+        Self {
+            process: self.process.clone(),
+            plan: self.plan.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum TrackedProcess {
     NativePid(u32),
 }
