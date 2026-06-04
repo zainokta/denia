@@ -544,44 +544,56 @@ async fn axum_router_lists_registered_credentials_for_admin() {
     let initial: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
     assert!(initial.is_empty());
 
-    // Register one git credential + one registry credential.
-    for (kind_path, payload) in [
-        (
-            "/v1/credentials/git",
-            serde_json::json!({
-                "name": "git-main",
-                "kind": "SshDeployKey",
-                "secret_ref": "git-main",
-            }),
-        ),
-        (
-            "/v1/credentials/registry",
-            serde_json::json!({
-                "name": "ghcr-token",
-                "kind": "RegistryToken",
-                "secret_ref": "ghcr-token",
-            }),
-        ),
-    ] {
-        let response = app
-            .clone()
-            .oneshot(
-                http::Request::builder()
-                    .method(http::Method::POST)
-                    .uri(kind_path)
-                    .header(http::header::AUTHORIZATION, "Bearer test-token")
-                    .header(http::header::CONTENT_TYPE, "application/json")
-                    .body(axum::body::Body::from(
-                        serde_json::to_vec(&payload).unwrap(),
-                    ))
+    // Register one git (SSH deploy key) credential. The legacy
+    // `/v1/credentials/registry` route is removed (ADR-021): registry creds are
+    // encrypted by the control plane on the registry CRUD path, not wired via an
+    // operator-managed secret_ref here.
+    let git_response = app
+        .clone()
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri("/v1/credentials/git")
+                .header(http::header::AUTHORIZATION, "Bearer test-token")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "name": "git-main",
+                        "kind": "SshDeployKey",
+                        "secret_ref": "git-main",
+                    }))
                     .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), http::StatusCode::OK);
-    }
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(git_response.status(), http::StatusCode::OK);
 
-    // List returns both, name-sorted.
+    // A registry kind on the git route is now rejected with 400 (ADR-021).
+    let rejected = app
+        .clone()
+        .oneshot(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri("/v1/credentials/git")
+                .header(http::header::AUTHORIZATION, "Bearer test-token")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "name": "ghcr-token",
+                        "kind": "RegistryToken",
+                        "secret_ref": "ghcr-token",
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), http::StatusCode::BAD_REQUEST);
+
+    // List returns only the git credential.
     let listed = app
         .oneshot(
             http::Request::builder()
@@ -598,18 +610,9 @@ async fn axum_router_lists_registered_credentials_for_admin() {
         .await
         .unwrap();
     let credentials: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(credentials.len(), 2);
-    let names: Vec<&str> = credentials
-        .iter()
-        .map(|c| c["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(names, vec!["ghcr-token", "git-main"]);
-    let kinds: Vec<&str> = credentials
-        .iter()
-        .map(|c| c["kind"].as_str().unwrap())
-        .collect();
-    assert!(kinds.contains(&"SshDeployKey"));
-    assert!(kinds.contains(&"RegistryToken"));
+    assert_eq!(credentials.len(), 1);
+    assert_eq!(credentials[0]["name"].as_str().unwrap(), "git-main");
+    assert_eq!(credentials[0]["kind"].as_str().unwrap(), "SshDeployKey");
 }
 
 #[tokio::test]
