@@ -19,6 +19,9 @@ Split the installer along the build/provisioning seam:
 - Provisioning refuses symlinked config/data path components before applying
   chmod/chown, and secret/config writes use same-directory random temp files
   before atomic persist.
+- `install.sh` installs POSIX ACL tooling (`setfacl`), and `denia setup`
+  uses it to grant the `denia` system user execute-only traversal through the
+  operator home/config parents while keeping the operator home private.
 
 The systemd unit content + TOML config schema are emitted from Rust templates embedded via `include_str!`, so changes track the binary version. `denia setup` is idempotent: re-run keeps keys + config, refreshes the unit.
 The generated management listener binds `127.0.0.1:7180` by default; operators

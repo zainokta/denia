@@ -174,7 +174,10 @@ Production installs use a two-step flow.
 **Step 1 — Build and install the binary:**
 
 ```bash
-sudo ./install.sh
+sudo \
+  DENIA_RUSTUP_SHA256=<known-good sha256 for https://sh.rustup.rs> \
+  DENIA_NODESOURCE_SETUP_SHA256=<known-good sha256 for https://deb.nodesource.com/setup_22.x> \
+  ./install.sh
 ```
 
 `install.sh` must be run via **sudo from a regular user account** (not directly
@@ -182,6 +185,21 @@ as root). It runs preflight checks (OS/arch, glibc ≥ 2.39, cgroup v2, user
 namespaces, free `:80`/`:443`), installs OS dependencies, sets up Rust (via
 `rustup`) and Node, builds the release binary with the embedded SPA, and
 installs it to `/usr/local/bin/denia`.
+
+On `apt` systems, Denia also fetches the NodeSource setup script to install
+Node 22 when it is not already present. Both downloaded scripts are verified
+before running. To get the current hashes from a trusted network path:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSfL https://sh.rustup.rs -o rustup-init.sh
+sha256sum rustup-init.sh
+curl --proto '=https' --tlsv1.2 -fsSL https://deb.nodesource.com/setup_22.x -o nodesource-setup_22.x
+sha256sum nodesource-setup_22.x
+sudo \
+  DENIA_RUSTUP_SHA256=<rustup sha256> \
+  DENIA_NODESOURCE_SETUP_SHA256=<nodesource sha256> \
+  ./install.sh
+```
 
 - `--dry-run` previews every command without changing anything.
 - `--skip-build` reuses an existing `target/release/denia`.
