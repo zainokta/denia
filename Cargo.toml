@@ -1,6 +1,6 @@
 [package]
 name = "denia"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "Docker-free single-node PaaS with Denia-owned Linux runtime isolation"
 license = "Apache-2.0"
