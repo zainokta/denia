@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use thiserror::Error;
 
+use crate::ingress::l4::PortRange;
+
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     use sha2::Sha256;
     const BLOCK_SIZE: usize = 64;
@@ -64,6 +66,8 @@ pub struct AppConfig {
     pub acme_email: Option<String>,
     pub http_port: u16,
     pub https_port: u16,
+    pub tcp_port_range: PortRange,
+    pub udp_port_range: PortRange,
     pub autoscale_interval_s: u64,
     pub autoscale_headroom_cpu_millis: u32,
     pub autoscale_headroom_mem_bytes: u64,
@@ -235,6 +239,8 @@ pub struct FileConfig {
     pub acme_email: Option<String>,
     pub http_port: Option<u16>,
     pub https_port: Option<u16>,
+    pub tcp_port_range: Option<String>,
+    pub udp_port_range: Option<String>,
     pub userns_base: Option<u32>,
     pub userns_size: Option<u32>,
     pub control_domain: Option<String>,
@@ -315,6 +321,8 @@ fn default_file_template() -> FileConfig {
         acme_email: None,
         http_port: Some(80),
         https_port: Some(443),
+        tcp_port_range: Some(DEFAULT_TCP_PORT_RANGE.to_string()),
+        udp_port_range: Some(DEFAULT_UDP_PORT_RANGE.to_string()),
         userns_base: Some(100_000),
         userns_size: Some(65_536),
         control_domain: None,
@@ -407,6 +415,20 @@ pub enum ConfigError {
     ConfigFileSerialize(String),
     #[error("invalid DENIA_CONTROL_DOMAIN: {0}")]
     InvalidControlDomain(String),
+    #[error("invalid {name}: {value}")]
+    InvalidPortRange { name: &'static str, value: String },
+}
+
+pub const DEFAULT_TCP_PORT_RANGE: &str = "20000-29999";
+pub const DEFAULT_UDP_PORT_RANGE: &str = "30000-39999";
+
+fn parse_port_range_config(
+    name: &'static str,
+    value: Option<String>,
+    default: &'static str,
+) -> Result<PortRange, ConfigError> {
+    let raw = value.unwrap_or_else(|| default.to_string());
+    PortRange::parse(&raw).map_err(|_| ConfigError::InvalidPortRange { name, value: raw })
 }
 
 impl AppConfig {
@@ -490,6 +512,20 @@ impl AppConfig {
             .and_then(|v| v.parse().ok())
             .or(file_cfg.https_port)
             .unwrap_or(443);
+        let tcp_port_range = parse_port_range_config(
+            "DENIA_TCP_PORT_RANGE",
+            env::var("DENIA_TCP_PORT_RANGE")
+                .ok()
+                .or_else(|| file_cfg.tcp_port_range.clone()),
+            DEFAULT_TCP_PORT_RANGE,
+        )?;
+        let udp_port_range = parse_port_range_config(
+            "DENIA_UDP_PORT_RANGE",
+            env::var("DENIA_UDP_PORT_RANGE")
+                .ok()
+                .or_else(|| file_cfg.udp_port_range.clone()),
+            DEFAULT_UDP_PORT_RANGE,
+        )?;
         let userns_base = env::var("DENIA_USERNS_BASE")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -668,6 +704,8 @@ impl AppConfig {
             acme_email,
             http_port,
             https_port,
+            tcp_port_range,
+            udp_port_range,
             autoscale_interval_s,
             autoscale_headroom_cpu_millis,
             autoscale_headroom_mem_bytes,
@@ -719,6 +757,8 @@ impl AppConfig {
             acme_email: None,
             http_port: 80,
             https_port: 443,
+            tcp_port_range: PortRange::parse(DEFAULT_TCP_PORT_RANGE).expect("default tcp range"),
+            udp_port_range: PortRange::parse(DEFAULT_UDP_PORT_RANGE).expect("default udp range"),
             autoscale_interval_s: 15,
             autoscale_headroom_cpu_millis: 1000,
             autoscale_headroom_mem_bytes: 536870912,
@@ -767,6 +807,8 @@ mod ingress_tls_tests {
         let c = base();
         assert_eq!(c.http_port, 80);
         assert_eq!(c.https_port, 443);
+        assert_eq!(c.tcp_port_range, PortRange::new(20000, 29999));
+        assert_eq!(c.udp_port_range, PortRange::new(30000, 39999));
         assert!(c.acme_email.is_none());
     }
 
@@ -990,6 +1032,14 @@ mod tests {
         let raw = std::fs::read_to_string(&path).expect("read created config");
         let file_cfg: FileConfig = toml::from_str(&raw).expect("parse created config");
         let token = file_cfg.admin_token.expect("token written");
+        assert_eq!(
+            file_cfg.tcp_port_range.as_deref(),
+            Some(DEFAULT_TCP_PORT_RANGE)
+        );
+        assert_eq!(
+            file_cfg.udp_port_range.as_deref(),
+            Some(DEFAULT_UDP_PORT_RANGE)
+        );
         assert_eq!(token.len(), 64);
         assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
         // The hash in AppConfig is derived from this token + a random HMAC key,
@@ -1013,6 +1063,8 @@ mod tests {
 admin_token = "file-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 http_port = 8080
 control_tls = true
+tcp_port_range = "21000-21002"
+udp_port_range = "31000-31002"
 "#,
         )
         .unwrap();
@@ -1022,6 +1074,8 @@ control_tls = true
             std::env::remove_var("DENIA_ADMIN_TOKEN");
             std::env::remove_var("DENIA_HTTP_PORT");
             std::env::remove_var("DENIA_CONTROL_TLS");
+            std::env::remove_var("DENIA_TCP_PORT_RANGE");
+            std::env::remove_var("DENIA_UDP_PORT_RANGE");
             std::env::remove_var("DENIA_AGE_RECIPIENT");
         }
 
@@ -1029,13 +1083,36 @@ control_tls = true
         let cfg = AppConfig::from_env().expect("config from env");
         assert_eq!(cfg.http_port, 8080);
         assert!(cfg.control_tls);
+        assert_eq!(cfg.tcp_port_range, PortRange::new(21000, 21002));
+        assert_eq!(cfg.udp_port_range, PortRange::new(31000, 31002));
 
         // Env wins when set.
         let _http = EnvGuard::set("DENIA_HTTP_PORT", "9090");
         let _tls = EnvGuard::set("DENIA_CONTROL_TLS", "false");
+        let _tcp = EnvGuard::set("DENIA_TCP_PORT_RANGE", "22000-22001");
+        let _udp = EnvGuard::set("DENIA_UDP_PORT_RANGE", "32000-32001");
         let cfg = AppConfig::from_env().expect("config from env");
         assert_eq!(cfg.http_port, 9090);
         assert!(!cfg.control_tls);
+        assert_eq!(cfg.tcp_port_range, PortRange::new(22000, 22001));
+        assert_eq!(cfg.udp_port_range, PortRange::new(32000, 32001));
+    }
+
+    #[test]
+    fn invalid_l4_port_range_is_rejected() {
+        let _lock = FROM_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_cfg_dir, _cfg_file) = isolated_config_file();
+        let _admin = EnvGuard::set("DENIA_ADMIN_TOKEN", "x".repeat(64));
+        let _key_file = EnvGuard::set("DENIA_AGE_KEY_FILE", "/nonexistent/denia-test/age.key");
+        let _tcp = EnvGuard::set("DENIA_TCP_PORT_RANGE", "30000-20000");
+
+        assert!(matches!(
+            AppConfig::from_env(),
+            Err(ConfigError::InvalidPortRange {
+                name: "DENIA_TCP_PORT_RANGE",
+                ..
+            })
+        ));
     }
 
     struct EnvGuard {
