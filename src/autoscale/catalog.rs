@@ -41,7 +41,8 @@ impl RepoServiceCatalog {
         // misconfiguration the operator should be able to see: an autoscaled
         // service that silently vanishes from the controller reports
         // replica_count=0 with no explanation.
-        let Some(deployment_id) = self.deployments.promoted_deployment(svc.id).ok().flatten() else {
+        let Some(deployment_id) = self.deployments.promoted_deployment(svc.id).ok().flatten()
+        else {
             tracing::warn!(
                 service_id = %svc.id,
                 service = %svc.name,

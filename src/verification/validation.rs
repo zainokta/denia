@@ -94,6 +94,48 @@ mod tests {
         assert!(validate_hostname("trailing-.example.com").is_err());
     }
 
+    /// Review LOW — two hostname validators coexist: `validate_hostname`
+    /// (storage / domain CRUD) and `ingress::validate_domain` (routing / SNI /
+    /// ACME). The security surface is covered because routing re-validates, but
+    /// a divergence could let a domain be STORED that can never ROUTE. The
+    /// load-bearing invariant is one-directional: every hostname accepted by
+    /// `validate_hostname` MUST also be accepted by `validate_domain` (the
+    /// reverse is not required — routing may be more permissive). This asserts
+    /// that direction over a representative corpus so a future tightening of
+    /// `validate_domain` that breaks it fails the build instead of silently
+    /// stranding stored domains.
+    #[test]
+    fn validate_hostname_accepted_implies_validate_domain_accepted() {
+        use crate::ingress::pingora::state::validate_domain;
+        let corpus = [
+            "app.example.com",
+            "a.b.co",
+            "api-1.svc.example.com",
+            "xn--mnchen-3ya.de",
+            "a.example.com",
+            // long-but-valid label (63 chars) + tld
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com",
+            // uppercase: validate_hostname rejects it, so it never reaches here,
+            // but include the lowercased form it would store.
+            "deep.nested.sub.domain.example.com",
+            // invalid inputs (rejected by validate_hostname) are skipped below.
+            "APP.example.com",
+            "localhost",
+            "127.0.0.1",
+            "example.com:8080",
+            "ev`il.com",
+        ];
+        for input in corpus {
+            if let Ok(stored) = validate_hostname(input) {
+                assert!(
+                    validate_domain(&stored).is_ok(),
+                    "validate_hostname accepted {input:?} (stored as {stored:?}) but \
+                     validate_domain rejected it — a stored domain that can never route"
+                );
+            }
+        }
+    }
+
     #[test]
     fn generate_token_is_64_hex() {
         let t = generate_token();

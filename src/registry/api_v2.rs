@@ -34,9 +34,7 @@ pub fn router() -> Router<AppState> {
         .route("/{project}/{service}/tags/list", get(list_tags))
         .route(
             "/{project}/{service}/manifests/{reference}",
-            get(get_manifest)
-                .put(put_manifest)
-                .delete(delete_manifest),
+            get(get_manifest).put(put_manifest).delete(delete_manifest),
         )
         .route(
             "/{project}/{service}/blobs/{digest}",

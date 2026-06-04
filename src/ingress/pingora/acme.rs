@@ -402,15 +402,25 @@ pub fn needs_renewal(
 }
 
 /// Select the SNI names in `store` whose leaf cert is within the renewal window
-/// and should be re-ordered. Skips entries whose `notAfter` cannot be evaluated.
+/// and should be re-ordered. An entry whose `notAfter` cannot be evaluated is
+/// logged (so a stuck cert is visible) and skipped rather than silently ignored
+/// (review improvement). No secret material is logged — only the SNI name.
 pub fn select_renewals(store: &CertStore, window_days: u32) -> Vec<String> {
     let mut out = Vec::new();
     for sni in store.sni_names() {
-        if let Some(cert) = store.get(&sni)
-            && let Some(leaf) = cert.chain.first()
-            && matches!(needs_renewal(leaf.not_after(), window_days), Ok(true))
-        {
-            out.push(sni);
+        let Some(cert) = store.get(&sni) else {
+            continue;
+        };
+        let Some(leaf) = cert.chain.first() else {
+            eprintln!("renewal scan: cert for {sni} has an empty chain; skipping");
+            continue;
+        };
+        match needs_renewal(leaf.not_after(), window_days) {
+            Ok(true) => out.push(sni),
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("renewal scan: cannot evaluate notAfter for {sni}: {e}; skipping");
+            }
         }
     }
     out
