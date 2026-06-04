@@ -26,6 +26,8 @@ Service names are unique within a project (`UNIQUE(project_id, name)`). The `ser
 
 A `schema_version` table tracks the applied migration version, enabling ordered, idempotent schema evolution. Each migration step runs only if `current_version < step_version`, inside a single transaction.
 
+Concretely (`src/repo/sqlite/pool.rs::run_migrations`): every `if current < N { … }` body opens its own `rusqlite` transaction, performs the schema changes, writes the `schema_version` bump, and commits — so a crash, `SQLITE_BUSY`, or I/O error mid-step rolls the whole step back and leaves `schema_version` unchanged. The next boot re-runs the entire step from a clean slate, which makes the non-idempotent steps (step 2's `DROP`+`RENAME`, steps 9/10's `ADD COLUMN`) crash-safe. The `schema_version` table is constrained to a single row (`id INTEGER PRIMARY KEY CHECK (id = 1)`); legacy databases created before this CHECK are collapsed to the canonical single-row form on first boot, carrying forward the highest observed version.
+
 ### Runtime Keyed By Service ID
 
 `RuntimeStartRequest` gains `service_id: Uuid`. Host paths (cgroup, socket, deployment dirs) are derived from the globally-unique `service_id` instead of `service_name`, preventing collisions across projects.
