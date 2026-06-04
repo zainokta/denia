@@ -90,11 +90,18 @@ export function LogStream({
           </button>
         ) : null}
       </div>
+      {/* A small polite status region announces stream state + line count to
+          assistive tech, instead of aria-live spamming the whole buffer. */}
+      <p className="sr-only" role="status" aria-live="polite">
+        {error
+          ? `Log stream error: ${error}`
+          : `${meta.label}, ${lines.length} line${lines.length === 1 ? '' : 's'}`}
+      </p>
       <div
         ref={bodyRef}
         className="logstream-body"
         onScroll={onScroll}
-        aria-live="polite"
+        role="log"
         aria-label={title ?? 'Logs'}
       >
         {error ? (

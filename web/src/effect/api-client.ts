@@ -24,9 +24,7 @@ import {
   Me,
   MetricSnapshot,
   Metrics,
-  Node,
   NodeSnapshot,
-  Nodes,
   HostedRegistryStatus,
   HostedRepository,
   OciCacheGcRun,
@@ -60,10 +58,6 @@ import {
 export class ApiClient extends Context.Service<
   ApiClient,
   {
-    readonly listNodes: Effect.Effect<
-      ReadonlyArray<Node>,
-      ApiError | DecodeError
-    >
     readonly login: (
       username: string,
       password: string,
@@ -148,9 +142,6 @@ export class ApiClient extends Context.Service<
     readonly getDeployment: (
       id: string,
     ) => Effect.Effect<Deployment, ApiError | DecodeError>
-    readonly getServiceLogs: (
-      id: string,
-    ) => Effect.Effect<ReadonlyArray<string>, ApiError | DecodeError>
     readonly getServiceMetrics: (
       id: string,
     ) => Effect.Effect<
@@ -353,14 +344,6 @@ export const ApiClientLive = Layer.effect(ApiClient)(
     }
 
     const url = (path: string) => `${config.baseUrl}${path}`
-
-    const listNodes = Effect.gen(function* () {
-      const headers = authHeaders()
-      const response = yield* http
-        .get(url('/v1/nodes'), { headers })
-        .pipe(Effect.mapError(httpError))
-      return yield* parseResponse(response, Nodes)
-    })
 
     const login = (username: string, password: string) =>
       Effect.gen(function* () {
@@ -596,16 +579,6 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         return yield* parseResponse(response, Deployment)
       })
 
-    const getServiceLogs = (id: string) =>
-      Effect.gen(function* () {
-        const response = yield* http
-          .get(url(`/v1/services/${id}/logs`), {
-            headers: authHeaders(),
-          })
-          .pipe(Effect.mapError(httpError))
-        return yield* parseResponse(response, Schema.Array(Schema.String))
-      })
-
     const getServiceMetrics = (id: string) =>
       Effect.gen(function* () {
         const response = yield* http
@@ -619,6 +592,12 @@ export const ApiClientLive = Layer.effect(ApiClient)(
     const createDeployment = (service: Service) =>
       Effect.gen(function* () {
         const src = service.source
+        // For external_image the backend re-resolves the full image reference
+        // from the SERVICE's stored source (registry + image_ref), ignoring the
+        // request's `image` field (src/deploy/coordinator.rs). So a registry+ref
+        // service legitimately sends the (possibly empty) `image`; we still pass
+        // `image_ref` when present so direct-image and registry-ref redeploys
+        // both carry a meaningful value.
         const body =
           src.type === 'git'
             ? {
@@ -630,7 +609,7 @@ export const ApiClientLive = Layer.effect(ApiClient)(
             : {
                 source: 'external_image',
                 service_id: service.id,
-                image: src.image,
+                image: src.image || src.image_ref || '',
               }
         const response = yield* http
           .post(url('/v1/deployments'), {
@@ -955,7 +934,6 @@ export const ApiClientLive = Layer.effect(ApiClient)(
     })
 
     return {
-      listNodes,
       login,
       logout,
       me,
@@ -981,7 +959,6 @@ export const ApiClientLive = Layer.effect(ApiClient)(
       deleteService,
       getServiceDeployments,
       getDeployment,
-      getServiceLogs,
       getServiceMetrics,
       createDeployment,
       stopService,

@@ -1,45 +1,37 @@
 import type { CpuCounters } from '../effect/schema'
 
-export function cpuBusyDelta(prev: CpuCounters, curr: CpuCounters): {
-  busyDelta: number
-  totalDelta: number
+// Split a cgroup/procfs CPU jiffies counter into busy vs total. `iowait` counts
+// as busy here (the CPU is occupied servicing I/O), matching the node-gauge
+// derivation used on the dashboard and observability routes.
+export function cpuBusyTotal(cpu: CpuCounters): {
+  busy: number
+  total: number
 } {
-  const prevTotal =
-    prev.user_jiffies +
-    prev.nice_jiffies +
-    prev.system_jiffies +
-    prev.idle_jiffies +
-    prev.iowait_jiffies
-  const currTotal =
-    curr.user_jiffies +
-    curr.nice_jiffies +
-    curr.system_jiffies +
-    curr.idle_jiffies +
-    curr.iowait_jiffies
-  const prevBusy =
-    prevTotal - prev.idle_jiffies - prev.iowait_jiffies
-  const currBusy =
-    currTotal - curr.idle_jiffies - curr.iowait_jiffies
-  return {
-    busyDelta: Math.max(0, currBusy - prevBusy),
-    totalDelta: Math.max(0, currTotal - prevTotal),
-  }
+  const total =
+    cpu.user_jiffies +
+    cpu.nice_jiffies +
+    cpu.system_jiffies +
+    cpu.idle_jiffies +
+    cpu.iowait_jiffies
+  const busy =
+    cpu.user_jiffies + cpu.nice_jiffies + cpu.system_jiffies + cpu.iowait_jiffies
+  return { busy, total }
 }
 
+// Instantaneous CPU% from the delta between two cumulative snapshots. The raw
+// counters are monotonic since boot, so a single snapshot says nothing — the
+// percentage only exists between two readings. Clamped to [0, 100].
+export function cpuPercentDelta(
+  prev: { busy: number; total: number },
+  curr: { busy: number; total: number },
+): number {
+  const dBusy = curr.busy - prev.busy
+  const dTotal = curr.total - prev.total
+  if (dTotal <= 0) return 0
+  return Math.max(0, Math.min(100, (dBusy / dTotal) * 100))
+}
+
+// Convenience: CPU% between two raw `CpuCounters` snapshots.
 export function cpuPercent(prev: CpuCounters, curr: CpuCounters): number {
-  const { busyDelta, totalDelta } = cpuBusyDelta(prev, curr)
-  if (totalDelta === 0) return 0
-  return Math.min(100, (busyDelta / totalDelta) * 100)
-}
-
-export function formatBytes(value: number): string {
-  if (!Number.isFinite(value)) return '—'
-  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
-  let v = value
-  let i = 0
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024
-    i += 1
-  }
-  return `${v.toFixed(v < 10 ? 2 : 1)} ${units[i]}`
+  return cpuPercentDelta(cpuBusyTotal(prev), cpuBusyTotal(curr))
 }

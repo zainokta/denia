@@ -11,6 +11,7 @@ import { EmptyState } from '#/components/EmptyState'
 import { SkeletonRows } from '#/components/Skeleton'
 import { ErrorPanel, InlineError, errorMessage } from '#/components/ErrorPanel'
 import { ConfirmButton } from '#/components/ConfirmButton'
+import { StatusBadge } from '#/components/StatusBadge'
 import { useActionToasts } from '#/components/Toast'
 import { Num } from '#/components/Num'
 import { formatBytes } from '#/lib/format'
@@ -37,6 +38,16 @@ const listMembers = (projectId: string) =>
 const listUserDirectory = Effect.gen(function* () {
   const api = yield* ApiClient
   return yield* api.listUserDirectory
+})
+
+const listServices = Effect.gen(function* () {
+  const api = yield* ApiClient
+  return yield* api.listServices
+})
+
+const listWorkloads = Effect.gen(function* () {
+  const api = yield* ApiClient
+  return yield* api.listWorkloads
 })
 
 const addMember = (projectId: string, userId: string, role: Role) =>
@@ -90,6 +101,23 @@ export function ProjectDetail() {
     queryFn: () => runQuery(listUserDirectory),
     enabled: canManage,
   })
+
+  const { data: allServices = [] } = useQuery({
+    queryKey: ['services'],
+    queryFn: () => runQuery(listServices),
+  })
+
+  const { data: workloads = [] } = useQuery({
+    queryKey: ['workloads'],
+    queryFn: () => runQuery(listWorkloads),
+    refetchInterval: 5000,
+    refetchIntervalInBackground: false,
+  })
+
+  const projectServices = allServices.filter((s) => s.project_id === projectId)
+  const statusByService = new Map(
+    workloads.map((w) => [w.service_id, w.status]),
+  )
 
   const usernameById = new Map(userDirectory.map((u) => [u.id, u.username]))
   const memberIds = new Set(members.map((m) => m.user_id))
@@ -434,6 +462,69 @@ export function ProjectDetail() {
               {addMemberError ? <InlineError message={addMemberError} /> : null}
             </form>
           ) : null}
+        </section>
+
+        {/* Services */}
+        <section>
+          <p className="kicker" style={{ marginBottom: '0.9rem' }}>
+            services <span className="text-faint tnum">{projectServices.length}</span>
+          </p>
+          {projectServices.length === 0 ? (
+            <div className="panel">
+              <EmptyState
+                icon={<Boxes size={22} />}
+                title="No services in this project"
+                hint="Services created against this project appear here with their runtime status."
+                action={
+                  <Link to="/services" className="btn">
+                    Go to services
+                  </Link>
+                }
+              />
+            </div>
+          ) : (
+            <div className="panel overflow-hidden">
+              <table className="dtable">
+                <thead>
+                  <tr>
+                    <th>service</th>
+                    <th>status</th>
+                    <th>routes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {projectServices.map((svc) => {
+                    const status = statusByService.get(svc.id)
+                    return (
+                      <tr key={svc.id}>
+                        <td>
+                          <Link
+                            to="/services/$serviceId"
+                            params={{ serviceId: svc.id }}
+                            className="font-semibold no-underline hover:underline"
+                          >
+                            {svc.name}
+                          </Link>
+                        </td>
+                        <td>
+                          {status ? (
+                            <StatusBadge status={status} />
+                          ) : (
+                            <span className="text-faint">—</span>
+                          )}
+                        </td>
+                        <td className="text-faint" style={{ fontSize: 'var(--text-label)' }}>
+                          {svc.domains.length > 0
+                            ? svc.domains.join(', ')
+                            : `:${svc.internal_port}`}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
 
         {/* Registries */}

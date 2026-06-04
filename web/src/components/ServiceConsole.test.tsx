@@ -25,7 +25,9 @@ vi.mock('@xterm/xterm', () => ({
     clear() {}
     focus() {}
     write() {}
-    onData() {}
+    onData() {
+      return { dispose() {} }
+    }
   },
 }))
 
