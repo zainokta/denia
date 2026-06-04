@@ -417,8 +417,8 @@ impl ArtifactAcquirer {
         else {
             unreachable!("staged acquisition requires an uploaded-context source");
         };
-        let upload_uuid = uuid::Uuid::parse_str(upload_id)
-            .map_err(|_| ArtifactAcquireError::InvalidUploadId)?;
+        let upload_uuid =
+            uuid::Uuid::parse_str(upload_id).map_err(|_| ArtifactAcquireError::InvalidUploadId)?;
         let staged = self
             .config
             .uploads_dir

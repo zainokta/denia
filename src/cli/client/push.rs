@@ -233,7 +233,7 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
         "service_id": service_id,
         "upload_id": up.upload_id,
         "dockerfile_path": dockerfile_rel,
-        "context_path": context_rel
+        "context_path": "."
     });
     let dep = api.create_deployment(&token, &deploy_body).await?;
     println!("Deployment {} created", dep.id);

@@ -97,6 +97,75 @@ fn push_no_follow_existing_service_succeeds() {
 }
 
 #[test]
+fn push_non_default_context_sends_archive_root_context_path() {
+    let server = MockServer::start();
+    let pid = "01900000-0000-7000-8000-000000000011";
+    let sid = "01900000-0000-7000-8000-000000000012";
+
+    let _projects = server.mock(|when, then| {
+        when.method(GET).path("/v1/projects");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(format!(r#"[{{"id":"{pid}","name":"default"}}]"#));
+    });
+
+    let _services = server.mock(|when, then| {
+        when.method(GET).path("/v1/services");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(format!(
+                r#"[{{"id":"{sid}","name":"api","project_id":"{pid}"}}]"#
+            ));
+    });
+
+    let _upload = server.mock(|when, then| {
+        when.method(POST)
+            .path(format!("/v1/services/{sid}/uploads"))
+            .header("content-type", "application/zstd");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"upload_id":"u1","expires_at":"2026-01-01T00:00:00Z"}"#);
+    });
+
+    let deploy_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/deployments")
+            .body_includes(r#""source":"upload""#)
+            .body_includes(r#""dockerfile_path":"Dockerfile""#)
+            .body_includes(r#""context_path":".""#);
+        then.status(202)
+            .header("content-type", "application/json")
+            .body(format!(
+                r#"{{"id":"d1","service_id":"{sid}","status":"Pending","created_at":"2026-01-01T00:00:00Z"}}"#
+            ));
+    });
+
+    let (dir, cfg_path) = setup_temp_dir(&server.base_url());
+    std::fs::write(
+        dir.path().join(".denia"),
+        "project = \"default\"\nservice = \"api\"\ncontext = \"app\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("app")).unwrap();
+    std::fs::write(dir.path().join("app").join("Dockerfile"), "FROM scratch\n").unwrap();
+
+    Command::cargo_bin("denia")
+        .unwrap()
+        .env("DENIA_CLIENT_CONFIG", &cfg_path)
+        .args([
+            "push",
+            "--no-follow",
+            "--path",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deployment d1 created"));
+
+    deploy_mock.assert_calls(1);
+}
+
+#[test]
 fn push_appears_in_help() {
     Command::cargo_bin("denia")
         .unwrap()
