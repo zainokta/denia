@@ -54,14 +54,33 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: actions/setup-node@v4
+      # Cache the cargo registry + target/ across runs. Cold on the first
+      # release after a 7-day GitHub cache eviction; otherwise reuses the
+      # ~1200-dep build tree (pingora/boringssl/axum) and only recompiles the
+      # denia crate. Keyed per target so x86_64 and aarch64 don't collide.
+      - uses: Swatinem/rust-cache@v2
         with:
-          node-version: "22"
+          key: ${{ matrix.target }}
 
+      # mold links the large release binary (boringssl + the embedded SPA)
+      # noticeably faster than the default bfd linker, cold or warm.
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
+
+      # corepack ships with the runner's preinstalled node, so activate pnpm
+      # before setup-node — that lets setup-node's pnpm store cache resolve.
       - name: Enable pnpm via corepack
         run: |
           corepack enable
           corepack prepare pnpm@10.25.0 --activate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
 
       # rust-embed bakes web/dist/client into the binary, so the SPA must exist
       # before cargo build (ADR-004).
@@ -72,6 +91,8 @@ jobs:
           pnpm build
 
       - name: Build release binary
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Stage artifact
