@@ -327,7 +327,11 @@ async fn service_metrics(
     // A scaled-to-zero service has no live cgroup, so the read hits ENOENT. Treat
     // that as "no metrics yet" (empty, 200) rather than a 500 — matching the
     // sibling `/v1/workloads` endpoint and the no-promoted-deployment branch above.
-    match reader.read_by_id(&service.name, service.id, deployment_id) {
+    // The cgroup read is blocking fs I/O; run it under `block_in_place` so it does
+    // not stall the async executor thread, matching the SSE log path (review 07 LOW).
+    match tokio::task::block_in_place(|| {
+        reader.read_by_id(&service.name, service.id, deployment_id)
+    }) {
         Ok(snapshot) => Ok(Json(vec![snapshot])),
         Err(_) => Ok(Json(Vec::new())),
     }

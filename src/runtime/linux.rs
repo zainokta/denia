@@ -31,7 +31,9 @@ use crate::runtime::validation::{
 use crate::syscall::SyscallError;
 use crate::syscall::caps;
 use crate::syscall::chown;
-use crate::syscall::console::{ConsoleLaunchConfig, spawn_console_process};
+use crate::syscall::console::{
+    ConsoleLaunchConfig, read_process_start_time, spawn_console_process,
+};
 use crate::syscall::ns::{NamespaceConfig, OverlaySpec, RoBind, spawn_namespaced_process};
 use crate::syscall::pty::open_pty;
 use crate::syscall::signal;
@@ -46,6 +48,12 @@ pub struct LinuxRuntime {
     userns_base: u32,
     userns_size: u32,
     children: Arc<Mutex<HashMap<RuntimeInstanceId, TrackedChild>>>,
+    /// Backstop set of live console-shell pids. The console bridge reaps its
+    /// child explicitly on session end (SIGTERM->grace->SIGKILL->waitpid), but
+    /// if that task is dropped/panics the pid would otherwise leak as a zombie.
+    /// `reap_exited_children` sweeps this set on every runtime mutation so a
+    /// console child is always collected. See ADR-033 / review 07 (HIGH).
+    console_children: Arc<Mutex<Vec<u32>>>,
 }
 
 pub(crate) const SOCKET_PROXY_TARGET: &str = "/.denia/socket-proxy";
@@ -139,6 +147,7 @@ impl LinuxRuntime {
             userns_base: 100000,
             userns_size: 65536,
             children: Arc::new(Mutex::new(HashMap::new())),
+            console_children: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -915,17 +924,40 @@ impl Runtime for LinuxRuntime {
             });
         }
 
+        // Snapshot the replica's process start-time NOW (while it is confirmed
+        // running under the children lock). The console child re-reads it after
+        // joining the namespace fds and aborts if the pid was recycled onto a
+        // different process — closing the PID-reuse TOCTOU on setns (review 07).
+        let target_start_time = read_process_start_time(target_pid).ok_or_else(|| {
+            RuntimeError::InvalidServiceName {
+                name: "selected replica is no longer running".to_string(),
+            }
+        })?;
+
         let (pty, slave) = open_pty(request.cols, request.rows).map_err(RuntimeError::Io)?;
         let config = ConsoleLaunchConfig {
             target_pid,
+            target_start_time,
             cgroup_path: tracked.plan.cgroup_path.clone(),
             workdir: tracked.plan.namespace.workdir.clone(),
             env: tracked.plan.namespace.env.clone(),
             shell: "/bin/sh".to_string(),
+            // Reproduce the workload's per-launch privilege floor on the
+            // interactive shell (ADR-005 / ADR-033). The service launcher always
+            // runs hardened (NamespaceConfig defaults), so the console matches.
+            no_new_privs: true,
+            drop_bounding_caps: true,
+            seccomp: true,
         };
         let child_pid = tokio::task::spawn_blocking(move || spawn_console_process(&config, slave))
             .await?
             .map_err(RuntimeError::Syscall)?;
+
+        // Register the live console pid as a reaper backstop before handing the
+        // session out, so a dropped bridge task never leaks a zombie.
+        if let Ok(mut consoles) = self.console_children.lock() {
+            consoles.push(child_pid);
+        }
 
         Ok(RuntimeConsoleSession {
             session_id: request.session_id,
@@ -933,7 +965,73 @@ impl Runtime for LinuxRuntime {
             child_pid,
             cgroup_path: tracked.plan.cgroup_path,
             pty: Box::new(pty),
+            reaper: Some(Box::new(LinuxConsoleReaper {
+                child_pid,
+                console_children: self.console_children.clone(),
+            })),
         })
+    }
+}
+
+/// Console teardown handle handed to the API bridge. On `reap` it asks the shell
+/// to exit (SIGTERM), waits a short grace period, escalates to SIGKILL if the
+/// shell ignored SIGTERM, then `waitpid`s to collect the child and report how it
+/// ended. Deregisters the pid from the runtime backstop once reaped.
+struct LinuxConsoleReaper {
+    child_pid: u32,
+    console_children: Arc<Mutex<Vec<u32>>>,
+}
+
+impl LinuxConsoleReaper {
+    /// Grace period between SIGTERM and the SIGKILL escalation for a shell that
+    /// ignores SIGTERM (or is wedged). Bounded so a stuck session cannot hold the
+    /// replica's namespaces open indefinitely after its websocket closes.
+    const GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+    fn deregister(&self) {
+        if let Ok(mut consoles) = self.console_children.lock() {
+            consoles.retain(|pid| *pid != self.child_pid);
+        }
+    }
+}
+
+#[async_trait]
+impl crate::runtime::console::ConsoleReaper for LinuxConsoleReaper {
+    async fn reap(&self) -> crate::runtime::ConsoleExit {
+        use crate::runtime::ConsoleExit;
+        use crate::syscall::signal::{self, ProcessStatus};
+        use rustix::process::Signal;
+
+        let pid = self.child_pid;
+        // Ask the shell to exit.
+        let _ = signal::kill(pid, Signal::TERM);
+
+        // Poll for exit within the grace window; reap as soon as it is gone.
+        let deadline = tokio::time::Instant::now() + Self::GRACE;
+        let exit = loop {
+            match signal::try_wait(pid) {
+                Ok(ProcessStatus::Exited(code)) => break ConsoleExit::Code(code),
+                Ok(ProcessStatus::Signaled(sig)) => break ConsoleExit::Signal(sig),
+                // Still running, or wait failed (already reaped/ECHILD): decide
+                // by the clock below.
+                Ok(ProcessStatus::Running) => {}
+                Err(_) => break ConsoleExit::Unknown,
+            }
+            if tokio::time::Instant::now() >= deadline {
+                // Wedged or SIGTERM-ignoring shell: escalate and blocking-wait so
+                // the zombie is collected and the namespaces are released.
+                let _ = signal::kill(pid, Signal::KILL);
+                break match signal::wait(pid) {
+                    Ok(ProcessStatus::Exited(code)) => ConsoleExit::Code(code),
+                    Ok(ProcessStatus::Signaled(sig)) => ConsoleExit::Signal(sig),
+                    _ => ConsoleExit::Unknown,
+                };
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+
+        self.deregister();
+        exit
     }
 }
 
@@ -1029,6 +1127,7 @@ impl LinuxRuntime {
     }
 
     fn reap_exited_children(&self) -> Result<(), RuntimeError> {
+        self.reap_console_children();
         let exited = {
             let mut children = self
                 .children
@@ -1049,6 +1148,23 @@ impl LinuxRuntime {
             self.cleanup(&tracked.plan)?;
         }
         Ok(())
+    }
+
+    /// Backstop reaper for console-shell pids: non-blocking `try_wait` on each
+    /// registered console child, dropping any that have exited (collecting the
+    /// zombie). The bridge normally reaps its own child via [`LinuxConsoleReaper`];
+    /// this only catches children whose bridge task was dropped/panicked. A pid
+    /// the bridge already reaped reports `Err` (ECHILD) here and is also dropped.
+    fn reap_console_children(&self) {
+        let Ok(mut consoles) = self.console_children.lock() else {
+            return;
+        };
+        consoles.retain(|pid| {
+            matches!(
+                crate::syscall::signal::try_wait(*pid),
+                Ok(crate::syscall::signal::ProcessStatus::Running)
+            )
+        });
     }
 
     fn service_log_path(&self, service_id: uuid::Uuid) -> std::io::Result<PathBuf> {
