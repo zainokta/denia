@@ -5,7 +5,7 @@ import { Effect } from 'effect'
 import { ChevronDown, ChevronRight, Play, Timer } from 'lucide-react'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
-import type { JobRun } from '#/effect/schema'
+import type { JobRun, ServiceSource } from '#/effect/schema'
 import { useAuth, can } from '#/hooks/useAuth'
 import { StatusBadge } from '#/components/StatusBadge'
 import { EmptyState } from '#/components/EmptyState'
@@ -48,11 +48,10 @@ function cronHint(cron: string): string | null {
   return null
 }
 
-function sourceDisplay(source: unknown): string {
-  const s = source as Record<string, unknown>
-  if (s.type === 'external_image') return String(s.image)
-  if (s.type === 'git') return String(s.repo_url)
-  return JSON.stringify(source)
+function sourceDisplay(source: ServiceSource): string {
+  return source.type === 'external_image'
+    ? source.image_ref ?? source.image
+    : source.repo_url
 }
 
 function isActive(status: string): boolean {

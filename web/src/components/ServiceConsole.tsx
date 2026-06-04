@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 // Type-only import keeps the CommonJS `@xterm/xterm` package out of the SSR
 // prerender bundle; the runtime constructor is pulled in via dynamic import
 // inside the (client-only) mount effect below.
-import type { Terminal } from '@xterm/xterm'
+import type { IDisposable, Terminal } from '@xterm/xterm'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
@@ -42,6 +42,10 @@ export function ServiceConsole({ serviceId }: { readonly serviceId: string }) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
+  // The terminal.onData subscription returned when wiring keystrokes to the
+  // current socket. Disposed before each reconnect (and on unmount) so handlers
+  // do not stack and double-send keystrokes after a reconnect.
+  const onDataRef = useRef<IDisposable | null>(null)
   const [selectedReplica, setSelectedReplica] = useState<number | null>(null)
   const [status, setStatus] = useState('disconnected')
   const [error, setError] = useState('')
@@ -79,7 +83,10 @@ export function ServiceConsole({ serviceId }: { readonly serviceId: string }) {
     })
     return () => {
       disposed = true
+      onDataRef.current?.dispose()
+      onDataRef.current = null
       socketRef.current?.close()
+      socketRef.current = null
       termRef.current?.dispose()
     }
   }, [])
@@ -97,6 +104,12 @@ export function ServiceConsole({ serviceId }: { readonly serviceId: string }) {
     onSuccess: (path) => {
       const terminal = termRef.current
       if (!terminal) return
+      // Tear down any prior connection before opening a new one: dispose the
+      // previous onData subscription and close the stale socket so reconnects
+      // don't stack listeners or leave orphaned sockets open.
+      onDataRef.current?.dispose()
+      onDataRef.current = null
+      socketRef.current?.close()
       terminal.clear()
       const socket = new WebSocket(wsUrl(path))
       socket.binaryType = 'arraybuffer'
@@ -122,7 +135,7 @@ export function ServiceConsole({ serviceId }: { readonly serviceId: string }) {
         setStatus('error')
         setError('console websocket failed')
       }
-      terminal.onData((data) => {
+      onDataRef.current = terminal.onData((data) => {
         if (socket.readyState === WebSocket.OPEN) {
           socket.send(new TextEncoder().encode(data))
         }

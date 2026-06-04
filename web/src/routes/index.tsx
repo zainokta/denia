@@ -12,7 +12,9 @@ import { EmptyState } from '#/components/EmptyState'
 import { SkeletonRows } from '#/components/Skeleton'
 import { Num } from '#/components/Num'
 import type { SemState } from '#/lib/status'
+import { cpuBusyTotal, cpuPercentDelta } from '#/lib/metrics'
 import { formatBytes, formatPercent, formatRelative, shortId } from '#/lib/format'
+import { useActiveProject } from '#/hooks/useActiveProject'
 
 const getNodeMetrics = Effect.gen(function* () {
   const api = yield* ApiClient
@@ -45,21 +47,10 @@ function usageState(pct: number): SemState {
   return 'steady'
 }
 
-function cpuBusyTotal(cpu: NodeSnapshot['cpu']): { busy: number; total: number } {
-  const total =
-    cpu.user_jiffies +
-    cpu.nice_jiffies +
-    cpu.system_jiffies +
-    cpu.idle_jiffies +
-    cpu.iowait_jiffies
-  const busy =
-    cpu.user_jiffies + cpu.nice_jiffies + cpu.system_jiffies + cpu.iowait_jiffies
-  return { busy, total }
-}
-
 // Instantaneous node CPU% from deltas between successive snapshots (the raw
 // counters are cumulative since boot). Keeps a short client-side history so the
-// gauge reads "now" and the sparkline shows the recent trend.
+// gauge reads "now" and the sparkline shows the recent trend. Delta math lives
+// in lib/metrics so the dashboard and observability route share one source.
 function useNodeHistory(snapshot: NodeSnapshot | undefined) {
   const [series, setSeries] = useState<ReadonlyArray<number>>([])
   const prev = useRef<{ busy: number; total: number; at: string } | null>(null)
@@ -69,9 +60,7 @@ function useNodeHistory(snapshot: NodeSnapshot | undefined) {
     const { busy, total } = cpuBusyTotal(snapshot.cpu)
     const last = prev.current
     if (last && snapshot.recorded_at !== last.at) {
-      const dBusy = busy - last.busy
-      const dTotal = total - last.total
-      const pct = dTotal > 0 ? Math.max(0, Math.min(100, (dBusy / dTotal) * 100)) : 0
+      const pct = cpuPercentDelta(last, { busy, total })
       setSeries((s) => [...s, pct].slice(-40))
     }
     prev.current = { busy, total, at: snapshot.recorded_at }
@@ -82,6 +71,8 @@ function useNodeHistory(snapshot: NodeSnapshot | undefined) {
 }
 
 export function Dashboard() {
+  const [activeProject] = useActiveProject()
+
   const { data: nodeMetrics, isLoading: nodeLoading } = useQuery({
     queryKey: ['node', 'metrics'],
     queryFn: () => runQuery(getNodeMetrics),
@@ -96,14 +87,31 @@ export function Dashboard() {
     refetchIntervalInBackground: false,
   })
 
-  const { data: services = [], isLoading: servicesLoading } = useQuery({
+  const { data: allServices = [], isLoading: servicesLoading } = useQuery({
     queryKey: ['services'],
     queryFn: () => runQuery(listServices),
   })
 
   const { cpuPct, cpuSeries } = useNodeHistory(nodeMetrics)
 
-  const running = workloads.filter((w) => w.status && w.status !== 'Stopped')
+  // Active-project scoping: when a project is selected in the switcher, the
+  // workloads and recent-deployment lists narrow to that project. Empty = all.
+  const services = useMemo(
+    () =>
+      activeProject
+        ? allServices.filter((s) => s.project_id === activeProject)
+        : allServices,
+    [allServices, activeProject],
+  )
+  const scopedWorkloads = useMemo(
+    () =>
+      activeProject
+        ? workloads.filter((w) => w.project_id === activeProject)
+        : workloads,
+    [workloads, activeProject],
+  )
+
+  const running = scopedWorkloads.filter((w) => w.status && w.status !== 'Stopped')
   const hasServices = services.length > 0
   const serviceIds = useMemo(() => services.map((s) => s.id), [services])
 
@@ -317,11 +325,13 @@ function Detail({ label, value }: { label: string; value: string }) {
 }
 
 function ServiceDeploymentRow({ serviceId }: { serviceId: string }) {
+  // One-shot fetch per service (capped at 6 rows). The newest in-progress
+  // deployment self-polls on its own detail page; the landing page does not run
+  // N parallel polling loops — it refreshes when the user returns to the tab.
   const { data: deployments = [] } = useQuery({
     queryKey: ['services', serviceId, 'deployments'],
     queryFn: () => runQuery(getServiceDeployments(serviceId)),
-    refetchInterval: 5000,
-    refetchIntervalInBackground: false,
+    staleTime: 15000,
   })
 
   if (deployments.length === 0) return null
