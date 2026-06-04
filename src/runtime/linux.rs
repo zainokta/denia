@@ -34,7 +34,7 @@ use crate::syscall::chown;
 use crate::syscall::console::{
     ConsoleLaunchConfig, read_process_start_time, spawn_console_process,
 };
-use crate::syscall::ns::{NamespaceConfig, OverlaySpec, RoBind, spawn_namespaced_process};
+use crate::syscall::ns::{NamespaceConfig, OverlaySpec, spawn_namespaced_process};
 use crate::syscall::pty::open_pty;
 use crate::syscall::signal;
 
@@ -67,11 +67,11 @@ pub(crate) const SOCKET_PROXY_TARGET: &str = "/.denia/socket-proxy";
 pub(crate) const SOCKET_PROXY_LIB_DIR: &str = "/.denia/lib";
 
 /// Shared objects + dynamic loader the socket-proxy binary needs at runtime,
-/// taken from the daemon's own `/proc/self/maps` (socket-proxy IS the daemon
-/// binary). Each is bound read-only into the guest under `SOCKET_PROXY_LIB_DIR`
-/// and socket-proxy is launched through the bound loader with `--library-path`,
-/// so it works in any workload image. Empty for a fully static binary (then
-/// socket-proxy is exec'd directly). See ADR-026.
+/// taken from the daemon's own `/proc/self/maps` when socket-proxy IS the
+/// daemon binary. Each is staged into the per-replica upper layer under
+/// `SOCKET_PROXY_LIB_DIR` and socket-proxy is launched through the staged loader
+/// with `--library-path`, so it works in any workload image. Empty for a fully
+/// static binary (then socket-proxy is exec'd directly). See ADR-026.
 fn socket_proxy_runtime_libs() -> Vec<PathBuf> {
     let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else {
         return Vec::new();
@@ -115,6 +115,14 @@ fn parse_index_dir(path: &Path) -> Option<u32> {
     path.file_name()?.to_str()?.parse::<u32>().ok()
 }
 pub(crate) const WORKLOAD_LAUNCHER_TARGET: &str = "/.denia/workload-launcher";
+
+#[derive(Debug, Clone)]
+struct RuntimeHelperStaging {
+    helper_src: PathBuf,
+    guest_target: PathBuf,
+    host_libs: Vec<PathBuf>,
+    loader_prefix: Vec<String>,
+}
 pub(crate) const SOCKET_BASENAME: &str = "service.sock";
 pub(crate) const GUEST_SERVICE_SOCKET_ENV: &str = "DENIA_SERVICE_SOCKET";
 pub(crate) const CGROUP_CONTROLLERS: &[&str] = &["cpu", "memory", "pids", "io"];
@@ -250,14 +258,15 @@ impl LinuxRuntime {
             .join(request.deployment_id.to_string())
             .join(request.replica_index.to_string());
         // socket-proxy is the daemon binary, dynamically linked against the host
-        // libc/loader. It is bound read-only into the guest (with its host libs +
-        // loader under SOCKET_PROXY_LIB_DIR) and run through the host loader with
-        // `--library-path`, so it works in ANY workload image regardless of the
-        // image's libc/version. The loader options are consumed at socket-proxy
-        // startup and never reach the workload it spawns. See ADR-026.
-        let (ro_binds, loader_prefix) = self.runtime_binary_binds(SOCKET_PROXY_TARGET)?;
+        // libc/loader. It is staged into the per-replica overlay upper with its
+        // host libs + loader under SOCKET_PROXY_LIB_DIR and run through the host
+        // loader with `--library-path`, so it works in ANY workload image
+        // regardless of the image's libc/version. The loader options are
+        // consumed at socket-proxy startup and never reach the workload it
+        // spawns. See ADR-026.
+        let helper = self.runtime_helper_staging(SOCKET_PROXY_TARGET)?;
 
-        let mut child_argv = loader_prefix;
+        let mut child_argv = helper.loader_prefix.clone();
         child_argv.push(SOCKET_PROXY_TARGET.to_string());
         child_argv.push("--listen".to_string());
         child_argv.push(guest_socket.clone());
@@ -288,9 +297,6 @@ impl LinuxRuntime {
         // when unset).
         if let Some(pids) = request.pids_max {
             namespace = namespace.with_max_pids(Some(pids));
-        }
-        for bind in ro_binds {
-            namespace = namespace.with_ro_bind(bind);
         }
 
         Ok(LinuxRuntimePlan {
@@ -372,6 +378,8 @@ impl LinuxRuntime {
         }
         self.prepare_socket_directory(plan)?;
         self.chown_overlay_dir(&denia_dir)?;
+        let helper = self.runtime_helper_staging(SOCKET_PROXY_TARGET)?;
+        self.stage_runtime_helper(&plan.upper, &helper)?;
         prepare_cgroup_directory(&self.cgroup_root, &plan.cgroup_path, CGROUP_CONTROLLERS)?;
         std::fs::write(
             plan.cgroup_path.join("cpu.max"),
@@ -424,24 +432,23 @@ impl LinuxRuntime {
         Ok(())
     }
 
-    /// Build the read-only bind mounts and (optional) loader-prefixed argv for
-    /// running the daemon binary (socket-proxy / workload-launcher are the same
-    /// multi-call binary) inside an arbitrary workload image.
+    /// Build the per-replica helper staging plan and optional loader-prefixed
+    /// argv for running the daemon binary (socket-proxy / workload-launcher are
+    /// the same multi-call binary) inside an arbitrary workload image.
     ///
-    /// The daemon binary is bound read-only at `guest_target`; its host shared
-    /// objects + dynamic loader (resolved from the daemon's own
-    /// `/proc/self/maps`) are bound read-only under `SOCKET_PROXY_LIB_DIR`, and
-    /// when dynamically linked the returned `loader_prefix` runs the helper
-    /// through the bound loader with `--library-path` so it works regardless of
+    /// The daemon binary is copied into the per-replica overlay upper at
+    /// `guest_target`; its host shared objects + dynamic loader (resolved from
+    /// the daemon's own `/proc/self/maps`) are copied under `SOCKET_PROXY_LIB_DIR`,
+    /// and when dynamically linked the returned `loader_prefix` runs the helper
+    /// through the staged loader with `--library-path` so it works regardless of
     /// the image's libc. A statically-linked daemon yields no libs and an empty
-    /// prefix (the helper is exec'd directly). This replaces the previous
-    /// `std::fs::copy` of the binary into the artifact rootfs, which mutated the
-    /// shared content-addressed bundle and raced across concurrent same-digest
-    /// runs (ADR-019: "the content-addressed bundle is never mutated"; M4).
-    fn runtime_binary_binds(
+    /// prefix (the helper is exec'd directly). This avoids mutating the shared
+    /// content-addressed bundle while also avoiding fragile helper bind mounts
+    /// over overlayfs lower entries.
+    fn runtime_helper_staging(
         &self,
         guest_target: &str,
-    ) -> Result<(Vec<RoBind>, Vec<String>), RuntimeError> {
+    ) -> Result<RuntimeHelperStaging, RuntimeError> {
         let helper_src = resolve_host_binary(&self.socket_proxy_source).ok_or_else(|| {
             RuntimeError::SocketProxyUnavailable {
                 path: self.socket_proxy_source.clone(),
@@ -468,19 +475,32 @@ impl LinuxRuntime {
             loader_prefix.push(SOCKET_PROXY_LIB_DIR.to_string());
         }
 
-        let mut ro_binds = vec![RoBind {
-            src: helper_src,
-            dest: PathBuf::from(guest_target),
-        }];
-        for lib in &host_libs {
-            if let Some(name) = lib.file_name().and_then(|n| n.to_str()) {
-                ro_binds.push(RoBind {
-                    src: lib.clone(),
-                    dest: PathBuf::from(format!("{SOCKET_PROXY_LIB_DIR}/{name}")),
-                });
+        Ok(RuntimeHelperStaging {
+            helper_src,
+            guest_target: PathBuf::from(guest_target),
+            host_libs,
+            loader_prefix,
+        })
+    }
+
+    fn stage_runtime_helper(
+        &self,
+        upper: &Path,
+        helper: &RuntimeHelperStaging,
+    ) -> Result<(), RuntimeError> {
+        copy_runtime_helper_file(
+            &helper.helper_src,
+            &upper_guest_path(upper, &helper.guest_target)?,
+        )?;
+        for lib in &helper.host_libs {
+            if let Some(name) = lib.file_name() {
+                copy_runtime_helper_file(
+                    lib,
+                    &upper_guest_path(upper, &PathBuf::from(SOCKET_PROXY_LIB_DIR).join(name))?,
+                )?;
             }
         }
-        Ok((ro_binds, loader_prefix))
+        Ok(())
     }
 
     fn prepare_socket_directory(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
@@ -536,6 +556,41 @@ impl LinuxRuntime {
         }
         Ok(())
     }
+}
+
+fn upper_guest_path(upper: &Path, guest_path: &Path) -> Result<PathBuf, RuntimeError> {
+    if !guest_path.is_absolute() {
+        return Err(RuntimeError::UnsafeRuntimePath {
+            path: guest_path.to_path_buf(),
+        });
+    }
+    let mut target = upper.to_path_buf();
+    for component in guest_path.components() {
+        match component {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(part) => target.push(part),
+            _ => {
+                return Err(RuntimeError::UnsafeRuntimePath {
+                    path: guest_path.to_path_buf(),
+                });
+            }
+        }
+    }
+    Ok(target)
+}
+
+fn copy_runtime_helper_file(src: &Path, dest: &Path) -> Result<(), RuntimeError> {
+    if let Some(parent) = dest.parent() {
+        create_dir_all("create runtime helper directory", parent)?;
+    }
+    let tmp = dest.with_extension(format!("{}.tmp", uuid::Uuid::now_v7()));
+    if std::fs::hard_link(src, &tmp).is_err() {
+        std::fs::copy(src, &tmp).map_err(path_io("copy runtime helper", &tmp))?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o555))
+            .map_err(path_io("set runtime helper permissions", &tmp))?;
+    }
+    std::fs::rename(&tmp, dest).map_err(path_io("publish runtime helper", dest))?;
+    Ok(())
 }
 
 #[async_trait]
@@ -685,8 +740,8 @@ impl Runtime for LinuxRuntime {
             .join(request.run_id.to_string());
         // Per-run overlay so the job — like a service replica — gets a private
         // writable layer over the shared, read-only artifact rootfs. The
-        // workload-launcher is bind-mounted read-only into the guest instead of
-        // being copied into the lower (which mutated the shared content-addressed
+        // workload-launcher is staged into the per-run upper instead of being
+        // copied into the lower (which mutated the shared content-addressed
         // bundle and raced across concurrent same-digest runs). See ADR-019 /
         // ADR-026 / M4.
         let upper = run_dir.join("upper");
@@ -771,14 +826,18 @@ impl Runtime for LinuxRuntime {
             work: work.clone(),
             merged: merged.clone(),
         };
-        let (ro_binds, loader_prefix) = match self.runtime_binary_binds(WORKLOAD_LAUNCHER_TARGET) {
-            Ok(binds) => binds,
+        let helper = match self.runtime_helper_staging(WORKLOAD_LAUNCHER_TARGET) {
+            Ok(helper) => helper,
             Err(error) => {
                 cleanup();
                 return Err(error);
             }
         };
-        let mut child_argv = loader_prefix;
+        if let Err(error) = self.stage_runtime_helper(&upper, &helper) {
+            cleanup();
+            return Err(error);
+        }
+        let mut child_argv = helper.loader_prefix.clone();
         child_argv.push(WORKLOAD_LAUNCHER_TARGET.to_string());
         child_argv.push("--".to_string());
         child_argv.extend(argv);
@@ -788,9 +847,6 @@ impl Runtime for LinuxRuntime {
             .with_cgroup_path(cgroup_path.clone())
             .with_workdir(process.workdir)
             .with_env(env_map.into_iter().collect());
-        for bind in ro_binds {
-            namespace = namespace.with_ro_bind(bind);
-        }
         if let Some(pids) = request.pids_max {
             namespace = namespace.with_max_pids(Some(pids));
         }
@@ -1394,18 +1450,14 @@ mod tests {
             assert_eq!(argv[2], "/.denia/lib");
             assert!(
                 argv[0].starts_with("/.denia/lib/ld-"),
-                "expected a bound host loader as argv[0], got {:?}",
+                "expected a staged host loader as argv[0], got {:?}",
                 argv[0]
             );
-            // The loader + libs named in --library-path must have matching binds.
-            let lib_binds = plan
-                .namespace
-                .ro_binds
-                .iter()
-                .filter(|b| b.dest.starts_with("/.denia/lib"))
-                .count();
-            assert!(lib_binds >= 1, "expected host-lib read-only binds");
         }
+        assert!(
+            plan.namespace.ro_binds.is_empty(),
+            "helper injection is staged into the per-replica upper layer, not bind-mounted"
+        );
     }
 
     #[test]
@@ -1435,8 +1487,8 @@ mod tests {
     #[test]
     fn prepare_does_not_write_into_readonly_rootfs() {
         // The artifact rootfs is the overlay lower (read-only). prepare must not
-        // create `.denia`, `run/denia`, or copy the socket-proxy into it; those
-        // now live in the per-replica upper layer and a read-only bind mount.
+        // create `.denia`, `run/denia`, or copy the socket-proxy into it; helper
+        // files live in the per-replica upper layer.
         let tmp = tempfile::tempdir().expect("temp dir");
         let runtime_dir = tmp.path().join("runtime");
         let artifact_dir = tmp.path().join("artifacts");
@@ -1455,6 +1507,10 @@ mod tests {
         assert!(
             !rootfs.join(".denia").exists(),
             "prepare must not inject helpers into the read-only rootfs"
+        );
+        assert!(
+            plan.upper.join(".denia/socket-proxy").is_file(),
+            "prepare must stage the helper binary into the per-replica upper"
         );
         assert!(
             !rootfs.join("run/denia").exists(),

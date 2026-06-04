@@ -102,18 +102,24 @@ produced a circular `/dev/null` symlink that broke the socket-proxy's
 `pivot_root` carry the `/dev` tmpfs and its node binds into the workload.
 
 **socket-proxy runtime libraries.** socket-proxy is the daemon binary itself
-(`current_exe()`), dynamically linked against the host glibc + loader. Bound as a
-lone file into an arbitrary workload image, its loader resolves `libc.so.6`,
+(`current_exe()`), dynamically linked against the host glibc + loader. Placed as
+a lone file into an arbitrary workload image, its loader resolves `libc.so.6`,
 `libm.so.6`, `libgcc_s.so.1` against the *image's* libs and fails (missing lib, or
 a glibc-version mismatch) before it can bind the guest socket — surfacing to the
 control plane as `ServiceSocketUnavailable`. To make socket-proxy
 image-independent, its host shared objects + dynamic loader (resolved from the
-daemon's own `/proc/self/maps`) are bound read-only under `/.denia/lib`, and
-socket-proxy is launched through the bound loader:
+daemon's own `/proc/self/maps`) are staged into the per-replica overlay upper
+under `/.denia/lib`, and socket-proxy is launched through the staged loader:
 `/.denia/lib/<loader> --library-path /.denia/lib /.denia/socket-proxy …`. The
 `--library-path` is consumed by the loader at socket-proxy startup and is **not**
 inherited by the workload socket-proxy spawns, so the workload keeps using its own
 image libc. A statically-linked socket-proxy yields no libs and is exec'd directly.
+
+The helper binary and host libraries are staged into the per-replica `upper`
+layer, not the content-addressed artifact rootfs. This keeps ADR-019's immutable
+bundle contract while avoiding read-only bind mounts over overlayfs lower
+entries; on some hosts/images those bind or remount operations return `EROFS`
+when the mountpoint resolves to an immutable lower entry.
 
 **Workload socket on host fs (not the overlay).** socket-proxy's listening unix
 socket must be reachable by the daemon's Pingora ingress. A unix socket created
@@ -174,6 +180,9 @@ errors are reported through the child setup pipe instead of being ignored.
 - Read-only bind mounts are source-path-independent: a daemon binary under a
   `0700` home (dev `cargo run`) deploys identically to a world-searchable
   `/usr/local/bin` install. The `/.old_root`-relative bind source is gone.
+- Denia helper binaries and their host runtime libraries are staged per replica
+  in the overlay upper layer, so helper injection no longer depends on read-only
+  bind mounts succeeding over overlayfs entries supplied by the image lower.
 - Malicious image workdirs can no longer create host directories outside the
   workload root before `pivot_root`.
 - Malicious rootfs symlinks on the socket bind destination prefix can no longer
