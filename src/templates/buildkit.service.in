@@ -1,0 +1,14 @@
+[Unit]
+Description=BuildKit daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/buildkitd --addr unix:///run/buildkit/buildkitd.sock --root /var/lib/buildkit --group buildkit --oci-worker=true --containerd-worker=false --oci-worker-snapshotter=native
+Restart=always
+RestartSec=3
+RuntimeDirectory=buildkit
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

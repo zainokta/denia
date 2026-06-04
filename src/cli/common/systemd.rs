@@ -4,6 +4,15 @@ use super::paths::InstallContext;
 use sha2::Digest;
 
 const TEMPLATE: &str = include_str!("../../templates/denia.service.in");
+const BUILDKIT_TEMPLATE: &str = include_str!("../../templates/buildkit.service.in");
+const BUILDKIT_OVERRIDE: &str = "\
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/buildkitd --addr unix:///run/buildkit/buildkitd.sock --root /var/lib/buildkit --group buildkit --oci-worker=true --containerd-worker=false --oci-worker-snapshotter=native
+ExecStartPost=
+RuntimeDirectory=buildkit
+RuntimeDirectoryMode=0755
+";
 
 /// Render the operator-aware systemd unit text for `denia.service`.
 pub fn render_unit(ctx: &InstallContext) -> String {
@@ -21,6 +30,17 @@ pub fn render_unit(ctx: &InstallContext) -> String {
         )
 }
 
+/// Render the BuildKit service Denia expects for Dockerfile-compatible builds.
+pub fn render_buildkit_unit() -> String {
+    BUILDKIT_TEMPLATE.to_string()
+}
+
+/// Render the late BuildKit drop-in that lets setup repair stale/manual
+/// overrides from earlier install attempts.
+pub fn render_buildkit_override() -> String {
+    BUILDKIT_OVERRIDE.to_string()
+}
+
 /// SHA-256 of the rendered unit. Used by `denia doctor` (Task 16) to detect
 /// hand-edited drift in `/etc/systemd/system/denia.service`.
 pub fn unit_sha256(ctx: &InstallContext) -> [u8; 32] {
@@ -34,6 +54,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const UNIT_PATH: &str = "/etc/systemd/system/denia.service";
+const BUILDKIT_UNIT_PATH: &str = "/etc/systemd/system/buildkit.service";
+const BUILDKIT_DROPIN_DIR: &str = "/etc/systemd/system/buildkit.service.d";
+const BUILDKIT_DROPIN_PATH: &str = "/etc/systemd/system/buildkit.service.d/99-denia.conf";
 
 /// Write the rendered unit to `/etc/systemd/system/denia.service` via tmp +
 /// rename (atomic) with mode `0644 root:root`.
@@ -43,6 +66,22 @@ pub fn write_unit(ctx: &InstallContext) -> anyhow::Result<()> {
     std::fs::write(&tmp, body)?;
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
     std::fs::rename(&tmp, UNIT_PATH)?;
+    Ok(())
+}
+
+/// Write the managed BuildKit unit. This is deliberately separate from the
+/// Denia unit because operators may inspect or restart BuildKit independently.
+pub fn write_buildkit_unit() -> anyhow::Result<()> {
+    let tmp = format!("{BUILDKIT_UNIT_PATH}.tmp");
+    std::fs::write(&tmp, render_buildkit_unit())?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(&tmp, BUILDKIT_UNIT_PATH)?;
+
+    std::fs::create_dir_all(BUILDKIT_DROPIN_DIR)?;
+    let dropin_tmp = format!("{BUILDKIT_DROPIN_PATH}.tmp");
+    std::fs::write(&dropin_tmp, render_buildkit_override())?;
+    std::fs::set_permissions(&dropin_tmp, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(&dropin_tmp, BUILDKIT_DROPIN_PATH)?;
     Ok(())
 }
 
@@ -147,5 +186,39 @@ mod tests {
         let a = InstallContext::from_user("rakei", "/home/rakei");
         let b = InstallContext::from_user("ops", "/home/ops");
         assert_ne!(unit_sha256(&a), unit_sha256(&b));
+    }
+
+    #[test]
+    fn buildkit_unit_uses_oci_worker_and_group_readable_socket() {
+        let unit = render_buildkit_unit();
+
+        for needle in [
+            "ExecStart=/usr/local/bin/buildkitd --addr unix:///run/buildkit/buildkitd.sock --root /var/lib/buildkit --group buildkit --oci-worker=true --containerd-worker=false --oci-worker-snapshotter=native",
+            "RuntimeDirectory=buildkit",
+            "RuntimeDirectoryMode=0755",
+        ] {
+            assert!(
+                unit.contains(needle),
+                "expected `{needle}` in unit:\n{unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn buildkit_override_resets_stale_exec_directives() {
+        let dropin = render_buildkit_override();
+
+        for needle in [
+            "ExecStart=",
+            "ExecStart=/usr/local/bin/buildkitd --addr unix:///run/buildkit/buildkitd.sock --root /var/lib/buildkit --group buildkit --oci-worker=true --containerd-worker=false --oci-worker-snapshotter=native",
+            "ExecStartPost=",
+            "RuntimeDirectory=buildkit",
+            "RuntimeDirectoryMode=0755",
+        ] {
+            assert!(
+                dropin.contains(needle),
+                "expected `{needle}` in drop-in:\n{dropin}"
+            );
+        }
     }
 }

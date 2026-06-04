@@ -11,7 +11,8 @@
 
 Split the installer along the build/provisioning seam:
 
-- `install.sh` keeps preflight, distro package install, rustup, node/pnpm, and `make install`. Roughly 200 lines.
+- `install.sh` keeps preflight, distro package install, SOPS/BuildKit binary
+  install, rustup, node/pnpm, and `make install`.
 - All provisioning lives in `denia <subcommand>` (clap-driven): `setup`, `uninstall`, `status`, `doctor`, `rotate-token`. The daemon's run path (`denia` with no subcommand) is unchanged.
 - A root `Makefile` is the single build entry point. `install.sh`, CI, and contributors all call `make build` / `make install`.
 - Downloaded installer helper scripts use fresh `mktemp` paths, not predictable
@@ -22,6 +23,10 @@ Split the installer along the build/provisioning seam:
 - `install.sh` installs POSIX ACL tooling (`setfacl`), and `denia setup`
   uses it to grant the `denia` system user execute-only traversal through the
   operator home/config parents while keeping the operator home private.
+- `denia setup` also owns the BuildKit daemon unit: it creates the `buildkit`
+  group, adds the `denia` user to that group, renders
+  `/etc/systemd/system/buildkit.service`, starts BuildKit with the OCI worker,
+  and relies on BuildKit's `--group buildkit` option for socket access.
 
 The systemd unit content + TOML config schema are emitted from Rust templates embedded via `include_str!`, so changes track the binary version. `denia setup` is idempotent: re-run keeps keys + config, refreshes the unit.
 The generated management listener binds `127.0.0.1:7180` by default; operators
