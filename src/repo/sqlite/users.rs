@@ -24,9 +24,8 @@ pub(super) fn create_user_q(
     password_hash: &str,
     is_super_admin: bool,
 ) -> Result<User, RepoError> {
-    let user = User::new(username, password_hash.to_string(), is_super_admin).map_err(|_| {
-        RepoError::Json(serde_json::Error::io(std::io::Error::other("domain error")))
-    })?;
+    let user = User::new(username, password_hash.to_string(), is_super_admin)
+        .map_err(|e| RepoError::Validation(e.to_string()))?;
     conn.execute(
         "INSERT INTO users (id, username, password_hash, is_super_admin, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
@@ -36,7 +35,15 @@ pub(super) fn create_user_q(
             user.is_super_admin as i32,
             user.created_at.to_rfc3339(),
         ],
-    )?;
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            RepoError::Conflict("username already exists".to_string())
+        }
+        other => RepoError::Sqlite(other),
+    })?;
     Ok(user)
 }
 

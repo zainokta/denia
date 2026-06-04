@@ -37,6 +37,10 @@ pub enum StateError {
     AdminAlreadyInitialized,
     #[error("invalid column value: {0}")]
     InvalidColumn(String),
+    #[error("validation error: {0}")]
+    Validation(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
 }
 
 impl From<RepoError> for StateError {
@@ -56,6 +60,8 @@ impl From<RepoError> for StateError {
             RepoError::RegistryInUse => StateError::RegistryInUse,
             RepoError::AdminAlreadyInitialized => StateError::AdminAlreadyInitialized,
             RepoError::InvalidColumn(s) => StateError::InvalidColumn(s),
+            RepoError::Validation(s) => StateError::Validation(s),
+            RepoError::Conflict(s) => StateError::Conflict(s),
         }
     }
 }
