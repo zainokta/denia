@@ -62,8 +62,20 @@ impl ReplicaRegistry {
     }
 
     pub fn remove(&mut self, replica_id: Uuid) {
-        for replicas in self.by_service.values_mut() {
+        let mut emptied: Option<Uuid> = None;
+        for (service_id, replicas) in self.by_service.iter_mut() {
+            let before = replicas.len();
             replicas.retain(|r| r.id != replica_id);
+            if replicas.len() != before && replicas.is_empty() {
+                emptied = Some(*service_id);
+            }
+        }
+        // When a service loses its last replica, drop its per-service entries so
+        // the maps don't accumulate state for services that have been scaled to
+        // zero, drained, or deleted. The next launch re-creates them lazily.
+        if let Some(service_id) = emptied {
+            self.by_service.remove(&service_id);
+            self.cursor.remove(&service_id);
         }
     }
 

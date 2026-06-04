@@ -76,6 +76,13 @@ async fn create_job(
     job.command = input.command;
     job.env = input.env;
     job.max_retries = input.max_retries;
+    // Prime the cron cursor at creation. `claim_due_jobs` only returns jobs with
+    // `next_run_at <= now`, and the only other writer (`set_job_next_run`) runs
+    // *after* a job is already due — so without this a scheduled job would never
+    // become due (chicken-and-egg). Compute the first fire time from now (ADR-010).
+    if job.schedule.is_some() {
+        job.next_run_at = crate::scheduler::compute_next_run(&job, chrono::Utc::now());
+    }
     let stored = state.jobs.put_job(job)?;
     Ok((StatusCode::CREATED, Json(stored)))
 }
@@ -127,6 +134,15 @@ async fn run_job(
         ));
     }
     let run = state.jobs.create_job_run(job_id)?;
+    // Hand the Pending run to the executor (ADR-010). The 202 is returned
+    // immediately; the executor drives it to completion out-of-band. Without a
+    // wired executor (tests, or before boot completes) the run stays Pending
+    // and is reconciled to Failed by `fail_orphan_runs` on the next restart.
+    if let Some(sender) = &state.job_enqueue {
+        if sender.send(run.clone()).is_err() {
+            tracing::error!(job_id = %job_id, run_id = %run.id, "job executor channel closed; run not enqueued");
+        }
+    }
     Ok((StatusCode::ACCEPTED, Json(run)))
 }
 
