@@ -126,7 +126,7 @@ mod tests {
             "BindReadOnlyPaths=/home/rakei/.config/denia",
             "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_CHOWN",
             "Delegate=yes",
-            "ProtectHome=true",
+            "ProtectHome=read-only",
             "Conflicts=traefik.service nginx.service caddy.service apache2.service httpd.service",
         ] {
             assert!(

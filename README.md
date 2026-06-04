@@ -694,8 +694,8 @@ snapshot.
   `uid 0` mapped to `userns_base` (default `100000`). Denia v1 is **not** a
   multi-tenant adversarial sandbox — run untrusted code on its own host or VM.
 - **Daemon hardening** — the shipped systemd unit applies `ProtectSystem=strict`,
-  `ProtectHome=true` + `BindReadOnlyPaths=~/.config/denia`, `PrivateTmp=true`, and
-  a locked `CapabilityBoundingSet=`.
+  `ProtectHome=read-only` + `BindReadOnlyPaths=~/.config/denia`, `PrivateTmp=true`,
+  and a locked `CapabilityBoundingSet=`.
 - **Operational hygiene** — bind the management API to loopback (or front it with
   a reverse proxy + mTLS/VPN); rotate the admin token; patch the host kernel
   aggressively (the realistic escape vector is a userns/cgroup CVE); run
