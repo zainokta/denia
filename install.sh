@@ -23,6 +23,8 @@ readonly RUSTUP_INIT_URL="https://sh.rustup.rs"
 readonly NODE_MAJOR="22"
 readonly NODESOURCE_SETUP_URL="https://deb.nodesource.com/setup_${NODE_MAJOR}.x"
 readonly PNPM_VERSION="10.25.0"
+readonly SOPS_VERSION="${DENIA_SOPS_VERSION:-3.13.1}"
+readonly BUILDKIT_VERSION="${DENIA_BUILDKIT_VERSION:-0.30.0}"
 readonly MIN_GLIBC_MAJOR="2"
 readonly MIN_GLIBC_MINOR="39"
 
@@ -283,17 +285,17 @@ step_install_prereqs() {
             run_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -y
             run_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y \
                 build-essential pkg-config libssl-dev libclang-dev clang cmake perl ca-certificates \
-                curl git age acl iproute2 procps
+                curl git age acl iproute2 procps runc
             ;;
         dnf)
             run_cmd dnf install -y \
                 @development-tools pkgconf-pkg-config openssl-devel clang clang-devel cmake perl ca-certificates \
-                curl git age acl iproute procps-ng
+                curl git age acl iproute procps-ng runc
             ;;
         pacman)
             run_cmd pacman -Sy --noconfirm \
                 base-devel pkgconf openssl clang cmake perl ca-certificates \
-                curl git age acl iproute2 procps-ng
+                curl git age acl iproute2 procps-ng runc
             ;;
         zypper)
             run_cmd zypper --non-interactive refresh
@@ -301,10 +303,86 @@ step_install_prereqs() {
                 -t pattern devel_basis
             run_cmd zypper --non-interactive install -y \
                 pkg-config libopenssl-devel clang clang-devel cmake perl ca-certificates \
-                curl git age acl iproute2 procps
+                curl git age acl iproute2 procps runc
             ;;
     esac
     ok "system packages installed"
+}
+
+# ----------------------------------------------------------------------------
+# Runtime/build host tools: SOPS + BuildKit
+# ----------------------------------------------------------------------------
+
+linux_arch() {
+    case "$(uname -m)" in
+        x86_64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        *) fail "unsupported architecture for release tools: $(uname -m)" ;;
+    esac
+}
+
+verify_optional_sha256() {
+    local path="$1"
+    local expected="$2"
+    local label="$3"
+    if [[ -z "${expected}" ]]; then
+        return 0
+    fi
+    local actual
+    actual="$(/usr/bin/sha256sum "${path}" | /usr/bin/awk '{print $1}')"
+    if [[ "${actual}" != "${expected}" ]]; then
+        fail "${label} sha256 mismatch: got ${actual}, expected ${expected}"
+    fi
+    ok "${label} sha256 verified"
+}
+
+step_install_sops() {
+    step "Install SOPS ${SOPS_VERSION}"
+
+    if command -v sops >/dev/null 2>&1; then
+        ok "sops already present: $(command -v sops)"
+        return 0
+    fi
+
+    local arch tmp url
+    arch="$(linux_arch)"
+    url="https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.${arch}"
+    tmp="$(/usr/bin/mktemp)"
+    trap "rm -f '${tmp}'" RETURN
+
+    run_cmd /usr/bin/curl --proto '=https' --tlsv1.2 -fsSL "${url}" -o "${tmp}"
+    if [[ "${DRY_RUN}" -eq 0 ]]; then
+        verify_optional_sha256 "${tmp}" "${DENIA_SOPS_SHA256:-}" "sops"
+    fi
+    run_cmd install -Dm0755 "${tmp}" /usr/local/bin/sops
+    ok "sops installed at /usr/local/bin/sops"
+}
+
+step_install_buildkit() {
+    step "Install BuildKit ${BUILDKIT_VERSION}"
+
+    if command -v buildctl >/dev/null 2>&1 && command -v buildkitd >/dev/null 2>&1; then
+        ok "buildkit already present: $(command -v buildctl), $(command -v buildkitd)"
+        return 0
+    fi
+
+    local arch tmp workdir url
+    arch="$(linux_arch)"
+    tmp="$(/usr/bin/mktemp)"
+    workdir="$(/usr/bin/mktemp -d)"
+    trap "rm -f '${tmp}'; rm -rf '${workdir}'" RETURN
+    url="https://github.com/moby/buildkit/releases/download/v${BUILDKIT_VERSION}/buildkit-v${BUILDKIT_VERSION}.linux-${arch}.tar.gz"
+
+    run_cmd /usr/bin/curl --proto '=https' --tlsv1.2 -fsSL "${url}" -o "${tmp}"
+    if [[ "${DRY_RUN}" -eq 0 ]]; then
+        verify_optional_sha256 "${tmp}" "${DENIA_BUILDKIT_SHA256:-}" "buildkit"
+        run_cmd /bin/tar -C "${workdir}" -xzf "${tmp}"
+    else
+        run_cmd /bin/tar -C "${workdir}" -xzf "${tmp}"
+    fi
+    run_cmd install -Dm0755 "${workdir}/bin/buildctl" /usr/local/bin/buildctl
+    run_cmd install -Dm0755 "${workdir}/bin/buildkitd" /usr/local/bin/buildkitd
+    ok "buildctl/buildkitd installed under /usr/local/bin"
 }
 
 # ----------------------------------------------------------------------------
@@ -488,6 +566,8 @@ main() {
     step_preflight_kernel
     step_preflight_ports
     step_install_prereqs
+    step_install_sops
+    step_install_buildkit
     step_install_rust
     step_install_node
     step_make_install

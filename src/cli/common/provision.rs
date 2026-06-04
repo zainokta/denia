@@ -42,6 +42,11 @@ pub fn ensure_user(user: &str, group: &str, home: &str) -> anyhow::Result<bool> 
     Ok(true)
 }
 
+/// Ensure `user` is a member of `group`. Idempotent via `usermod -aG`.
+pub fn ensure_user_in_group(user: &str, group: &str) -> anyhow::Result<()> {
+    run("usermod", &["-aG", group, user])
+}
+
 /// Ensure a directory exists with the given mode, owner, and group. Idempotent.
 /// Always re-applies mode + chown so a hand-edited install gets repaired.
 pub fn ensure_dir(path: &Path, mode: u32, owner: &str, group: &str) -> anyhow::Result<()> {

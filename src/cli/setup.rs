@@ -39,7 +39,9 @@ fn plan() -> Vec<Step> {
     use Step::*;
     vec![
         EnsureGroup,
+        EnsureBuildkitGroup,
         EnsureUser,
+        EnsureDeniaInBuildkitGroup,
         EnsureDataDirs,
         EnsureCgroupRoot,
         EnsureUserConfigDir,
@@ -47,8 +49,10 @@ fn plan() -> Vec<Step> {
         GenerateAdminTokenIfAbsent,
         WriteConfigIfAbsent,
         RepairUserConfigAccess,
+        WriteBuildkitUnit,
         WriteSystemdUnit,
         SystemctlDaemonReload,
+        SystemctlEnableBuildkitNow,
         SystemctlEnableNow,
         WaitActive,
     ]
@@ -56,7 +60,9 @@ fn plan() -> Vec<Step> {
 
 enum Step {
     EnsureGroup,
+    EnsureBuildkitGroup,
     EnsureUser,
+    EnsureDeniaInBuildkitGroup,
     EnsureDataDirs,
     EnsureCgroupRoot,
     EnsureUserConfigDir,
@@ -64,8 +70,10 @@ enum Step {
     GenerateAdminTokenIfAbsent,
     WriteConfigIfAbsent,
     RepairUserConfigAccess,
+    WriteBuildkitUnit,
     WriteSystemdUnit,
     SystemctlDaemonReload,
+    SystemctlEnableBuildkitNow,
     SystemctlEnableNow,
     WaitActive,
 }
@@ -75,7 +83,9 @@ impl Step {
         use Step::*;
         match self {
             EnsureGroup => "groupadd --system denia (if absent)".into(),
+            EnsureBuildkitGroup => "groupadd --system buildkit (if absent)".into(),
             EnsureUser => "useradd --system denia (gid=denia, no home, nologin)".into(),
+            EnsureDeniaInBuildkitGroup => "usermod -aG buildkit denia".into(),
             EnsureDataDirs => {
                 "create /var/lib/denia/{sqlite,artifacts,tls,runtime,logs} 0700 denia:denia".into()
             }
@@ -104,8 +114,12 @@ impl Step {
                 "repair {} file modes and denia traverse ACLs",
                 ctx.user_config_dir.display()
             ),
+            WriteBuildkitUnit => {
+                "write /etc/systemd/system/buildkit.service (always overwrite)".into()
+            }
             WriteSystemdUnit => "write /etc/systemd/system/denia.service (always overwrite)".into(),
             SystemctlDaemonReload => "systemctl daemon-reload".into(),
+            SystemctlEnableBuildkitNow => "systemctl enable --now buildkit.service".into(),
             SystemctlEnableNow => "systemctl enable --now denia.service".into(),
             WaitActive => "wait up to 30s for systemctl is-active denia.service".into(),
         }
@@ -117,8 +131,14 @@ impl Step {
             EnsureGroup => {
                 provision::ensure_group("denia")?;
             }
+            EnsureBuildkitGroup => {
+                provision::ensure_group("buildkit")?;
+            }
             EnsureUser => {
                 provision::ensure_user("denia", "denia", "/var/lib/denia")?;
+            }
+            EnsureDeniaInBuildkitGroup => {
+                provision::ensure_user_in_group("denia", "buildkit")?;
             }
             EnsureDataDirs => provision::ensure_data_dirs()?,
             EnsureCgroupRoot => provision::ensure_cgroup_root()?,
@@ -146,8 +166,10 @@ impl Step {
                 }
             }
             RepairUserConfigAccess => provision::repair_user_config_access(ctx)?,
+            WriteBuildkitUnit => systemd::write_buildkit_unit()?,
             WriteSystemdUnit => systemd::write_unit(ctx)?,
             SystemctlDaemonReload => systemd::daemon_reload()?,
+            SystemctlEnableBuildkitNow => systemd::enable_now("buildkit.service")?,
             SystemctlEnableNow => systemd::enable_now("denia.service")?,
             WaitActive => systemd::wait_active("denia.service", Duration::from_secs(30))?,
         }
@@ -174,4 +196,34 @@ fn print_summary(ctx: &InstallContext) {
     println!("      -d '{{\"username\":\"admin\",\"password\":\"<strong>\"}}' \\");
     println!("      http://127.0.0.1:7180/v1/bootstrap");
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_plan_includes_buildkit_provisioning_before_denia_restart() {
+        let ctx = InstallContext::from_user("rakei", "/home/rakei");
+        let labels = plan()
+            .into_iter()
+            .map(|step| step.label(&ctx))
+            .collect::<Vec<_>>();
+
+        let buildkit_group = labels
+            .iter()
+            .position(|label| label.contains("groupadd --system buildkit"))
+            .expect("buildkit group step");
+        let buildkit_unit = labels
+            .iter()
+            .position(|label| label.contains("/etc/systemd/system/buildkit.service"))
+            .expect("buildkit unit step");
+        let denia_unit = labels
+            .iter()
+            .position(|label| label.contains("/etc/systemd/system/denia.service"))
+            .expect("denia unit step");
+
+        assert!(buildkit_group < buildkit_unit);
+        assert!(buildkit_unit < denia_unit);
+    }
 }
