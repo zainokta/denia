@@ -1,12 +1,5 @@
 import { Effect, Schema } from 'effect'
 
-export class Node extends Schema.Class<Node>('Node')({
-  id: Schema.Number,
-  name: Schema.String,
-}) {}
-
-export const Nodes = Schema.Array(Node)
-
 export const Role = Schema.Literals(['viewer', 'operator', 'admin'])
 export type Role = typeof Role.Type
 
@@ -132,13 +125,6 @@ export class ProjectInput extends Schema.Class<ProjectInput>('ProjectInput')({
   ),
 }) {}
 
-export const SecurityPosture = Schema.Struct({
-  userns: Schema.Boolean,
-  mapped_uid: Schema.NullOr(Schema.Number),
-  no_new_privs: Schema.Boolean,
-  caps_dropped: Schema.Boolean,
-})
-
 export const DeploymentStatus = Schema.Literals([
   'Pending',
   'Building',
@@ -164,11 +150,16 @@ export class Deployment extends Schema.Class<Deployment>('Deployment')({
 
 export const Deployments = Schema.Array(Deployment)
 
+// Mirrors src/observability/metrics.rs::MetricSnapshot. The backend reads cgroup
+// v2 counters at request time and returns AT MOST ONE element (the current
+// promoted deployment), or an empty array when the workload is scaled to zero /
+// has no live cgroup. `cpu_usage_usec` is a cumulative CPU-time counter (not a
+// percentage); `memory_current_bytes` is the instantaneous RSS. There is no
+// `recorded_at` and no server-side time series.
 export class MetricSnapshot extends Schema.Class<MetricSnapshot>('MetricSnapshot')({
-  service_id: Schema.Number,
-  cpu_percent: Schema.Number,
-  memory_bytes: Schema.Number,
-  recorded_at: Schema.String,
+  service_name: Schema.String,
+  cpu_usage_usec: Schema.Number,
+  memory_current_bytes: Schema.Number,
 }) {}
 
 export const Metrics = Schema.Array(MetricSnapshot)
@@ -209,6 +200,8 @@ export class WorkloadView extends Schema.Class<WorkloadView>('WorkloadView')({
   status: Schema.NullOr(DeploymentStatus),
   cpu_usage_usec: Schema.NullOr(Schema.Number),
   memory_current_bytes: Schema.NullOr(Schema.Number),
+  replica_count: Schema.Number,
+  healthy_replicas: Schema.Number,
 }) {}
 export const WorkloadViews = Schema.Array(WorkloadView)
 
@@ -254,6 +247,7 @@ export const ExternalImageSource = Schema.Struct({
 export type ExternalImageSource = typeof ExternalImageSource.Type
 
 export const ServiceSource = Schema.Union([GitSource, ExternalImageSource])
+export type ServiceSource = typeof ServiceSource.Type
 
 export const HealthCheck = Schema.Struct({
   path: Schema.String,

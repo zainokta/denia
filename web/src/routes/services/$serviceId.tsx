@@ -5,12 +5,13 @@ import {
   useParams,
 } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Boxes, Globe, KeyRound } from 'lucide-react'
 import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
 import { StatusBadge } from '#/components/StatusBadge'
+import { DeployPhase } from '#/components/DeployPhase'
 import { TlsToggle } from '#/components/TlsToggle'
 import { ServiceForm } from '#/components/ServiceForm'
 import { Tabs } from '#/components/Tabs'
@@ -33,11 +34,25 @@ import {
   shortId,
 } from '#/lib/format'
 import type {
-  Deployment,
   MetricSnapshot,
   Service,
   ServiceInput,
 } from '#/effect/schema'
+
+// One client-side metrics sample: a percentage derived from successive
+// `cpu_usage_usec` deltas plus the instantaneous memory reading and the wall
+// clock at which we observed it. The backend has no time series, so the chart
+// is built from samples accumulated while the tab is open.
+interface MetricsSample {
+  readonly cpuPct: number
+  readonly memoryBytes: number
+  readonly at: number
+}
+
+const METRICS_HISTORY = 40
+
+// Deployment statuses that warrant fast polling on the deployments timeline.
+const DEPLOY_IN_PROGRESS = ['Pending', 'Building', 'Starting']
 
 const getService = (id: string) =>
   Effect.gen(function* () {
@@ -163,24 +178,21 @@ export function ServiceDetail() {
     queryFn: () => runQuery(listProjects),
   })
 
-  const isInProgress = (() => {
-    const data = (queryClient.getQueryData([
-      'services',
-      id,
-      'deployments',
-    ]) as Deployment[] | undefined) ?? []
-    if (data.length === 0) return false
-    const newest = data.reduce((a, b) => (a.id > b.id ? a : b))
-    return ['Pending', 'Building', 'Starting'].includes(newest.status)
-  })()
-
   const {
     data: deployments = [],
     isLoading: deploymentsLoading,
   } = useQuery({
     queryKey: ['services', id, 'deployments'],
     queryFn: () => runQuery(getDeployments(id)),
-    refetchInterval: isInProgress ? 2000 : false,
+    // Poll fast only while the newest deployment is mid-flight. Derived from the
+    // query's own data (passed to the callback) rather than a cache read during
+    // render, so the interval reacts as soon as fresh data lands.
+    refetchInterval: (query) => {
+      const data = query.state.data ?? []
+      if (data.length === 0) return false
+      const newest = data.reduce((a, b) => (a.id > b.id ? a : b))
+      return DEPLOY_IN_PROGRESS.includes(newest.status) ? 2000 : false
+    },
     refetchIntervalInBackground: false,
   })
 
@@ -196,12 +208,7 @@ export function ServiceDetail() {
     refetchIntervalInBackground: false,
   })
 
-  const { data: requests = [], isLoading: requestsLoading } = useQuery({
-    queryKey: ['services', id, 'requests'],
-    queryFn: () => runQuery(getRequests(id)),
-    refetchInterval: 5000,
-    refetchIntervalInBackground: false,
-  })
+  const metricsHistory = useServiceMetricsHistory(metrics)
 
   const canOperate = (() => {
     if (isSuperAdmin) return true
@@ -209,6 +216,17 @@ export function ServiceDetail() {
     const role = roleForActiveProject(service.project_id)
     return role !== undefined && can('operator', role)
   })()
+
+  // The access-log endpoint requires Operator (src/api/observability.rs); gating
+  // the query keeps a read-only viewer from triggering a spurious 403 when they
+  // open the metrics tab.
+  const { data: requests = [], isLoading: requestsLoading } = useQuery({
+    queryKey: ['services', id, 'requests'],
+    queryFn: () => runQuery(getRequests(id)),
+    refetchInterval: 5000,
+    refetchIntervalInBackground: false,
+    enabled: canOperate,
+  })
 
   const { data: domains = [] } = useQuery({
     queryKey: ['services', id, 'domains'],
@@ -606,6 +624,14 @@ export function ServiceDetail() {
                   <span className="text-faint tnum">{deployments.length}</span>
                 </p>
 
+                {/* Phase line for the active (newest, non-terminal) deployment. */}
+                {newestDeployment &&
+                DEPLOY_IN_PROGRESS.includes(newestDeployment.status) ? (
+                  <div className="panel panel-pad">
+                    <DeployPhase status={newestDeployment.status} />
+                  </div>
+                ) : null}
+
                 {newestDeployment && newestDeployment.artifact ? (
                   <p className="cluster" style={{ fontSize: 'var(--text-label)' }}>
                     <span className="text-faint">artifact</span>
@@ -701,8 +727,13 @@ export function ServiceDetail() {
           // metrics
           return (
             <div className="stack-lg">
-              <MetricsCharts metrics={metrics} loading={metricsLoading} />
+              <MetricsCharts
+                latest={metrics[0]}
+                history={metricsHistory}
+                loading={metricsLoading}
+              />
 
+              {canOperate ? (
               <section className="stack">
                 <p className="kicker">access log</p>
                 {requestsLoading && requests.length === 0 ? (
@@ -761,6 +792,7 @@ export function ServiceDetail() {
                   </div>
                 )}
               </section>
+              ) : null}
             </div>
           )
         }}
@@ -852,17 +884,64 @@ function AutoscalePanel({
   )
 }
 
+// The backend `/metrics` endpoint returns at most ONE current snapshot with
+// cumulative `cpu_usage_usec` (microseconds of CPU time since the cgroup was
+// created) and instantaneous `memory_current_bytes`. There is no server-side
+// time series, so we derive an instantaneous CPU% from the delta between two
+// successive polls (busy CPU-time over wall-clock elapsed) and accumulate a
+// short client-side history for the trend chart. Mirrors the node-gauge delta
+// approach used on the dashboard.
+function useServiceMetricsHistory(
+  metrics: ReadonlyArray<MetricSnapshot>,
+): ReadonlyArray<MetricsSample> {
+  const [series, setSeries] = useState<ReadonlyArray<MetricsSample>>([])
+  const prev = useRef<{ cpuUsec: number; at: number } | null>(null)
+
+  const latest = metrics.length > 0 ? metrics[0] : undefined
+
+  useEffect(() => {
+    if (!latest) {
+      prev.current = null
+      setSeries([])
+      return
+    }
+    const now = Date.now()
+    const last = prev.current
+    if (last && now > last.at) {
+      const dCpuUsec = Math.max(0, latest.cpu_usage_usec - last.cpuUsec)
+      const elapsedUsec = (now - last.at) * 1000
+      const cpuPct =
+        elapsedUsec > 0
+          ? Math.max(0, Math.min(100, (dCpuUsec / elapsedUsec) * 100))
+          : 0
+      setSeries((s) =>
+        [
+          ...s,
+          { cpuPct, memoryBytes: latest.memory_current_bytes, at: now },
+        ].slice(-METRICS_HISTORY),
+      )
+    }
+    prev.current = { cpuUsec: latest.cpu_usage_usec, at: now }
+    // Keying on the cumulative counter + memory means a fresh poll (even with an
+    // identical counter) advances the series via the wall-clock delta.
+  }, [latest?.cpu_usage_usec, latest?.memory_current_bytes, latest])
+
+  return series
+}
+
 function MetricsCharts({
-  metrics,
+  latest,
+  history,
   loading,
 }: {
-  metrics: ReadonlyArray<MetricSnapshot>
+  latest: MetricSnapshot | undefined
+  history: ReadonlyArray<MetricsSample>
   loading: boolean
 }) {
-  if (loading && metrics.length === 0) {
+  if (loading && !latest) {
     return <SkeletonRows rows={4} />
   }
-  if (metrics.length === 0) {
+  if (!latest) {
     return (
       <div className="panel">
         <EmptyState
@@ -873,11 +952,11 @@ function MetricsCharts({
     )
   }
 
-  const xLabels = metrics.map((m) => formatClock(m.recorded_at))
-  // cpu_percent is a 0..1 fraction on the wire; render as whole percent.
-  const cpuValues = metrics.map((m) => m.cpu_percent * 100)
-  const memValues = metrics.map((m) => m.memory_bytes)
-  const latest = metrics[metrics.length - 1]
+  const xLabels = history.map((s) => formatClock(new Date(s.at).toISOString()))
+  const cpuValues = history.map((s) => s.cpuPct)
+  const memValues = history.map((s) => s.memoryBytes)
+  // The current CPU% is the most recent derived sample (none yet on first poll).
+  const currentCpu = history.length > 0 ? history[history.length - 1].cpuPct : null
 
   return (
     <div className="stack-lg">
@@ -885,66 +964,81 @@ function MetricsCharts({
         <div className="panel-head">
           <p className="kicker">cpu</p>
           <span className="t-title tnum">
-            {formatPercent(latest.cpu_percent * 100, 1)}
+            {currentCpu === null ? '—' : formatPercent(currentCpu, 1)}
           </span>
         </div>
         <div className="panel panel-pad">
-          <AreaChart
-            series={[
-              { label: 'cpu', color: 'var(--pink)', values: cpuValues },
-            ]}
-            xLabels={xLabels}
-            yFormat={(v) => formatPercent(v, 0)}
-          />
+          {cpuValues.length > 1 ? (
+            <AreaChart
+              series={[
+                { label: 'cpu', color: 'var(--pink)', values: cpuValues },
+              ]}
+              xLabels={xLabels}
+              yFormat={(v) => formatPercent(v, 0)}
+            />
+          ) : (
+            <p className="text-faint">Sampling… the CPU trend builds from successive readings.</p>
+          )}
         </div>
       </section>
 
       <section className="stack">
         <div className="panel-head">
           <p className="kicker">memory</p>
-          <span className="t-title tnum">{formatBytes(latest.memory_bytes)}</span>
+          <span className="t-title tnum">
+            {formatBytes(latest.memory_current_bytes)}
+          </span>
         </div>
         <div className="panel panel-pad">
-          <AreaChart
-            series={[
-              { label: 'memory', color: 'var(--violet)', values: memValues },
-            ]}
-            xLabels={xLabels}
-            yFormat={(v) => formatBytes(v)}
-          />
+          {memValues.length > 1 ? (
+            <AreaChart
+              series={[
+                { label: 'memory', color: 'var(--violet)', values: memValues },
+              ]}
+              xLabels={xLabels}
+              yFormat={(v) => formatBytes(v)}
+            />
+          ) : (
+            <p className="text-faint">Sampling… the memory trend builds from successive readings.</p>
+          )}
         </div>
       </section>
 
       {/* Tabular samples back the charts with exact figures. */}
-      <section className="stack">
-        <p className="kicker">samples</p>
-        <div className="panel overflow-hidden">
-          <table className="dtable">
-            <thead>
-              <tr>
-                <th>time</th>
-                <th className="num">cpu</th>
-                <th className="num">memory</th>
-              </tr>
-            </thead>
-            <tbody>
-              {metrics.map((m, i) => (
-                <tr key={`${m.recorded_at}-${i}`}>
-                  <td className="text-faint">
-                    <Num>{formatClock(m.recorded_at)}</Num>
-                  </td>
-                  <td className="num">
-                    <Num>{formatPercent(m.cpu_percent * 100, 1)}</Num>
-                  </td>
-                  <td className="num">
-                    <Num>{formatBytes(m.memory_bytes)}</Num>
-                  </td>
+      {history.length > 0 ? (
+        <section className="stack">
+          <p className="kicker">samples</p>
+          <div className="panel overflow-hidden">
+            <table className="dtable">
+              <thead>
+                <tr>
+                  <th>time</th>
+                  <th className="num">cpu</th>
+                  <th className="num">memory</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+              </thead>
+              <tbody>
+                {history
+                  .slice()
+                  .reverse()
+                  .map((s) => (
+                    <tr key={s.at}>
+                      <td className="text-faint">
+                        <Num>{formatClock(new Date(s.at).toISOString())}</Num>
+                      </td>
+                      <td className="num">
+                        <Num>{formatPercent(s.cpuPct, 1)}</Num>
+                      </td>
+                      <td className="num">
+                        <Num>{formatBytes(s.memoryBytes)}</Num>
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
     </div>
   )
 }
