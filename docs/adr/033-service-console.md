@@ -13,7 +13,7 @@ Operators need an interactive way to inspect a deployed service from inside Deni
 Denia will add a live service console exposed through the management API, web console, and the `denia console` subcommand of the existing single binary.
 
 - The console attaches to a selected live replica of the service's promoted deployment.
-- The runtime launches `/bin/sh` through a new PTY-backed `setns` path that joins the target replica's namespaces and cgroup.
+- The runtime launches `/bin/sh` through a new PTY-backed `setns` path that joins the target replica's namespaces and cgroup. PID namespace entry uses a small host-visible supervisor: after joining the target PID namespace fd, the supervisor forks the actual shell so the shell is born in the replica's PID namespace while Denia still has a direct child to reap.
 - The existing `spawn_namespaced_process` service/job launcher remains unchanged.
 - The browser and CLI first create a short-lived single-use console ticket through bearer-authenticated HTTP, then open a websocket using that ticket.
 - Websocket binary frames carry terminal input/output bytes. Text JSON frames carry readiness, resize, exit, close, and error control messages.
@@ -21,6 +21,7 @@ Denia will add a live service console exposed through the management API, web co
 - Denia records metadata-only audit events: user/principal, service id, deployment id, replica index, session id, start/end time, and exit reason. The exit reason is the real outcome of the console child — `exit code N`, `signal N`, or `unknown` — captured by reaping the child (see below), not a placeholder.
 - The console shell is reaped on session end. The bridge sends `SIGTERM`, waits a bounded grace period, escalates to `SIGKILL` for a wedged or `SIGTERM`-ignoring shell, then `waitpid`s it so it cannot linger as a zombie holding the replica's namespaces open. The runtime additionally keeps a backstop set of live console pids that its child reaper sweeps, so a dropped bridge task still gets the child collected. The captured exit status feeds both the audit "exit reason" and the protocol `exit` frame's `code`.
 - The console child re-applies the workload's per-launch privilege floor before `execve`: `no_new_privs`, capability-bounding-set drop, and the same seccomp denylist the service launcher installs (ADR-005). It already inherits the replica's user namespace (capless versus the host); this closes the asymmetry where the interactive shell ran without the workload's syscall filter and privilege floor.
+- The console shell also switches to mapped user-namespace root (`setresgid(0,0,0)` then `setresuid(0,0,0)`) before `execve`, matching the workload launcher so it can write to the per-replica upper layer as container uid 0. Just before `execve`, it performs the same best-effort inherited-fd sweep as the workload launcher with `close_range(2)`, keeping only stdio and the close-on-exec setup status pipe.
 - The console child re-validates the target replica's identity (the `/proc/<pid>/stat` start-time captured when the request resolved the live replica) after joining the namespace fds and aborts if the pid was recycled, closing the PID-reuse TOCTOU window on `setns`.
 - Denia does not persist terminal input or output.
 - `/bin/sh` is the only v1 shell. Images without `/bin/sh` return a clear console error.
