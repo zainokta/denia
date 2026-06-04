@@ -127,6 +127,18 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
                 create_dir_all_no_symlink(rootfs_dir, parent)?;
             }
             let _ = fs::remove_file(&safe_path);
+            // A prior layer may have created a real directory at this path that
+            // the current layer redefines as a symlink (e.g. the `/lib ->
+            // usr/lib` usrmerge in Debian-based images). `remove_file` cannot
+            // remove a directory, so clear it explicitly; otherwise `symlink`
+            // fails EEXIST. `symlink_metadata` does not follow links, so a
+            // symlink already at this path reports `is_dir() == false` and is
+            // left for `remove_file` above — only a genuine directory is razed.
+            if let Ok(meta) = fs::symlink_metadata(&safe_path)
+                && meta.is_dir()
+            {
+                fs::remove_dir_all(&safe_path)?;
+            }
             std::os::unix::fs::symlink(&target, &safe_path)?;
         } else {
             let entry_size = entry.header().entry_size()?;
@@ -463,6 +475,27 @@ mod tests {
         TarRootfsUnpacker::new().unpack(&[l1, l2], &rootfs).unwrap();
         assert!(!rootfs.join("d/old.txt").exists());
         assert_eq!(fs::read_to_string(rootfs.join("d/new.txt")).unwrap(), "y");
+    }
+
+    #[test]
+    fn symlink_replaces_existing_directory_across_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        // Layer 1 materializes a real directory `lib/` (via its child file).
+        let l1 = gz_layer(dir.path(), "l1.tar.gz", &[("lib/old.so", b"x")]);
+        // Layer 2 redefines `lib` as a symlink (usrmerge-style). Pre-fix this
+        // failed EEXIST because `remove_file` cannot clear the directory.
+        let l2 = gz_symlink_layer(dir.path(), "l2.tar.gz", "lib", Path::new("/usr/lib"));
+        TarRootfsUnpacker::new().unpack(&[l1, l2], &rootfs).unwrap();
+        let meta = fs::symlink_metadata(rootfs.join("lib")).unwrap();
+        assert!(
+            meta.file_type().is_symlink(),
+            "lib must be replaced by a symlink across layers"
+        );
+        assert!(
+            !rootfs.join("lib/old.so").exists(),
+            "the replaced directory's contents must be gone"
+        );
     }
 
     #[test]
