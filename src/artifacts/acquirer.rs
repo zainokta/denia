@@ -425,9 +425,22 @@ impl ArtifactAcquirer {
             .join(upload_uuid.to_string())
             .join("context");
         let context_dir = confine_under(&staged, context_path)?;
-        let dockerfile_dir = confine_under(&staged, dockerfile_path)?;
+        let dockerfile_file = confine_under(&staged, dockerfile_path)?;
+        let dockerfile_dir = dockerfile_file.parent().ok_or_else(|| {
+            ArtifactAcquireError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("dockerfile_path has no parent: {dockerfile_path}"),
+            ))
+        })?;
+        let dockerfile_name = dockerfile_file.file_name().ok_or_else(|| {
+            ArtifactAcquireError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("dockerfile_path has no file name: {dockerfile_path}"),
+            ))
+        })?;
         let context = format!("context={}", context_dir.to_string_lossy());
         let dockerfile = format!("dockerfile={}", dockerfile_dir.to_string_lossy());
+        let filename = format!("filename={}", dockerfile_name.to_string_lossy());
         let output = format!(
             "type=oci,dest={}",
             self.config.artifact_dir.to_string_lossy()
@@ -441,6 +454,8 @@ impl ArtifactAcquirer {
             context.as_str(),
             "--local",
             dockerfile.as_str(),
+            "--opt",
+            filename.as_str(),
             "--output",
             output.as_str(),
         ];
@@ -634,7 +649,7 @@ mod tests {
 
         let source = ArtifactSource::UploadedContext {
             upload_id: upload_id.to_string(),
-            dockerfile_path: ".".to_string(),
+            dockerfile_path: "Dockerfile".to_string(),
             context_path: ".".to_string(),
         };
 
@@ -648,6 +663,24 @@ mod tests {
         assert!(
             cmd.contains(&format!("uploads/{upload_id}/context")),
             "buildctl invocation must reference uploads/<id>/context, got: {cmd}"
+        );
+        assert!(
+            cmd.contains(&format!(
+                "--local dockerfile={}",
+                context_subdir.to_string_lossy()
+            )),
+            "buildctl dockerfile local input must be the directory containing Dockerfile, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains(&format!(
+                "--local dockerfile={}",
+                context_subdir.join("Dockerfile").to_string_lossy()
+            )),
+            "buildctl dockerfile local input must not be the Dockerfile file itself, got: {cmd}"
+        );
+        assert!(
+            cmd.contains("--opt filename=Dockerfile"),
+            "buildctl invocation must name the Dockerfile within the dockerfile local context, got: {cmd}"
         );
     }
 }
