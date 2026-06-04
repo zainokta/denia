@@ -33,6 +33,19 @@ const ACME_CHALLENGE_PREFIX: &str = "/.well-known/acme-challenge/";
 /// Denia domain-verification challenge path prefix (ADR-013, axum control plane).
 const DENIA_CHALLENGE_PREFIX: &str = "/.well-known/denia-challenge/";
 
+/// Inbound forwarding/identity headers stripped from every proxied request so a
+/// workload cannot be fed a client-spoofed value (review MED — header hygiene).
+/// `X-Forwarded-For` is included here and then re-set to the real client IP in
+/// `upstream_request_filter`. Denia is the only trusted forwarder.
+const STRIPPED_FORWARDING_HEADERS: &[&str] = &[
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-forwarded-port",
+    "x-real-ip",
+    "forwarded",
+];
+
 /// Decision produced by the `:80` `request_filter` classifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Port80Decision {
@@ -205,6 +218,17 @@ fn forwarded_for(client: Option<std::net::SocketAddr>) -> Option<String> {
     client.map(|addr| addr.ip().to_string())
 }
 
+/// Remove every client-supplied forwarding/identity header from a proxied
+/// request (review MED — header hygiene). `remove_header` strips ALL values for
+/// a name, so a multi-valued `X-Forwarded-For` etc. is fully cleared before the
+/// proxy re-sets the trusted value. Extracted as a free function over
+/// `RequestHeader` so it is unit-tested without a live `Session`.
+fn strip_inbound_forwarding_headers(req: &mut pingora::http::RequestHeader) {
+    for header in STRIPPED_FORWARDING_HEADERS {
+        req.remove_header(*header);
+    }
+}
+
 /// Strip a trailing `:port` from a host authority. IPv6 literals are returned
 /// verbatim (Denia only routes DNS names; bracketed literals never match a
 /// validated route key anyway).
@@ -345,10 +369,17 @@ impl ProxyHttp for DeniaProxy {
         upstream_request: &mut pingora::http::RequestHeader,
         _ctx: &mut Self::CTX,
     ) -> pingora::Result<()> {
+        // Strip every client-supplied forwarding/identity header so a workload
+        // that trusts them cannot be confused by a spoofed value (review MED —
+        // header hygiene). Denia is the sole trusted forwarder; nothing
+        // upstream of the proxy is trusted to set these. `X-Forwarded-For` is
+        // then re-set below to the real client IP (the loopback-trusting rate
+        // limiter keys on it, ADR-035).
+        strip_inbound_forwarding_headers(upstream_request);
         let client = session.client_addr().and_then(|a| a.as_inet()).copied();
         if let Some(value) = forwarded_for(client) {
-            // Overwrite (not append): strip any client-supplied X-Forwarded-For
-            // so the rate-limit key cannot be spoofed.
+            // Overwrite (not append): the header was just stripped, so this is
+            // the only X-Forwarded-For the upstream sees.
             let _ = upstream_request.insert_header("X-Forwarded-For", &value);
         }
         Ok(())
@@ -481,6 +512,38 @@ mod classify_tests {
         let client = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 54321);
         assert_eq!(forwarded_for(Some(client)).as_deref(), Some("203.0.113.7"));
         assert_eq!(forwarded_for(None), None);
+    }
+
+    #[test]
+    fn strip_inbound_forwarding_headers_clears_all_spoofable_headers() {
+        let mut req =
+            pingora::http::RequestHeader::build("GET", b"/", None).expect("build request header");
+        // Client-supplied forwarding/identity headers (including a multi-valued
+        // X-Forwarded-For) plus a benign header that must survive.
+        req.append_header("X-Forwarded-For", "1.2.3.4").unwrap();
+        req.append_header("X-Forwarded-For", "5.6.7.8").unwrap();
+        req.insert_header("X-Forwarded-Host", "evil.example.com")
+            .unwrap();
+        req.insert_header("X-Forwarded-Proto", "https").unwrap();
+        req.insert_header("X-Forwarded-Port", "443").unwrap();
+        req.insert_header("X-Real-IP", "9.9.9.9").unwrap();
+        req.insert_header("Forwarded", "for=1.2.3.4;host=evil")
+            .unwrap();
+        req.insert_header("X-Custom", "keep-me").unwrap();
+
+        strip_inbound_forwarding_headers(&mut req);
+
+        for stripped in STRIPPED_FORWARDING_HEADERS {
+            assert!(
+                req.headers.get(*stripped).is_none(),
+                "{stripped} must be fully removed (including multi-valued)"
+            );
+        }
+        // Non-forwarding headers are untouched.
+        assert_eq!(
+            req.headers.get("X-Custom").map(|v| v.as_bytes()),
+            Some(b"keep-me".as_slice())
+        );
     }
 
     #[test]
