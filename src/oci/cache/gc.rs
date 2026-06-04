@@ -125,11 +125,18 @@ impl LayerCacheGc {
                 }
                 let is_old = match lastref {
                     Some(t) => t < cutoff,
-                    // No sidecar means we never observed a reference — treat
-                    // as expired (the put path always writes one, so this is
-                    // either a manual placement or a partially-completed put
-                    // whose sidecar got rolled back).
-                    None => true,
+                    // No sidecar: fall back to the blob file's own mtime rather
+                    // than treating it as instantly expired. `finalize_temp`
+                    // now writes the sidecar before renaming the blob in, so a
+                    // sidecar-less blob is either a manual placement or a crash
+                    // between operations — using the blob mtime keeps a
+                    // freshly-written-but-sidecar-less blob alive until it is
+                    // genuinely old. If the blob mtime is unavailable, fall
+                    // back to "expired".
+                    None => std::fs::metadata(&blob_path)
+                        .and_then(|m| m.modified())
+                        .map(|t| t < cutoff)
+                        .unwrap_or(true),
                 };
                 if !is_old {
                     report.kept_recent_entries += 1;

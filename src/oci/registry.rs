@@ -1,7 +1,6 @@
 use std::net::IpAddr;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use oci_client::Reference;
@@ -138,12 +137,53 @@ impl OciImagePuller for RegistryImagePuller {
 async fn validate_registry_resolution(reference: &Reference) -> Result<(), OciError> {
     let registry = reference.resolve_registry();
     let (host, port) = registry_lookup_target(registry)?;
-    let addrs: Vec<IpAddr> = tokio::net::lookup_host((host.as_str(), port))
+    let first = resolve_registry_addrs(registry, &host, port).await?;
+    validate_resolved_registry_addrs(registry, &first)?;
+
+    // DNS-rebinding TOCTOU mitigation. `oci-client` builds its own
+    // `reqwest::Client` and exposes no connector/resolver hook, so we cannot
+    // bind the exact socket it dials to the address we validated here. A
+    // rebinding attacker could therefore answer this guard with a public IP
+    // and the client's later connect with a private one.
+    //
+    // To shrink that window we resolve a SECOND time and require the answer
+    // set to be IDENTICAL (and still all-public). An attacker flipping
+    // responses between lookups is rejected; a stable benign host is
+    // unaffected. This is not a hard socket-level guarantee — see ADR-014 for
+    // the documented residual limitation and the CRUD-time literal-IP check
+    // that backs it — but it is materially stronger than a single lookup.
+    let second = resolve_registry_addrs(registry, &host, port).await?;
+    validate_resolved_registry_addrs(registry, &second)?;
+    if !resolution_sets_match(&first, &second) {
+        return Err(OciError::Pull(format!(
+            "registry {registry} DNS resolution changed between checks (possible rebinding)"
+        )));
+    }
+    Ok(())
+}
+
+async fn resolve_registry_addrs(
+    registry: &str,
+    host: &str,
+    port: u16,
+) -> Result<Vec<IpAddr>, OciError> {
+    Ok(tokio::net::lookup_host((host, port))
         .await
         .map_err(|e| OciError::Pull(format!("registry DNS lookup failed for {registry}: {e}")))?
         .map(|addr| addr.ip())
-        .collect();
-    validate_resolved_registry_addrs(registry, &addrs)
+        .collect())
+}
+
+/// Order-insensitive equality of two resolution answers.
+fn resolution_sets_match(a: &[IpAddr], b: &[IpAddr]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut a_sorted: Vec<IpAddr> = a.to_vec();
+    let mut b_sorted: Vec<IpAddr> = b.to_vec();
+    a_sorted.sort();
+    b_sorted.sort();
+    a_sorted == b_sorted
 }
 
 fn registry_lookup_target(registry: &str) -> Result<(String, u16), OciError> {
@@ -250,20 +290,27 @@ async fn ensure_cached(
         }
     }
 
+    // Use a PER-PULL UNIQUE tmp path opened with O_EXCL (`create_new`). Two
+    // concurrent pulls of the same digest therefore write to DISTINCT tmp
+    // files — they can never interleave bytes into one shared `<digest>.tmp`
+    // or rename a file out from under each other. `pull_blob` verifies the
+    // stream digest as it writes, so each tmp file holds correct bytes; both
+    // finalize-renames target the same content-addressed name with identical
+    // verified content, so whichever wins, the final blob is correct.
     let tmp = cache
-        .temp_path(&desc.digest)
+        .unique_temp_path(&desc.digest)
         .map_err(|e| OciError::Pull(format!("cache temp_path: {e}")))?;
     if let Some(parent) = tmp.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(OciError::Io)?;
     }
-    // Open exclusive — we never want two pulls writing the same tmp file.
-    // Two concurrent pulls of the same digest race on this open; the loser
-    // simply falls through to a cache hit after retry. Keep this simple
-    // (a per-digest mutex would belong inside the cache; for now the
-    // reservation map + retry pattern is enough).
-    let mut file = match tokio::fs::File::create(&tmp).await {
+    let mut file = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .await
+    {
         Ok(f) => f,
         Err(e) => return Err(OciError::Io(e)),
     };
@@ -286,12 +333,6 @@ pub fn build_cache(
     verify_on_hit: OciCacheVerifyMode,
 ) -> Result<LayerCache, super::cache::CacheError> {
     LayerCache::new(root, verify_on_hit)
-}
-
-// Keep `Arc` usable in callers that want to share the cache without re-cloning.
-#[allow(dead_code)]
-pub fn share_cache(cache: LayerCache) -> Arc<LayerCache> {
-    Arc::new(cache)
 }
 
 #[cfg(test)]

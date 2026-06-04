@@ -91,6 +91,17 @@ pub struct AppConfig {
     /// not deleted (guards against an in-flight push between blob upload and
     /// manifest commit). Default = 1 hour.
     pub registry_gc_grace_secs: u64,
+    /// Maximum on-the-wire size accepted for a single hosted-registry blob
+    /// upload (the cumulative size of all PATCH chunks plus the trailing PUT
+    /// body). Enforced while streaming to disk so an Operator-capable token
+    /// cannot OOM the daemon. Default = 10 GiB. Override with
+    /// `DENIA_REGISTRY_MAX_BLOB_BYTES`.
+    pub registry_max_blob_bytes: u64,
+    /// Maximum size accepted for a single hosted-registry manifest body.
+    /// Manifests are small JSON documents; this is a generous bound that still
+    /// rejects pathological payloads. Default = 16 MiB. Override with
+    /// `DENIA_REGISTRY_MAX_MANIFEST_BYTES`.
+    pub registry_max_manifest_bytes: u64,
     /// Age public key used to encrypt control-plane-managed secrets (registry
     /// credentials, etc.). Required at the point of first encryption; absence
     /// is reported as a 400/500 at API time, not at boot. See ADR-021.
@@ -560,6 +571,14 @@ impl AppConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(60 * 60);
+        let registry_max_blob_bytes = env::var("DENIA_REGISTRY_MAX_BLOB_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10u64 * 1024 * 1024 * 1024);
+        let registry_max_manifest_bytes = env::var("DENIA_REGISTRY_MAX_MANIFEST_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(16u64 * 1024 * 1024);
         let age_key_file = env::var("DENIA_AGE_KEY_FILE")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -639,6 +658,8 @@ impl AppConfig {
             oci_gc_retention_secs,
             registry_gc_interval_secs,
             registry_gc_grace_secs,
+            registry_max_blob_bytes,
+            registry_max_manifest_bytes,
             age_recipient,
             age_key_file,
             uploads_dir,
@@ -691,6 +712,8 @@ impl AppConfig {
             oci_gc_retention_secs: 7 * 24 * 60 * 60,
             registry_gc_interval_secs: 24 * 60 * 60,
             registry_gc_grace_secs: 60 * 60,
+            registry_max_blob_bytes: 10u64 * 1024 * 1024 * 1024,
+            registry_max_manifest_bytes: 16u64 * 1024 * 1024,
             age_recipient: Some("age1test".into()),
             age_key_file: data_dir.join("age.key"),
             uploads_dir: data_dir.join("uploads"),

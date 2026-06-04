@@ -155,8 +155,11 @@ impl ArtifactAcquirer {
                     dockerfile_path,
                     context_path,
                 };
-                let digest = self.acquire_git(runner, &source).await?;
-                Ok(ArtifactRecord::new(digest, ArtifactKind::OciImage, source)?)
+                let output_dir = self.unique_build_dir();
+                std::fs::create_dir_all(&output_dir)?;
+                let digest = self.acquire_git(runner, &source, &output_dir).await;
+                let _ = std::fs::remove_dir_all(&output_dir);
+                Ok(ArtifactRecord::new(digest?, ArtifactKind::OciImage, source)?)
             }
             ArtifactAcquireRequest::ExternalImage { image } => {
                 let source = ArtifactSource::ExternalRegistry { image };
@@ -175,10 +178,21 @@ impl ArtifactAcquirer {
                     dockerfile_path,
                     context_path,
                 };
-                let digest = self.acquire_staged(runner, &source).await?;
-                Ok(ArtifactRecord::new(digest, ArtifactKind::OciImage, source)?)
+                let output_dir = self.unique_build_dir();
+                std::fs::create_dir_all(&output_dir)?;
+                let digest = self.acquire_staged(runner, &source, &output_dir).await;
+                let _ = std::fs::remove_dir_all(&output_dir);
+                Ok(ArtifactRecord::new(digest?, ArtifactKind::OciImage, source)?)
             }
         }
+    }
+
+    /// A fresh, unique OCI-layout output directory for a single build.
+    fn unique_build_dir(&self) -> std::path::PathBuf {
+        self.config
+            .artifact_dir
+            .join("builds")
+            .join(uuid::Uuid::now_v7().to_string())
     }
 
     pub async fn acquire_rootfs_bundle(
@@ -187,21 +201,12 @@ impl ArtifactAcquirer {
         request: ArtifactAcquireRequest,
         process: RootfsBundleSpec,
     ) -> Result<ArtifactRecord, ArtifactAcquireError> {
-        let image_artifact = self.acquire(runner, request).await?;
-        let bundle_dir = self
-            .materialize_rootfs_bundle_inprocess(&image_artifact)
-            .await?;
+        let (record, bundle_dir) = self.build_and_materialize(runner, request).await?;
         std::fs::write(
             bundle_dir.join("process.json"),
             serde_json::to_vec_pretty(&process)?,
         )?;
-
-        ArtifactRecord::new(
-            image_artifact.digest,
-            ArtifactKind::RootfsBundle,
-            image_artifact.source,
-        )
-        .map_err(ArtifactAcquireError::Artifact)
+        Ok(record)
     }
 
     /// Materializes a rootfs bundle for the given acquisition request.
@@ -224,18 +229,90 @@ impl ArtifactAcquirer {
             }
             ArtifactAcquireRequest::Git { .. } | ArtifactAcquireRequest::Upload { .. } => {
                 let _ = auth;
-                let image_artifact = self.acquire(runner, request).await?;
-                let _bundle_dir = self
-                    .materialize_rootfs_bundle_inprocess(&image_artifact)
-                    .await?;
-                ArtifactRecord::new(
-                    image_artifact.digest,
-                    ArtifactKind::RootfsBundle,
-                    image_artifact.source,
-                )
-                .map_err(ArtifactAcquireError::Artifact)
+                let (record, _bundle_dir) = self.build_and_materialize(runner, request).await?;
+                Ok(record)
             }
         }
+    }
+
+    /// Build a Git/Upload request into a UNIQUE per-build OCI layout directory,
+    /// read that layout back, and materialize the rootfs bundle from it.
+    ///
+    /// Each build outputs to `<artifact_dir>/builds/<uuid>` rather than the
+    /// shared `artifact_dir`, so concurrent builds cannot clobber each other's
+    /// `index.json`/`manifests[0]` and cross-contaminate (a build reading the
+    /// wrong image). The temporary layout dir is removed on every path.
+    async fn build_and_materialize(
+        &self,
+        runner: &dyn CommandRunner,
+        request: ArtifactAcquireRequest,
+    ) -> Result<(ArtifactRecord, std::path::PathBuf), ArtifactAcquireError> {
+        let output_dir = self.unique_build_dir();
+        std::fs::create_dir_all(&output_dir)?;
+
+        let result = self
+            .build_and_materialize_in(runner, request, &output_dir)
+            .await;
+        // Always clean up the per-build layout dir; the rootfs bundle was
+        // already written to its own content-addressed directory.
+        let _ = std::fs::remove_dir_all(&output_dir);
+        result
+    }
+
+    async fn build_and_materialize_in(
+        &self,
+        runner: &dyn CommandRunner,
+        request: ArtifactAcquireRequest,
+        output_dir: &std::path::Path,
+    ) -> Result<(ArtifactRecord, std::path::PathBuf), ArtifactAcquireError> {
+        let (digest, source) = match request {
+            ArtifactAcquireRequest::Git {
+                repo_url,
+                git_ref,
+                dockerfile_path,
+                context_path,
+            } => {
+                let source = ArtifactSource::BuildKit {
+                    repo_url,
+                    git_ref,
+                    dockerfile_path,
+                    context_path,
+                };
+                let digest = self.acquire_git(runner, &source, output_dir).await?;
+                (digest, source)
+            }
+            ArtifactAcquireRequest::Upload {
+                upload_id,
+                dockerfile_path,
+                context_path,
+            } => {
+                let source = ArtifactSource::UploadedContext {
+                    upload_id,
+                    dockerfile_path,
+                    context_path,
+                };
+                let digest = self.acquire_staged(runner, &source, output_dir).await?;
+                (digest, source)
+            }
+            ArtifactAcquireRequest::ExternalImage { .. } => {
+                unreachable!("build_and_materialize is only for Git/Upload sources");
+            }
+        };
+
+        let image_artifact = ArtifactRecord::new(digest, ArtifactKind::OciImage, source)?;
+        let pulled = self.puller.read_layout(output_dir).await?;
+        let bundle_dir = self.write_bundle(&image_artifact.digest, &pulled.layers)?;
+        let process = rootfs_bundle_from_oci_config(&pulled.config)?;
+        std::fs::write(
+            bundle_dir.join("process.json"),
+            serde_json::to_vec_pretty(&process)?,
+        )?;
+        let record = ArtifactRecord::new(
+            image_artifact.digest,
+            ArtifactKind::RootfsBundle,
+            image_artifact.source,
+        )?;
+        Ok((record, bundle_dir))
     }
 
     async fn pull_and_unpack_external(
@@ -260,21 +337,6 @@ impl ArtifactAcquirer {
         )?;
         ArtifactRecord::new(digest, ArtifactKind::RootfsBundle, source.clone())
             .map_err(ArtifactAcquireError::Artifact)
-    }
-
-    async fn materialize_rootfs_bundle_inprocess(
-        &self,
-        artifact: &ArtifactRecord,
-    ) -> Result<std::path::PathBuf, ArtifactAcquireError> {
-        let layout = self.config.artifact_dir.clone();
-        let pulled = self.puller.read_layout(&layout).await?;
-        let bundle_dir = self.write_bundle(&artifact.digest, &pulled.layers)?;
-        let process = rootfs_bundle_from_oci_config(&pulled.config)?;
-        std::fs::write(
-            bundle_dir.join("process.json"),
-            serde_json::to_vec_pretty(&process)?,
-        )?;
-        Ok(bundle_dir)
     }
 
     fn write_bundle(
@@ -308,6 +370,7 @@ impl ArtifactAcquirer {
         &self,
         runner: &dyn CommandRunner,
         source: &ArtifactSource,
+        output_dir: &std::path::Path,
     ) -> Result<String, ArtifactAcquireError> {
         let ArtifactSource::BuildKit {
             repo_url,
@@ -342,6 +405,7 @@ impl ArtifactAcquirer {
                 git_ref,
                 context_path,
                 dockerfile_path,
+                output_dir,
             )
             .await;
         // Always clean up the checkout, success or failure.
@@ -360,6 +424,7 @@ impl ArtifactAcquirer {
         git_ref: &str,
         context_path: &str,
         dockerfile_path: &str,
+        output_dir: &std::path::Path,
     ) -> Result<String, ArtifactAcquireError> {
         runner
             .run(
@@ -383,10 +448,7 @@ impl ArtifactAcquirer {
 
         let context = format!("context={}", context_dir.to_string_lossy());
         let dockerfile = format!("dockerfile={}", dockerfile_dir.to_string_lossy());
-        let output = format!(
-            "type=oci,dest={}",
-            self.config.artifact_dir.to_string_lossy()
-        );
+        let output = format!("type=oci,dest={}", output_dir.to_string_lossy());
         let program = self.config.buildkit_binary.to_string_lossy();
         let args = [
             "build",
@@ -408,6 +470,7 @@ impl ArtifactAcquirer {
         &self,
         runner: &dyn CommandRunner,
         source: &ArtifactSource,
+        output_dir: &std::path::Path,
     ) -> Result<String, ArtifactAcquireError> {
         let ArtifactSource::UploadedContext {
             upload_id,
@@ -441,10 +504,7 @@ impl ArtifactAcquirer {
         let context = format!("context={}", context_dir.to_string_lossy());
         let dockerfile = format!("dockerfile={}", dockerfile_dir.to_string_lossy());
         let filename = format!("filename={}", dockerfile_name.to_string_lossy());
-        let output = format!(
-            "type=oci,dest={}",
-            self.config.artifact_dir.to_string_lossy()
-        );
+        let output = format!("type=oci,dest={}", output_dir.to_string_lossy());
         let program = self.config.buildkit_binary.to_string_lossy();
         let args = [
             "build",
@@ -615,7 +675,10 @@ mod tests {
             context_path: ".".to_string(),
         };
 
-        let result = acquirer.acquire_staged(&runner, &source).await;
+        let output_dir = tmp.path().join("build-out");
+        let result = acquirer
+            .acquire_staged(&runner, &source, &output_dir)
+            .await;
         assert!(
             result.is_err(),
             "acquire_staged must reject non-UUID upload_id (path traversal attempt)"
@@ -653,7 +716,11 @@ mod tests {
             context_path: ".".to_string(),
         };
 
-        let digest = acquirer.acquire_staged(&runner, &source).await.unwrap();
+        let output_dir = tmp.path().join("build-out");
+        let digest = acquirer
+            .acquire_staged(&runner, &source, &output_dir)
+            .await
+            .unwrap();
 
         assert!(!digest.is_empty(), "digest must be non-empty");
 

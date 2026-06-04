@@ -163,6 +163,33 @@ impl HostedRegistryRepo {
         Ok(digest)
     }
 
+    /// Deletes a tag from a repository. Idempotent.
+    pub fn delete_tag(&self, repository_id: Uuid, tag: &str) -> Result<(), RepoError> {
+        let conn = self.pool.connection()?;
+        conn.execute(
+            "DELETE FROM hosted_tags WHERE repository_id=?1 AND tag=?2",
+            params![repository_id.to_string(), tag],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes a manifest row and any tags in `repository_id` pointing at it.
+    /// The on-disk blob is reclaimed separately by the GC once no manifest
+    /// references it. Idempotent.
+    pub fn delete_manifest(&self, repository_id: Uuid, digest: &str) -> Result<(), RepoError> {
+        let conn = self.pool.connection()?;
+        let rid = repository_id.to_string();
+        conn.execute(
+            "DELETE FROM hosted_tags WHERE repository_id=?1 AND manifest_digest=?2",
+            params![&rid, digest],
+        )?;
+        conn.execute(
+            "DELETE FROM hosted_manifests WHERE repository_id=?1 AND digest=?2",
+            params![&rid, digest],
+        )?;
+        Ok(())
+    }
+
     /// Returns a manifest by digest, if it exists.
     pub fn manifest(
         &self,
@@ -281,6 +308,20 @@ impl HostedRegistryRepo {
         Ok(())
     }
 
+    /// Returns the recorded size of a blob in a repository, if present.
+    pub fn blob_size(&self, repository_id: Uuid, digest: &str) -> Result<Option<u64>, RepoError> {
+        let conn = self.pool.connection()?;
+        let rid = repository_id.to_string();
+        let size: Option<i64> = conn
+            .query_row(
+                "SELECT size FROM hosted_blobs WHERE repository_id=?1 AND digest=?2",
+                params![&rid, digest],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(size.map(|s| s.max(0) as u64))
+    }
+
     /// Returns true if the blob exists for the given repository.
     pub fn has_blob(&self, repository_id: Uuid, digest: &str) -> Result<bool, RepoError> {
         let conn = self.pool.connection()?;
@@ -312,6 +353,18 @@ impl HostedRegistryRepo {
     pub fn delete_blob_rows(&self, digest: &str) -> Result<(), RepoError> {
         let conn = self.pool.connection()?;
         conn.execute("DELETE FROM hosted_blobs WHERE digest=?1", params![digest])?;
+        Ok(())
+    }
+
+    /// Deletes a single repository's blob row for `digest`. The shared
+    /// content-addressed file is reclaimed by the GC once no row or manifest
+    /// references it. Idempotent.
+    pub fn delete_blob_row(&self, repository_id: Uuid, digest: &str) -> Result<(), RepoError> {
+        let conn = self.pool.connection()?;
+        conn.execute(
+            "DELETE FROM hosted_blobs WHERE repository_id=?1 AND digest=?2",
+            params![repository_id.to_string(), digest],
+        )?;
         Ok(())
     }
 
