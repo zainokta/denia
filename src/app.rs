@@ -387,6 +387,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(api::services::router())
         .merge(api::console::router())
         .merge(api::deployments::router())
+        .merge(api::uploads::router())
         .merge(api::domains::router())
         .merge(api::projects::router())
         .merge(api::members::router())
@@ -395,6 +396,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(api::ingress::router())
         .merge(api::oci::router())
         .merge(api::hosted_registry::router())
+        .merge(api::node::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .route_layer(middleware::from_fn_with_state(
             admin_rate_limiter,

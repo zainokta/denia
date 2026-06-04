@@ -21,6 +21,7 @@ pub enum ApiError {
     Forbidden(String),
     Conflict(String),
     TooManyRequests(String),
+    PayloadTooLarge(String),
     Deploy(DeployError),
     Runtime(RuntimeError),
     Log(std::io::Error),
@@ -140,6 +141,7 @@ impl IntoResponse for ApiError {
             Self::Forbidden(message) => (StatusCode::FORBIDDEN, message),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::TooManyRequests(message) => (StatusCode::TOO_MANY_REQUESTS, message),
+            Self::PayloadTooLarge(message) => (StatusCode::PAYLOAD_TOO_LARGE, message),
             Self::Deploy(error) => match &error {
                 DeployError::RegistryNotFound => (StatusCode::NOT_FOUND, error.to_string()),
                 _ => (

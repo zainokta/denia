@@ -72,12 +72,17 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     let state = AppState::new(config.clone(), &store);
-    let tls_in_use = state
+    let service_tls_in_use = state
         .services
         .list_services()
         .map_err(anyhow::Error::from)?
         .iter()
         .any(|s| s.tls_enabled);
+    let tls_in_use = acme_tls_in_use(
+        service_tls_in_use,
+        config.control_domain.as_deref(),
+        config.control_tls,
+    );
     state.config.require_acme_email(tls_in_use)?;
 
     // Reap workloads left behind by a previous unclean session (SIGKILL, crash,
@@ -234,6 +239,20 @@ pub async fn run() -> anyhow::Result<()> {
         (tx, handle)
     };
 
+    // Staged upload directory sweep (ADR-034). Removes abandoned upload dirs
+    // older than `upload_ttl_secs`. Mirrors the registry GC task pattern.
+    let upload_sweep_task = {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let ttl = std::time::Duration::from_secs(config.upload_ttl_secs);
+        let handle = tokio::spawn(crate::api::uploads::upload_sweep_run_until_shutdown(
+            config.uploads_dir.clone(),
+            ttl,
+            ttl,
+            rx,
+        ));
+        (tx, handle)
+    };
+
     let autoscale_interval = config.autoscale_interval_s;
     let autoscaler_task = if let Some((ingress, controller)) = state.autoscaler_handle() {
         ingress
@@ -314,6 +333,11 @@ pub async fn run() -> anyhow::Result<()> {
     }
     {
         let (tx, handle) = registry_gc_task;
+        let _ = tx.send(());
+        let _ = handle.await;
+    }
+    {
+        let (tx, handle) = upload_sweep_task;
         let _ = tx.send(());
         let _ = handle.await;
     }
@@ -494,6 +518,14 @@ fn control_domain_to_issue(control_domain: Option<&str>, control_tls: bool) -> O
     if control_tls { control_domain } else { None }
 }
 
+fn acme_tls_in_use(
+    service_tls_in_use: bool,
+    control_domain: Option<&str>,
+    control_tls: bool,
+) -> bool {
+    service_tls_in_use || control_domain_to_issue(control_domain, control_tls).is_some()
+}
+
 /// Issue certs for every verified hostname of a TLS-enabled service that does
 /// not yet have one in the cert store. Persists atomically and swaps into the
 /// live store. Never logs secret material.
@@ -544,7 +576,7 @@ async fn reissue(
 
 #[cfg(test)]
 mod tests {
-    use super::control_domain_to_issue;
+    use super::{acme_tls_in_use, control_domain_to_issue};
 
     #[test]
     fn control_domain_issued_only_when_tls_enabled() {
@@ -557,5 +589,13 @@ mod tests {
             None
         );
         assert_eq!(control_domain_to_issue(None, true), None);
+    }
+
+    #[test]
+    fn acme_tls_in_use_includes_tls_control_domain() {
+        assert!(acme_tls_in_use(false, Some("denia.example.com"), true));
+        assert!(acme_tls_in_use(true, None, false));
+        assert!(!acme_tls_in_use(false, Some("denia.example.com"), false));
+        assert!(!acme_tls_in_use(false, None, true));
     }
 }

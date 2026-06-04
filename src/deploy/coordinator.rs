@@ -217,6 +217,24 @@ where
                     )
                     .await?
             }
+            DeploymentRequest::Upload {
+                upload_id,
+                dockerfile_path,
+                context_path,
+                ..
+            } => {
+                deps.acquirer
+                    .acquire_rootfs_bundle_from_image_config(
+                        deps.runner,
+                        ArtifactAcquireRequest::Upload {
+                            upload_id: upload_id.clone(),
+                            dockerfile_path: dockerfile_path.clone(),
+                            context_path: context_path.clone(),
+                        },
+                        RegistryAuth::Anonymous,
+                    )
+                    .await?
+            }
         };
         log.write("OCI_PULL", "done").ok();
         self.repos.deployments.put_artifact(artifact.clone())?;
@@ -741,6 +759,16 @@ fn deployment_request(service: &ServiceConfig, artifact: &ArtifactRecord) -> Dep
             service_id: service.id,
             repo_url: repo_url.clone(),
             git_ref: git_ref.clone(),
+        },
+        ArtifactSource::UploadedContext {
+            upload_id,
+            dockerfile_path,
+            context_path,
+        } => DeploymentRequest::Upload {
+            service_id: service.id,
+            upload_id: upload_id.clone(),
+            dockerfile_path: dockerfile_path.clone(),
+            context_path: context_path.clone(),
         },
     }
 }
