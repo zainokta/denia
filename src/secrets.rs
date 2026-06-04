@@ -211,6 +211,31 @@ impl SopsSecretStore {
         let _ = tokio::fs::remove_file(&plain_path).await;
         result
     }
+
+    /// Delete the on-disk SOPS file for a secret reference, if present.
+    ///
+    /// Used when a registry's credentials are cleared (auth → Anonymous) so the
+    /// previously-encrypted material does not linger on disk. A missing file is
+    /// not an error (idempotent). The path is validated against the secrets
+    /// root to refuse traversal, mirroring `decrypt`.
+    pub async fn delete(
+        &self,
+        project_id: uuid::Uuid,
+        secret_ref: &SecretRef,
+    ) -> Result<(), SecretError> {
+        let target = self.secret_path(project_id, secret_ref);
+        // `validate_secret_path` canonicalizes; only enforce when the file
+        // actually exists (canonicalize fails on missing paths).
+        if target.exists() {
+            self.validate_secret_path(&target)?;
+            match tokio::fs::remove_file(&target).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(SecretError::Io(e)),
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -328,6 +353,43 @@ mod encrypt_tests {
             }),
             "plaintext .json left behind on encrypt failure"
         );
+    }
+
+    #[tokio::test]
+    async fn delete_removes_existing_secret_and_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let store = SopsSecretStore::new(dir.path());
+        let pid = Uuid::now_v7();
+        let secret_ref = SecretRef::parse("registry-cred").unwrap();
+
+        let fake_yaml = "data: ENC[AES256_GCM,...]\n";
+        let runner = FakeCommandRunner::new(vec![CommandOutput {
+            status: 0,
+            stdout: fake_yaml.to_string(),
+            stderr: String::new(),
+        }]);
+        store
+            .encrypt(
+                &runner,
+                std::path::Path::new("sops"),
+                "age1qy0testrecipient",
+                pid,
+                &secret_ref,
+                &SecretPayload::new("u:p"),
+            )
+            .await
+            .unwrap();
+        let target = store.secret_path(pid, &secret_ref);
+        assert!(target.exists());
+
+        store.delete(pid, &secret_ref).await.expect("delete ok");
+        assert!(!target.exists(), "secret file should be removed");
+
+        // Idempotent: deleting again is not an error.
+        store
+            .delete(pid, &secret_ref)
+            .await
+            .expect("second delete is a no-op");
     }
 
     #[tokio::test]
