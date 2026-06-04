@@ -144,8 +144,13 @@ pub trait JobRunRequestResolver: Send + Sync {
 /// applied. `exit_code == 0` is success; any other code or a runtime/resolve
 /// error is a failed attempt.
 enum AttemptOutcome {
-    Succeeded { exit_code: i32 },
-    Failed { exit_code: Option<i32>, reason: String },
+    Succeeded {
+        exit_code: i32,
+    },
+    Failed {
+        exit_code: Option<i32>,
+        reason: String,
+    },
 }
 
 /// Consumes the scheduler's run channel and executes each [`JobRun`] against
@@ -205,11 +210,9 @@ impl JobExecutor {
             }
             match self.run_attempt(&job, run_id).await {
                 AttemptOutcome::Succeeded { exit_code } => {
-                    let _ = self.store.update_job_run(
-                        run_id,
-                        JobRunStatus::Succeeded,
-                        Some(exit_code),
-                    );
+                    let _ =
+                        self.store
+                            .update_job_run(run_id, JobRunStatus::Succeeded, Some(exit_code));
                     tracing::info!(job_id = %job.id, %run_id, attempt, "job run succeeded");
                     return;
                 }
@@ -357,10 +360,7 @@ impl JobRunRequestResolver for RuntimeJobRunRequestResolver {
         // overrides shared keys.
         let (limits, env) = match self.projects.get_project(job.project_id) {
             Ok(Some(project)) => {
-                let limits = project
-                    .default_resource_limits
-                    .clone()
-                    .unwrap_or_default();
+                let limits = project.default_resource_limits.clone().unwrap_or_default();
                 let mut env: std::collections::BTreeMap<String, String> =
                     project.shared_env.iter().cloned().collect();
                 env.extend(job.env.iter().cloned());
@@ -419,11 +419,7 @@ mod tests {
 
     #[async_trait]
     impl JobRunRequestResolver for CannedResolver {
-        async fn resolve(
-            &self,
-            job: &Job,
-            run_id: Uuid,
-        ) -> Result<JobRunRequest, ResolveError> {
+        async fn resolve(&self, job: &Job, run_id: Uuid) -> Result<JobRunRequest, ResolveError> {
             Ok(JobRunRequest {
                 job_id: job.id,
                 run_id,
@@ -505,11 +501,7 @@ mod tests {
         let (store, job) = store_with_job();
         let run = store.create_job_run(job.id).unwrap();
         let runtime = ScriptedRuntime::new(vec![0]);
-        let executor = JobExecutor::new(
-            store.clone(),
-            runtime.clone(),
-            Arc::new(CannedResolver),
-        );
+        let executor = JobExecutor::new(store.clone(), runtime.clone(), Arc::new(CannedResolver));
 
         executor.execute(run.clone()).await;
 

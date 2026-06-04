@@ -9,6 +9,7 @@
 //! the old modules are removed in a later cutover chunk.
 
 pub mod acme;
+pub mod cert_issue;
 pub mod proxy;
 pub mod server;
 pub mod state;
@@ -18,6 +19,7 @@ pub use acme::{
     AcmeDriver, AcmeError, ChallengeStore, IssuedCert, RENEWAL_WINDOW_DAYS, load_certs_from_disk,
     persist_cert, select_renewals,
 };
+pub use cert_issue::{CertIssueReceiver, CertIssueSender, request_issue};
 pub use proxy::{DeniaProxy, Port80Decision, RequestCtx, UpstreamChoice, classify_port80};
 pub use server::{IngressServerConfig, ServerBuildError, build_server, run_server};
 pub use state::{

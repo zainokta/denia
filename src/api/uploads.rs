@@ -215,7 +215,23 @@ async fn upload_handler(
         max_uncompressed: state.config.upload_max_uncompressed_bytes,
         max_entries: state.config.upload_max_entries,
     };
-    let result = extract_tar_zst(&buf, &context_dir, &limits);
+    // zstd decode + untar of up to `upload_max_uncompressed_bytes` is CPU- and
+    // syscall-heavy synchronous work; run it on the blocking pool so it never
+    // stalls a tokio runtime worker (review MED — blocking decompress).
+    let extract_buf = std::mem::take(&mut buf);
+    let extract_dir = context_dir.clone();
+    let result =
+        tokio::task::spawn_blocking(move || extract_tar_zst(&extract_buf, &extract_dir, &limits))
+            .await;
+    let result = match result {
+        Ok(inner) => inner,
+        Err(join_err) => {
+            let _ = tokio::fs::remove_dir_all(&upload_dir).await;
+            return Err(ApiError::BadRequest(format!(
+                "archive extraction task failed: {join_err}"
+            )));
+        }
+    };
     match result {
         Ok(()) => {}
         Err(ExtractError::Rejected(msg)) => {

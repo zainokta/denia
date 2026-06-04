@@ -2231,8 +2231,8 @@ mod tests {
         let dir_c = CString::new(dir.path().as_os_str().as_bytes()).expect("dir cstr");
         assert!(!mountpoint_is_regular_file(&dir_c));
 
-        let missing_c = CString::new(dir.path().join("missing").as_os_str().as_bytes())
-            .expect("missing cstr");
+        let missing_c =
+            CString::new(dir.path().join("missing").as_os_str().as_bytes()).expect("missing cstr");
         assert!(!mountpoint_is_regular_file(&missing_c));
     }
 

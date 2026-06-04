@@ -159,7 +159,11 @@ impl ArtifactAcquirer {
                 std::fs::create_dir_all(&output_dir)?;
                 let digest = self.acquire_git(runner, &source, &output_dir).await;
                 let _ = std::fs::remove_dir_all(&output_dir);
-                Ok(ArtifactRecord::new(digest?, ArtifactKind::OciImage, source)?)
+                Ok(ArtifactRecord::new(
+                    digest?,
+                    ArtifactKind::OciImage,
+                    source,
+                )?)
             }
             ArtifactAcquireRequest::ExternalImage { image } => {
                 let source = ArtifactSource::ExternalRegistry { image };
@@ -182,7 +186,11 @@ impl ArtifactAcquirer {
                 std::fs::create_dir_all(&output_dir)?;
                 let digest = self.acquire_staged(runner, &source, &output_dir).await;
                 let _ = std::fs::remove_dir_all(&output_dir);
-                Ok(ArtifactRecord::new(digest?, ArtifactKind::OciImage, source)?)
+                Ok(ArtifactRecord::new(
+                    digest?,
+                    ArtifactKind::OciImage,
+                    source,
+                )?)
             }
         }
     }
@@ -676,9 +684,7 @@ mod tests {
         };
 
         let output_dir = tmp.path().join("build-out");
-        let result = acquirer
-            .acquire_staged(&runner, &source, &output_dir)
-            .await;
+        let result = acquirer.acquire_staged(&runner, &source, &output_dir).await;
         assert!(
             result.is_err(),
             "acquire_staged must reject non-UUID upload_id (path traversal attempt)"

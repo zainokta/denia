@@ -74,7 +74,9 @@ impl RegistryGc {
     /// (missing or unreadable blob) is surfaced as an error so the caller
     /// aborts the sweep — never treats the manifest as referencing nothing.
     fn read_manifest_body(&self, digest: &str) -> Result<Vec<u8>, RegistryGcError> {
-        self.storage.read_blob(digest).map_err(RegistryGcError::from)
+        self.storage
+            .read_blob(digest)
+            .map_err(RegistryGcError::from)
     }
 
     /// Run one conservative sweep.

@@ -685,8 +685,10 @@ impl Runtime for LinuxRuntime {
         // overlayfs requires an empty `work/work` for a fresh mount.
         let overlay_work = work.join("work");
         if overlay_work.exists() {
-            std::fs::remove_dir_all(&overlay_work)
-                .map_err(path_io("remove stale overlay work directory", &overlay_work))?;
+            std::fs::remove_dir_all(&overlay_work).map_err(path_io(
+                "remove stale overlay work directory",
+                &overlay_work,
+            ))?;
         }
         create_dir_all("create job upper directory", &upper)?;
         create_dir_all("create job work directory", &work)?;
@@ -736,10 +738,9 @@ impl Runtime for LinuxRuntime {
             )?;
         }
         if let Some(pids) = request.pids_max {
-            std::fs::write(cgroup_path.join("pids.max"), format!("{}\n", pids)).map_err(path_io(
-                "write cgroup pids.max",
-                cgroup_path.join("pids.max"),
-            ))?;
+            std::fs::write(cgroup_path.join("pids.max"), format!("{}\n", pids)).map_err(
+                path_io("write cgroup pids.max", cgroup_path.join("pids.max")),
+            )?;
         }
         if let Some(weight) = request.io_weight {
             let _ = std::fs::write(cgroup_path.join("io.weight"), format!("{}\n", weight));

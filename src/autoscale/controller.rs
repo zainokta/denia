@@ -1403,7 +1403,10 @@ mod tests {
         ctrl.usage = Box::new(OutageUsage);
         let e = ctrl.tick(std::slice::from_ref(&ms), 100_000).await;
         assert_eq!(ctrl.registry.replica_count(svc), 2);
-        assert!(e.is_empty(), "no scale event during a metrics outage: {e:?}");
+        assert!(
+            e.is_empty(),
+            "no scale event during a metrics outage: {e:?}"
+        );
         assert_eq!(ctrl.store.get_desired_replicas(svc).unwrap(), Some(2));
     }
 
@@ -1412,10 +1415,7 @@ mod tests {
         let svc = Uuid::now_v7();
         let mut ms = managed(svc);
         ms.policy = scale_to_zero_policy();
-        let mut ctrl = controller(
-            ledger(4000, 4 << 30),
-            Box::new(OutageUsage),
-        );
+        let mut ctrl = controller(ledger(4000, 4 << 30), Box::new(OutageUsage));
 
         seed_replica(&mut ctrl, &ms).await;
         assert_eq!(ctrl.registry.replica_count(svc), 1);
