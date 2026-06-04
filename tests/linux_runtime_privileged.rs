@@ -64,6 +64,22 @@ fn write_busybox_rootfs(rootfs: &Path) {
     std::fs::create_dir_all(rootfs.join("tmp")).expect("tmp dir");
 }
 
+async fn read_pty_output(pty: &mut (dyn tokio::io::AsyncRead + Unpin + Send)) -> Vec<u8> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut output = Vec::new();
+    let mut buf = [0_u8; 1024];
+    loop {
+        match pty.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => output.extend_from_slice(&buf[..n]),
+            Err(error) if error.raw_os_error() == Some(5) => break,
+            Err(error) => panic!("read console output: {error}"),
+        }
+    }
+    output
+}
+
 struct CgroupTestRoot {
     path: PathBuf,
 }
@@ -628,14 +644,12 @@ async fn console_exec_reads_service_environment() {
     )
     .await
     .expect("write console command");
-    let mut output = Vec::new();
-    tokio::time::timeout(
+    let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        tokio::io::AsyncReadExt::read_to_end(&mut session.pty, &mut output),
+        read_pty_output(session.pty.as_mut()),
     )
     .await
-    .expect("console output timeout")
-    .expect("read console output");
+    .expect("console output timeout");
     let output = String::from_utf8_lossy(&output);
     assert!(
         output.contains("env=inside"),

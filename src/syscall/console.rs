@@ -79,6 +79,8 @@ const STAGE_SECCOMP: u8 = 13;
 const STAGE_SHELL_FORK: u8 = 14;
 const STAGE_SETGID: u8 = 15;
 const STAGE_SETUID: u8 = 16;
+const STAGE_NS_PID_EPERM: u8 = 17;
+const STAGE_NS_PID_EINVAL: u8 = 18;
 
 fn stage_label(stage: u8) -> &'static str {
     match stage {
@@ -98,6 +100,8 @@ fn stage_label(stage: u8) -> &'static str {
         STAGE_SHELL_FORK => "fork console shell in pid namespace",
         STAGE_SETGID => "set mapped root gid",
         STAGE_SETUID => "set mapped root uid",
+        STAGE_NS_PID_EPERM => "join pid namespace errno=1 (EPERM)",
+        STAGE_NS_PID_EINVAL => "join pid namespace errno=22 (EINVAL)",
         _ => "unknown console launch stage",
     }
 }
@@ -294,16 +298,18 @@ fn validate_console_config(config: &ConsoleLaunchConfig) -> Result<(), SyscallEr
 }
 
 /// Open `/proc/<pid>/ns/<name>` for each namespace the console joins, paired
-/// with the stage byte to report if its `setns` fails. User namespace first so
-/// the child gains the capabilities needed to join the rest.
+/// with the stage byte to report if its `setns` fails. PID namespace is joined
+/// first because it only affects future children, and some kernels reject the
+/// PID join after the caller has already switched into the target user
+/// namespace.
 fn console_namespace_specs() -> &'static [(u8, &'static str)] {
     &[
+        (STAGE_NS_PID, "pid"),
         (STAGE_NS_USER, "user"),
         (STAGE_NS_MNT, "mnt"),
         (STAGE_NS_NET, "net"),
         (STAGE_NS_UTS, "uts"),
         (STAGE_NS_IPC, "ipc"),
-        (STAGE_NS_PID, "pid"),
     ]
 }
 
@@ -350,20 +356,26 @@ unsafe fn child_exec_console(
     envp: *const *const libc::c_char,
 ) -> ! {
     unsafe {
-        for (stage, fd) in ns_fds {
-            if libc::setns(*fd, 0) == -1 {
-                fail(status_fd, *stage);
-            }
-        }
-
         // PID-reuse guard: the ns fds above were opened by the parent against
-        // `target_pid` at request time. We are now joined to whatever process
-        // currently holds that pid. Re-read its starttime and bail if the pid
-        // was recycled onto a different process between resolve and fork. The
-        // read goes through the host /proc (we have not chrooted yet).
+        // `target_pid` at request time. Re-read the host /proc starttime before
+        // changing namespaces and bail if the pid was recycled onto a different
+        // process between resolve and fork.
         match read_process_start_time(target_pid) {
             Some(now) if now == target_start_time => {}
             _ => fail(status_fd, STAGE_PID_REUSE),
+        }
+
+        for (stage, fd) in ns_fds {
+            if libc::setns(*fd, 0) == -1 {
+                if *stage == STAGE_NS_PID {
+                    match errno() {
+                        libc::EPERM => fail(status_fd, STAGE_NS_PID_EPERM),
+                        libc::EINVAL => fail(status_fd, STAGE_NS_PID_EINVAL),
+                        _ => {}
+                    }
+                }
+                fail(status_fd, *stage);
+            }
         }
 
         let shell_pid = libc::fork();
@@ -548,6 +560,8 @@ mod tests {
             STAGE_SHELL_FORK,
             STAGE_SETGID,
             STAGE_SETUID,
+            STAGE_NS_PID_EPERM,
+            STAGE_NS_PID_EINVAL,
         ] {
             assert_ne!(stage_label(stage), "unknown console launch stage");
         }
@@ -573,6 +587,14 @@ mod tests {
             names.contains(&"pid"),
             "console must join pid namespace before forking shell"
         );
+    }
+
+    #[test]
+    fn console_namespace_list_joins_pid_namespace_first() {
+        let first = console_namespace_specs()
+            .first()
+            .expect("namespace specs must not be empty");
+        assert_eq!(*first, (STAGE_NS_PID, "pid"));
     }
 
     #[test]
