@@ -2,6 +2,7 @@
 //! branch into it without re-implementing the boot sequence.
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +35,16 @@ pub async fn run() -> anyhow::Result<()> {
         .init();
 
     let config = AppConfig::from_env()?;
+    let mut config = config;
+    let configured_cgroup_root = config.cgroup_root.clone();
+    config.cgroup_root = effective_daemon_cgroup_root(&config.cgroup_root);
+    if config.cgroup_root != configured_cgroup_root {
+        tracing::info!(
+            configured = %configured_cgroup_root.display(),
+            effective = %config.cgroup_root.display(),
+            "using systemd-delegated cgroup root"
+        );
+    }
     let store = SqliteStore::open(&config.database_path)?;
     store.migrate()?;
 
@@ -63,14 +74,16 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     // Self-relocate daemon into <cgroup_root>/.daemon/ so subsequent workload
-    // cgroup migrations are sibling-to-sibling under <cgroup_root> (kernel
-    // skips the cross-subtree migration EINVAL we hit when started from
-    // user/system slices). Best-effort; failure is logged but non-fatal.
+    // cgroup migrations are sibling-to-sibling under <cgroup_root>. Without
+    // this, cgroup v2 rejects cross-subtree pid moves from system/user slices.
     if let Err(error) = relocate_daemon_cgroup(&config.cgroup_root) {
-        tracing::warn!(
-            ?error,
-            "daemon cgroup self-relocation failed (workload deploys may fail with EINVAL on cgroup.procs)"
-        );
+        if config.cgroup_root.starts_with("/sys/fs/cgroup") {
+            return Err(anyhow::anyhow!(
+                "daemon cgroup self-relocation failed at {}: {error}",
+                config.cgroup_root.display()
+            ));
+        }
+        tracing::warn!(?error, "daemon cgroup self-relocation failed");
     }
 
     let state = AppState::new(config.clone(), &store);
@@ -573,6 +586,46 @@ fn relocate_daemon_cgroup(cgroup_root: &std::path::Path) -> std::io::Result<()> 
     Ok(())
 }
 
+fn effective_daemon_cgroup_root(configured: &Path) -> PathBuf {
+    if configured != Path::new("/sys/fs/cgroup/denia")
+        || std::env::var_os("INVOCATION_ID").is_none()
+    {
+        return configured.to_path_buf();
+    }
+
+    current_cgroup_v2_path()
+        .ok()
+        .flatten()
+        .and_then(|current| systemd_delegated_cgroup_root(&current))
+        .unwrap_or_else(|| configured.to_path_buf())
+}
+
+fn current_cgroup_v2_path() -> std::io::Result<Option<String>> {
+    let raw = std::fs::read_to_string("/proc/self/cgroup")?;
+    Ok(raw.lines().find_map(|line| {
+        line.strip_prefix("0::")
+            .filter(|path| path.starts_with('/'))
+            .map(str::to_string)
+    }))
+}
+
+fn systemd_delegated_cgroup_root(current: &str) -> Option<PathBuf> {
+    if current == "/" {
+        return None;
+    }
+
+    let relative = current.strip_prefix('/')?;
+    let mut path = PathBuf::from("/sys/fs/cgroup");
+    for component in relative.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return None;
+        }
+        path.push(component);
+    }
+    path.push("denia");
+    Some(path)
+}
+
 /// The control domain to ACME-issue, if TLS is enabled for it. Renewal is
 /// automatic once the cert is in the store (`select_renewals` covers any SNI);
 /// only the initial issuance needs this branch (the control domain has no
@@ -639,7 +692,8 @@ async fn reissue(
 
 #[cfg(test)]
 mod tests {
-    use super::{acme_tls_in_use, control_domain_to_issue};
+    use super::{acme_tls_in_use, control_domain_to_issue, systemd_delegated_cgroup_root};
+    use std::path::PathBuf;
 
     #[test]
     fn control_domain_issued_only_when_tls_enabled() {
@@ -660,5 +714,19 @@ mod tests {
         assert!(acme_tls_in_use(true, None, false));
         assert!(!acme_tls_in_use(false, Some("denia.example.com"), false));
         assert!(!acme_tls_in_use(false, None, true));
+    }
+
+    #[test]
+    fn systemd_delegated_cgroup_root_uses_current_service_cgroup() {
+        assert_eq!(
+            systemd_delegated_cgroup_root("/system.slice/denia.service").unwrap(),
+            PathBuf::from("/sys/fs/cgroup/system.slice/denia.service/denia")
+        );
+    }
+
+    #[test]
+    fn systemd_delegated_cgroup_root_rejects_root_and_unsafe_components() {
+        assert_eq!(systemd_delegated_cgroup_root("/"), None);
+        assert_eq!(systemd_delegated_cgroup_root("/system.slice/../x"), None);
     }
 }
