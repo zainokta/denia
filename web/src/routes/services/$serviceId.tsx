@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Boxes, Globe, KeyRound } from 'lucide-react'
 import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
+import { effectiveEndpoints } from '#/effect/schema'
 import { runQuery } from '#/effect/runtime'
 import { StatusBadge } from '#/components/StatusBadge'
 import { DeployPhase } from '#/components/DeployPhase'
@@ -38,6 +39,7 @@ import type {
   Service,
   ServiceInput,
 } from '#/effect/schema'
+import type { ServiceEndpoint } from '#/effect/schema'
 
 // One client-side metrics sample: a percentage derived from successive
 // `cpu_usage_usec` deltas plus the instantaneous memory reading and the wall
@@ -494,6 +496,8 @@ export function ServiceDetail() {
                   </dl>
                 </div>
 
+                {service ? <EndpointsPanel service={service} /> : null}
+
                 <AutoscalePanel autoscale={service?.autoscale ?? null} />
               </div>
             )
@@ -819,6 +823,58 @@ function KvRow({
         {value}
       </dd>
     </div>
+  )
+}
+
+// Network endpoints (ADR-036). Shows the service's effective endpoints: the
+// projected default http endpoint for legacy services, or the explicit
+// http/tcp/udp list. Public ports are Denia-allocated; until the allocator
+// persists one a tcp/udp endpoint reads "pending", and http is reached via its
+// domain rather than a public port.
+function EndpointsPanel({ service }: { service: Service }) {
+  const endpoints = effectiveEndpoints(service)
+  const protocolBadge = (protocol: ServiceEndpoint['protocol']) =>
+    protocol === 'http' ? 'badge badge-steady' : 'badge'
+  return (
+    <section className="stack">
+      <p className="kicker">
+        endpoints <span className="text-faint tnum">{endpoints.length}</span>
+      </p>
+      <div className="panel overflow-hidden">
+        <table className="dtable">
+          <thead>
+            <tr>
+              <th>name</th>
+              <th>protocol</th>
+              <th className="num">internal</th>
+              <th className="num">public</th>
+            </tr>
+          </thead>
+          <tbody>
+            {endpoints.map((ep) => (
+              <tr key={`${ep.protocol}-${ep.name}-${ep.internal_port}`}>
+                <td className="font-mono">{ep.name}</td>
+                <td>
+                  <span className={protocolBadge(ep.protocol)}>
+                    {ep.protocol}
+                  </span>
+                </td>
+                <td className="num tnum">:{ep.internal_port}</td>
+                <td className="num">
+                  {ep.protocol === 'http' ? (
+                    <span className="text-faint">via domain</span>
+                  ) : ep.public_port != null ? (
+                    <span className="tnum">:{ep.public_port}</span>
+                  ) : (
+                    <span className="badge badge-warn">pending</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   )
 }
 
