@@ -1,13 +1,15 @@
 # ADR-030: Cross-Platform Client CLI
 
-- Status: Superseded by ADR-034 (deploy mechanism); cross-platform command split deferred
+- Status: Superseded by ADR-034 (deploy mechanism); cross-platform delivery resolved by ADR-037
 - Date: 2026-06-03
 
 > **Superseded.** The Git-based `denia push` mechanism described here is replaced
 > by ADR-034 (Client-Driven Deploy via Working-Tree Upload). The `denia auth`
 > token-minting flow below is retained as-is by ADR-034. The cross-platform
 > client/server command split (`denia server …`, client-only build profiles) is
-> **not** adopted by ADR-034 and remains open future work behind its own ADR.
+> **not** adopted by ADR-034; cross-platform delivery is resolved differently in
+> ADR-037 (a cfg-gated single `denia` crate), which keeps `auth`/`push`/`console`
+> top-level on every platform rather than introducing a `denia server` group.
 
 ## Context
 
