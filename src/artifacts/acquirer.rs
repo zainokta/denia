@@ -355,12 +355,39 @@ impl ArtifactAcquirer {
         let bundle_dir = self.config.artifact_dir.join(safe_artifact_name(digest));
         std::fs::create_dir_all(&bundle_dir)?;
         let rootfs = bundle_dir.join("rootfs");
-        self.unpacker.unpack(layers, &rootfs)?;
-        let base = self.config.userns_base;
-        if let Err(error) = syscall::chown::recursive_lchown(&rootfs, base, base) {
-            let io_err = error.to_string();
-            if !io_err.contains("Operation not permitted") {
-                return Err(ArtifactAcquireError::Io(std::io::Error::other(io_err)));
+        let rootfs_exists = match std::fs::symlink_metadata(&rootfs) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(ArtifactAcquireError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("rootfs path is not a directory: {}", rootfs.display()),
+                )));
+            }
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(ArtifactAcquireError::Io(error)),
+        };
+        if !rootfs_exists {
+            let staged_rootfs = bundle_dir.join(format!("rootfs.{}.tmp", uuid::Uuid::now_v7()));
+            self.unpacker.unpack(layers, &staged_rootfs)?;
+            let base = self.config.userns_base;
+            if let Err(error) = syscall::chown::recursive_lchown(&staged_rootfs, base, base) {
+                let io_err = error.to_string();
+                if !io_err.contains("Operation not permitted") {
+                    let _ = std::fs::remove_dir_all(&staged_rootfs);
+                    return Err(ArtifactAcquireError::Io(std::io::Error::other(io_err)));
+                }
+            }
+            match std::fs::rename(&staged_rootfs, &rootfs) {
+                Ok(()) => {}
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists && rootfs.exists() =>
+                {
+                    let _ = std::fs::remove_dir_all(&staged_rootfs);
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&staged_rootfs);
+                    return Err(ArtifactAcquireError::Io(error));
+                }
             }
         }
         // Persist the layer-digest list as a sidecar so the OCI cache GC can
@@ -633,8 +660,9 @@ fn default_workdir() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
     use std::path::Path;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
 
@@ -754,6 +782,87 @@ mod tests {
         assert!(
             cmd.contains("--opt filename=Dockerfile"),
             "buildctl invocation must name the Dockerfile within the dockerfile local context, got: {cmd}"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_external_image_acquire_reuses_complete_bundle() {
+        struct StaticPuller;
+        #[async_trait]
+        impl OciImagePuller for StaticPuller {
+            async fn pull(
+                &self,
+                _image: &str,
+                _auth: RegistryAuth,
+            ) -> Result<PulledImage, OciError> {
+                Ok(PulledImage {
+                    digest: "sha256:reused".to_string(),
+                    config: crate::oci::config::OciImageConfig {
+                        config: Some(crate::oci::config::OciImageProcessConfig {
+                            entrypoint: Some(vec!["/app".to_string()]),
+                            cmd: None,
+                            env_vars: None,
+                            working_dir: None,
+                        }),
+                        rootfs: None,
+                    },
+                    layers: Vec::new(),
+                    _staging: None,
+                    _cache_reservations: Vec::new(),
+                })
+            }
+
+            async fn read_layout(&self, _d: &Path) -> Result<PulledImage, OciError> {
+                unreachable!("StaticPuller::read_layout not expected")
+            }
+        }
+
+        #[derive(Default)]
+        struct ExistingRootfsFailsUnpacker {
+            calls: Mutex<usize>,
+        }
+
+        impl OciRootfsUnpacker for ExistingRootfsFailsUnpacker {
+            fn unpack(&self, _layers: &[LayerBlob], rootfs_dir: &Path) -> Result<(), OciError> {
+                let mut calls = self.calls.lock().unwrap();
+                *calls += 1;
+                if rootfs_dir.exists() {
+                    return Err(OciError::Io(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "File exists",
+                    )));
+                }
+                std::fs::create_dir_all(rootfs_dir).map_err(OciError::Io)?;
+                std::fs::write(rootfs_dir.join("app"), b"ok").map_err(OciError::Io)
+            }
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = AppConfig::for_test("test-token");
+        config.artifact_dir = tmp.path().to_path_buf();
+        config.userns_base = std::fs::metadata(tmp.path()).unwrap().uid();
+        let unpacker = Arc::new(ExistingRootfsFailsUnpacker::default());
+        let acquirer =
+            ArtifactAcquirer::with_traits(config, Arc::new(StaticPuller), unpacker.clone());
+        let runner = FakeCommandRunner::new(vec![]);
+        let request = || ArtifactAcquireRequest::ExternalImage {
+            image: "ghcr.io/acme/web:latest".to_string(),
+        };
+
+        acquirer
+            .acquire_rootfs_bundle_from_image_config(&runner, request(), RegistryAuth::Anonymous)
+            .await
+            .expect("first acquire materializes rootfs");
+
+        acquirer
+            .acquire_rootfs_bundle_from_image_config(&runner, request(), RegistryAuth::Anonymous)
+            .await
+            .expect("second acquire reuses complete rootfs");
+
+        assert_eq!(
+            *unpacker.calls.lock().unwrap(),
+            1,
+            "complete bundle should be reused without unpacking into existing rootfs"
         );
     }
 }
