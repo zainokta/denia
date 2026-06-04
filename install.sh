@@ -323,6 +323,7 @@ step_install_rust() {
 
     export CARGO_HOME="${DENIA_BUILD_HOME}/cargo"
     export RUSTUP_HOME="${DENIA_BUILD_HOME}/rustup"
+    export PATH="${CARGO_HOME}/bin:${PATH}"
 
     if [[ -x "${CARGO_HOME}/bin/cargo" ]]; then
         ok "rust toolchain already present at ${CARGO_HOME}"
