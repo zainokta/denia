@@ -7,7 +7,9 @@ mod plan;
 mod runtime_trait;
 pub(crate) mod validation;
 
-pub use console::{ConsolePty, RuntimeConsoleRequest, RuntimeConsoleSession};
+pub use console::{
+    ConsoleExit, ConsolePty, ConsoleReaper, RuntimeConsoleRequest, RuntimeConsoleSession,
+};
 pub use error::RuntimeError;
 pub use fake::FakeRuntime;
 pub use linux::LinuxRuntime;

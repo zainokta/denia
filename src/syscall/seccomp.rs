@@ -6,7 +6,7 @@ const AUDIT_ARCH_AARCH64: u32 = 0xC00000B7;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct SockFilter {
+pub struct SockFilter {
     code: u16,
     jt: u8,
     jf: u8,
@@ -63,6 +63,48 @@ pub fn install_filter() -> Result<(), SyscallError> {
         }
     }
     Ok(())
+}
+
+/// The compiled BPF denylist program, ready to hand to `apply_program`. Built in
+/// the parent before `fork` so the forked console child does not allocate; the
+/// child only issues the two async-signal-safe `prctl` syscalls via
+/// [`apply_program`].
+pub fn build_filter_program() -> Vec<SockFilter> {
+    build_program(&denylist())
+}
+
+/// Install a pre-built seccomp `program` on the current thread using only
+/// `prctl(2)` — async-signal-safe, so it is callable from a forked child before
+/// `execve`. Returns the libc errno on failure (no allocation) so the caller can
+/// report a stage byte without touching the heap.
+///
+/// # Safety
+/// `program` must outlive this call (the kernel copies it during the syscall,
+/// but the pointer must be valid for the duration). Intended for the
+/// pre-`execve` window in a forked child.
+pub unsafe fn apply_program(program: &[SockFilter]) -> Result<(), i32> {
+    let prog = SockFprog {
+        len: program.len() as u16,
+        filter: program.as_ptr(),
+    };
+    unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0 {
+            return Err(errno());
+        }
+        if libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER,
+            &prog as *const SockFprog,
+        ) < 0
+        {
+            return Err(errno());
+        }
+    }
+    Ok(())
+}
+
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
 }
 
 fn build_program(syscalls: &[u32]) -> Vec<SockFilter> {
