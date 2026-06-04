@@ -197,4 +197,34 @@ mod tests {
         assert_eq!(cfg.control_domain.as_deref(), Some("denia.example.com"));
         assert!(cfg.control_tls);
     }
+
+    /// ADR-032 regression guard: HTTP/2 must stay OFF on Denia-owned `:443`
+    /// until an accepted implementation adds protocol-level resource controls
+    /// (the HTTP/2 Bomb class). Pingora 0.8's `TlsSettings` exposes no public
+    /// ALPN/h2 getter to assert against at runtime, so this guards the source:
+    /// `build_server` must NOT call `enable_h2` / `set_alpn` / advertise `h2`.
+    /// If a future PR enables HTTP/2 here, it must also update ADR-032 and this
+    /// test; the test failing is the intended tripwire.
+    #[test]
+    fn https_listener_never_advertises_http2() {
+        let src = include_str!("server.rs");
+        // Only inspect code outside this test module so the assertion strings
+        // here do not match themselves.
+        let code = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("server.rs has a pre-test prefix");
+        for forbidden in [
+            "enable_h2",
+            "set_alpn",
+            "ALPN::H2",
+            "ALPN::H2H1",
+            "enable_h2c",
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "ADR-032: build_server must not enable HTTP/2 (found `{forbidden}` in server.rs)"
+            );
+        }
+    }
 }
