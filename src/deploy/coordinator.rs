@@ -323,6 +323,39 @@ where
             })
             .await?;
 
+        // Everything after a successful `runtime.start` is wired up in a helper
+        // so a failure at any later step (healthcheck, promote, add_replica,
+        // write_route_table) can be compensated by stopping the started replica
+        // before the deploy is marked Failed. Without this a partial deploy
+        // leaks a running, unregistered workload until the next boot orphan
+        // sweep or a later stop/deploy (review MED — partial-deploy leak).
+        let wired = self
+            .finalize_started(deployment_id, service, &runtime_status.socket_path, log)
+            .await;
+        if wired.is_err() {
+            self.compensate_started_replica(service).await;
+        }
+        wired
+    }
+
+    /// Post-`runtime.start` wiring for a plain service: healthcheck → promote →
+    /// register the ingress replica → write the route table. Split out of
+    /// `finalize` so a failure here can be compensated (see `finalize`).
+    async fn finalize_started(
+        &self,
+        deployment_id: Uuid,
+        service: &ServiceConfig,
+        socket_path: &std::path::Path,
+        log: &crate::deploy::log::DeploymentLogWriter,
+    ) -> Result<(), DeployError> {
+        // Health probe contract (review MED — dual endpoint): ingress dials the
+        // workload's Denia-owned UDS (ADR-020), but the health probe targets
+        // `http://127.0.0.1:{internal_port}`. These resolve to the SAME process
+        // because the in-namespace socket-proxy (`src/ingress/socket_proxy.rs`)
+        // binds BOTH the UDS and `internal_port` on the workload's loopback.
+        // The probe runs from the daemon's net namespace, so it reaches that
+        // loopback via the proxy's host-side UDS bridge. If a workload is ever
+        // changed to bind ONLY the UDS, this probe must move to the UDS too.
         log.write("HEALTHCHECK", "starting").ok();
         self.health
             .check(
@@ -335,10 +368,39 @@ where
         self.repos
             .deployments
             .promote_deployment(service.id, deployment_id)?;
-        self.add_deploy_replica(service, &runtime_status.socket_path)
-            .await?;
+        self.add_deploy_replica(service, socket_path).await?;
         self.write_route_table(service).await?;
         Ok(())
+    }
+
+    /// Best-effort teardown of the `replica_index 0` workload started by
+    /// `finalize`/`deploy` when a later wiring step failed. Stops the runtime
+    /// instance and drops the (possibly-registered) ingress replica so a failed
+    /// deploy does not leave a running, unrouted workload behind. Errors are
+    /// logged via `tracing` and swallowed — the deploy is already failing and
+    /// the next boot's orphan sweep is the backstop.
+    async fn compensate_started_replica(&self, service: &ServiceConfig) {
+        if let Err(error) = self
+            .runtime
+            .stop(&RuntimeInstanceId {
+                service_id: service.id,
+                service_name: service.name.clone(),
+                replica_index: 0,
+            })
+            .await
+        {
+            tracing::warn!(
+                service_id = %service.id,
+                ?error,
+                "partial-deploy cleanup: failed to stop started replica"
+            );
+        }
+        if let Some(routing) = &self.routing {
+            routing
+                .ingress
+                .remove_replica(&service.id.to_string(), DEPLOY_REPLICA_ID)
+                .await;
+        }
     }
 
     pub async fn deploy(&self, plan: DeploymentPlan) -> Result<Deployment, DeployError> {
@@ -396,19 +458,31 @@ where
             })
             .await?;
 
-        self.health
-            .check(
-                &format!("http://127.0.0.1:{}", plan.service.internal_port),
-                &plan.service.health_check,
-            )
-            .await?;
+        // Compensate a partial deploy: if any wiring step after `runtime.start`
+        // fails, stop the started replica before propagating the error so we
+        // never leak a running, unregistered workload (review MED).
+        let wired = async {
+            self.health
+                .check(
+                    &format!("http://127.0.0.1:{}", plan.service.internal_port),
+                    &plan.service.health_check,
+                )
+                .await?;
 
-        self.repos
-            .deployments
-            .promote_deployment(plan.service.id, deployment.id)?;
-        self.add_deploy_replica(&plan.service, &runtime_status.socket_path)
-            .await?;
-        self.write_route_table(&plan.service).await?;
+            self.repos
+                .deployments
+                .promote_deployment(plan.service.id, deployment.id)?;
+            self.add_deploy_replica(&plan.service, &runtime_status.socket_path)
+                .await?;
+            self.write_route_table(&plan.service).await?;
+            Ok::<(), DeployError>(())
+        }
+        .await;
+        if wired.is_err() {
+            self.compensate_started_replica(&plan.service).await;
+        }
+        wired?;
+
         self.repos
             .deployments
             .update_deployment_status(deployment.id, DeploymentStatus::Healthy)?;
@@ -1061,6 +1135,83 @@ mod async_tests {
                 .expect("promoted"),
             Some(deployment.id)
         );
+    }
+
+    /// Review MED — partial-deploy workload leak: when a step after
+    /// `runtime.start` fails (here the healthcheck), the started `replica_index
+    /// 0` workload MUST be stopped before the deploy errors out, and the
+    /// (possibly-registered) ingress replica dropped — otherwise a running,
+    /// unrouted workload leaks until the next boot orphan sweep.
+    #[tokio::test]
+    async fn failed_healthcheck_stops_started_replica() {
+        use crate::artifacts::{ArtifactKind, ArtifactRecord};
+
+        let store = SqliteStore::open_in_memory().expect("sqlite");
+        store.migrate().expect("migrate");
+        let runtime = FakeRuntime::default();
+        let ingress = std::sync::Arc::new(IngressState::default());
+        let routes: SharedRoutes =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+        // Healthcheck always fails → the post-start wiring errors.
+        let coordinator = DeploymentCoordinator::new_with_shared_routing(
+            build_repos(&store),
+            runtime.clone(),
+            FakeHealthChecker::failing(),
+            ingress.clone(),
+            routes.clone(),
+        );
+
+        let project_id = store.default_project_id().expect("default project");
+        let svc = store
+            .put_service(
+                ServiceConfig::new(
+                    project_id,
+                    "web",
+                    vec!["web.example.test".to_string()],
+                    ServiceSource::ExternalImage(ExternalImageSource {
+                        image: "ghcr.io/acme/web:latest".to_string(),
+                        credential: None,
+                        registry_id: None,
+                        image_ref: None,
+                    }),
+                    3000,
+                    HealthCheck::new("/ready", 5),
+                    Some(ResourceLimits::default()),
+                    vec![],
+                )
+                .expect("service"),
+            )
+            .expect("stored service");
+
+        let artifact = ArtifactRecord::new(
+            "sha256:deadbeef",
+            ArtifactKind::OciImage,
+            ArtifactSource::ExternalRegistry {
+                image: "ghcr.io/acme/web:latest".to_string(),
+            },
+        )
+        .expect("artifact");
+
+        let result = coordinator
+            .deploy(DeploymentPlan {
+                service: svc.clone(),
+                artifact,
+            })
+            .await;
+        assert!(result.is_err(), "deploy must fail when healthcheck fails");
+
+        // The started replica was stopped (replica_index 0, this service).
+        let stopped = runtime.stopped_instances();
+        assert_eq!(stopped.len(), 1, "exactly one compensating stop");
+        assert_eq!(stopped[0].service_id, svc.id);
+        assert_eq!(stopped[0].replica_index, 0);
+        // No leaked running workload.
+        assert!(
+            runtime.list_running().await.expect("running").is_empty(),
+            "no workload should remain running after a failed deploy"
+        );
+        // No ingress replica left registered for this service.
+        assert_eq!(ingress.healthy_count(&svc.id.to_string()).await, 0);
     }
 
     /// ADR-028: the autoscaled stop path tears down route + deployment state
