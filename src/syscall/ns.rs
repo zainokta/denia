@@ -1191,6 +1191,34 @@ unsafe fn child_prepare_root(plan: &NativeLaunchPlan, pipes: &SyncPipes) {
         plan.rootfs.as_c_str()
     };
 
+    let mut old_root_buf = base.to_bytes().to_vec();
+    old_root_buf.extend_from_slice(b"/.old_root\0");
+    let old_root_target =
+        std::ffi::CStr::from_bytes_with_nul(&old_root_buf).expect("old_root path has valid NUL");
+    if unsafe { libc::mkdir(old_root_target.as_ptr(), 0o755) } < 0 {
+        let errno = std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO);
+        if errno != libc::EEXIST {
+            unsafe { child_setup_fail_errno(pipes, b'o', errno) };
+        }
+    }
+
+    if plan.setup.mount_proc {
+        let mut proc_buf = base.to_bytes().to_vec();
+        proc_buf.extend_from_slice(b"/proc\0");
+        let proc_target =
+            std::ffi::CStr::from_bytes_with_nul(&proc_buf).expect("proc path has valid NUL");
+        if unsafe { libc::mkdir(proc_target.as_ptr(), 0o755) } < 0 {
+            let errno = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO);
+            if errno != libc::EEXIST {
+                unsafe { child_setup_fail_errno(pipes, b'p', errno) };
+            }
+        }
+    }
+
     for bind in &plan.ro_binds {
         unsafe { child_apply_ro_bind(pipes, base, bind) };
     }
