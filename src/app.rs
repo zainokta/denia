@@ -60,6 +60,14 @@ pub struct AppState {
     /// the `/.well-known/acme-challenge/{token}` handler. Cloned from the
     /// in-process ACME driver in `main` (Chunk C); defaults to an empty store.
     pub acme_challenges: crate::ingress::pingora::acme::ChallengeStore,
+    /// On-demand TLS cert issuance request channel (review HIGH). The verify
+    /// and deploy-completion paths push validated hostnames here so the ACME
+    /// task issues within seconds instead of waiting for the 12h renewal scan.
+    /// Cloneable; the daemon takes the receiver out exactly once at boot.
+    pub cert_issue_tx: crate::ingress::pingora::CertIssueSender,
+    /// Single-consumer receiver side of [`Self::cert_issue_tx`], taken by the
+    /// daemon ACME task via [`AppState::take_cert_issue_rx`]. `None` once taken.
+    pub(crate) cert_issue_rx: Arc<Mutex<Option<crate::ingress::pingora::CertIssueReceiver>>>,
     pub(crate) autoscaler:
         Option<Arc<tokio::sync::Mutex<crate::autoscale::controller::Controller>>>,
     /// Persistent OCI layer cache (ADR-022). `None` in test builds that
@@ -228,6 +236,7 @@ impl AppState {
             registry.clone(),
             std::time::Duration::from_secs(config.registry_gc_grace_secs),
         );
+        let (cert_issue_tx, cert_issue_rx) = crate::ingress::pingora::cert_issue::channel();
         Self {
             config,
             services: SqliteServiceRepo::new(pool.clone()),
@@ -251,10 +260,18 @@ impl AppState {
             domain_verifier: Arc::new(crate::verification::HttpDomainVerifier::new()),
             verifying_domains: Arc::new(Mutex::new(std::collections::HashSet::new())),
             acme_challenges: crate::ingress::pingora::acme::ChallengeStore::new(),
+            cert_issue_tx,
+            cert_issue_rx: Arc::new(Mutex::new(Some(cert_issue_rx))),
             autoscaler: None,
             oci_cache: None,
             oci_cache_gc: None,
         }
+    }
+
+    /// Take the single on-demand cert-issuance receiver. Returns `Some` exactly
+    /// once (the daemon ACME task at boot); subsequent calls return `None`.
+    pub fn take_cert_issue_rx(&self) -> Option<crate::ingress::pingora::CertIssueReceiver> {
+        self.cert_issue_rx.lock().ok().and_then(|mut g| g.take())
     }
 
     pub fn with_domain_verifier(
@@ -328,6 +345,7 @@ impl AppStateBuilder {
             registry.clone(),
             std::time::Duration::from_secs(self.config.registry_gc_grace_secs),
         );
+        let (cert_issue_tx, cert_issue_rx) = crate::ingress::pingora::cert_issue::channel();
         AppState {
             config: self.config,
             services: SqliteServiceRepo::new(pool.clone()),
@@ -355,6 +373,8 @@ impl AppStateBuilder {
                 .unwrap_or_else(|| Arc::new(crate::verification::HttpDomainVerifier::new())),
             verifying_domains: Arc::new(Mutex::new(std::collections::HashSet::new())),
             acme_challenges: crate::ingress::pingora::acme::ChallengeStore::new(),
+            cert_issue_tx,
+            cert_issue_rx: Arc::new(Mutex::new(Some(cert_issue_rx))),
             autoscaler: None,
             oci_cache: None,
             oci_cache_gc: None,
