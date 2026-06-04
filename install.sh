@@ -282,17 +282,17 @@ step_install_prereqs() {
         apt)
             run_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -y
             run_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-                build-essential pkg-config libssl-dev ca-certificates \
+                build-essential pkg-config libssl-dev libclang-dev clang cmake perl ca-certificates \
                 curl git age iproute2 procps
             ;;
         dnf)
             run_cmd dnf install -y \
-                @development-tools pkgconf-pkg-config openssl-devel ca-certificates \
+                @development-tools pkgconf-pkg-config openssl-devel clang clang-devel cmake perl ca-certificates \
                 curl git age iproute procps-ng
             ;;
         pacman)
             run_cmd pacman -Sy --noconfirm \
-                base-devel pkgconf openssl ca-certificates \
+                base-devel pkgconf openssl clang cmake perl ca-certificates \
                 curl git age iproute2 procps-ng
             ;;
         zypper)
@@ -300,7 +300,7 @@ step_install_prereqs() {
             run_cmd zypper --non-interactive install -y \
                 -t pattern devel_basis
             run_cmd zypper --non-interactive install -y \
-                pkg-config libopenssl-devel ca-certificates \
+                pkg-config libopenssl-devel clang clang-devel cmake perl ca-certificates \
                 curl git age iproute2 procps
             ;;
     esac
