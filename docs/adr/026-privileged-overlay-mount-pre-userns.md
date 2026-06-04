@@ -130,6 +130,10 @@ gets `ECONNREFUSED`. So a per-replica directory on the **real host fs**
 path inside the guest** (identity mount via `with_socket_bind`, applied pre-userns
 alongside the overlay/`/dev` binds and chowned to `userns_base`). socket-proxy
 binds `service.sock` there, so it is the **same inode** for both guest and host.
+Before launch, Denia also creates the matching guest destination directory in the
+per-replica `upper` layer. The bind therefore lands on an upper-owned mountpoint
+instead of a directory materialized from the read-only lower image; on some
+hosts, binding onto the lower-derived overlay path returns `EROFS`.
 
 The mount is **identity** (guest path == host path) deliberately. Pingora
 validates a pooled UDS connection by comparing `getpeername(fd)` — the server's

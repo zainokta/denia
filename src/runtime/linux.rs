@@ -509,10 +509,15 @@ impl LinuxRuntime {
         // socket on overlayfs is bound to the overlay inode and is not connectable
         // via the upperdir path. Create the host socket dir and chown it to the
         // userns base so the workload (mapped userns-root) can bind the socket;
-        // the daemon connects to the same inode directly.
+        // the daemon connects to the same inode directly. Also pre-create the
+        // matching guest mountpoint in the overlay upper so the later privileged
+        // bind does not have to mount onto a path materialized from the
+        // read-only lower layer (some hosts report EROFS there).
         if let Some(dir) = plan.socket_path.parent() {
             create_runtime_directory(dir)?;
             self.chown_overlay_dir(dir)?;
+            let guest_mountpoint = upper_guest_path(&plan.upper, dir)?;
+            create_runtime_directory(&guest_mountpoint)?;
         }
         remove_existing_runtime_file(&plan.socket_path)?;
         Ok(())
@@ -1267,7 +1272,7 @@ impl LinuxRuntime {
 mod tests {
     use super::{
         CGROUP_CONTROLLERS, GUEST_SERVICE_SOCKET_ENV, LinuxRuntime, LinuxRuntimePlan,
-        LinuxRuntimeProcessSpec, TrackedChild, TrackedProcess,
+        LinuxRuntimeProcessSpec, TrackedChild, TrackedProcess, upper_guest_path,
     };
     use crate::artifacts::{ArtifactKind, ArtifactRecord, ArtifactSource};
     use crate::domain::RuntimeStartRequest;
@@ -1533,6 +1538,12 @@ mod tests {
         assert!(
             plan.socket_path.parent().unwrap().is_dir(),
             "prepare must create the host-side socket directory"
+        );
+        assert!(
+            upper_guest_path(&plan.upper, plan.socket_path.parent().unwrap())
+                .expect("guest socket mountpoint path")
+                .is_dir(),
+            "prepare must pre-create the socket bind mountpoint in the upper layer"
         );
         assert!(
             plan.upper.join(".denia").is_dir(),
