@@ -152,7 +152,7 @@ pub fn open_pty(cols: u16, rows: u16) -> io::Result<(PtyMaster, OwnedFd)> {
 }
 
 fn pts_name(fd: RawFd) -> io::Result<std::ffi::CString> {
-    let mut buf = vec![0_i8; 128];
+    let mut buf = vec![0 as libc::c_char; 128];
     let rc = unsafe { libc::ptsname_r(fd, buf.as_mut_ptr(), buf.len()) };
     if rc != 0 {
         return Err(io::Error::from_raw_os_error(rc));
