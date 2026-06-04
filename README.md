@@ -50,6 +50,10 @@ about, opening it only to do a thing and leave.
   running replica, from the web console's terminal or `denia console`. A
   PTY-backed `setns` joins the replica's namespaces + cgroup; auth is a single-use
   ticket, never a token in the URL (ADR-033).
+- **Client-driven deploy** — `denia auth` to log in once (stores a long-lived
+  API token), then `denia push` packs your working tree (honoring
+  `.gitignore`/`.dockerignore`), uploads it, and the node builds the Dockerfile
+  and deploys it — no local Docker required (ADR-034).
 
 ## Quick Start
 
@@ -124,6 +128,8 @@ privilege model.
 | `denia doctor` | Diagnose host requirements and install health (no privilege needed). |
 | `denia rotate-token` | Rotate the admin token and restart the service. |
 | `denia console [service]` | Open an interactive `/bin/sh` inside a running service replica (ticket + websocket). |
+| `denia auth` | Authenticate to a remote Denia (login → mint + store an API token in `client.toml`). |
+| `denia push` | Pack the working tree, upload it, and deploy to a remote service (Dockerfile required). |
 
 Running `denia` with no subcommand starts the control-plane daemon.
 
@@ -261,6 +267,8 @@ token from `/v1/auth/login`. Routes enforce a project-scoped role minimum
 - `GET /v1/services/{id}/console/replicas`, `POST /v1/services/{id}/console/tickets`
   (Operator); `GET /v1/services/{id}/console/ws` (single-use ticket, outside bearer
   auth — browser websockets can't send an `Authorization` header)
+- `POST /v1/services/{id}/uploads` (Operator; streams a `tar.zst` build context)
+- `GET /v1/node` (exposes `control_domain`)
 
 ## Hosted registry
 
@@ -315,6 +323,85 @@ denia console <service> [--project <name>] [--replica <index>]
   index, session id, start/end, exit reason).
 - **`/bin/sh` only (v1)** — images without `/bin/sh` (e.g. distroless) return a
   clear console error until an explicit command mode is added.
+
+## Deploy from your machine
+
+`denia push` deploys the current working tree to a remote Denia node — no local
+Docker, no git remote, no pre-deploy commit. See
+[ADR-034](docs/adr/034-client-driven-deploy-upload.md).
+
+### Authenticate once
+
+```bash
+denia auth [--url <URL>] [--username <user>] [--profile <name>]
+```
+
+`denia auth` prompts for the remote URL, username, and password (hidden input).
+It logs in via `/v1/auth/login`, mints a long-lived named API token via
+`/v1/api-tokens`, and saves only `{url, token}` to
+`~/.config/denia/client.toml` (mode `0600`). The password and the session token
+are **never stored or logged**. The minted token is verified with `GET /v1/me`
+before saving. Flags: `--url`, `--username`, `--profile`, `--token-name`,
+`--password-stdin`.
+
+### The `.denia` manifest
+
+Commit a `.denia` file in the project root to record the target project and
+service (and optionally the Dockerfile and context paths):
+
+```toml
+project    = "default"
+service    = "api"
+dockerfile = "Dockerfile"   # optional, default
+context    = "."            # optional, default
+```
+
+An optional `[create]` block supplies defaults for `denia push --create`:
+
+```toml
+[create]
+port         = 8080
+health_path  = "/healthz"   # optional, default "/"
+```
+
+### Push a deploy
+
+```bash
+denia push [--project <name>] [--service <name>] [--dockerfile <path>]
+           [--context <dir>] [--path <dir>] [--profile <name>] [--no-follow]
+           [--create]
+```
+
+`denia push` resolves the target from `.denia` (flags override manifest values),
+then:
+
+1. Verifies the Dockerfile exists on disk.
+2. Packs the working tree into a `tar.zst` build context — tracked and untracked
+   files honoring `.gitignore` and `.dockerignore`; the Dockerfile is always
+   included.
+3. Streams the archive to `POST /v1/services/{id}/uploads`.
+4. Creates a deployment with the returned `upload_id`
+   (`POST /v1/deployments`, source `upload`).
+5. Tails the SSE deploy-log stream and polls for `Healthy`/`Failed` status
+   (suppressed with `--no-follow`).
+
+The service **must already exist** (create it in the web console or via
+`POST /v1/services`). The node builds the uploaded context with BuildKit and
+runs the existing health-gated async deploy. The staged upload is deleted after
+the build.
+
+**`--create`** creates the service first, but only when the node has a
+`control_domain` configured (it registers the service against the node's hosted
+registry). Without a control domain `--create` is refused — create the service
+in the console instead. A `[create]` block in `.denia` is required when using
+`--create`.
+
+### v1 constraints
+
+- Builds are **Dockerfile-only** — no buildpacks or Nixpacks.
+- Each push uploads a full context (no incremental upload).
+- Build contexts may **not** contain symlinks (the server rejects archives with
+  escaping symlinks or hardlinks for host-root safety).
 
 ## Security
 

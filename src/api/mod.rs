@@ -10,12 +10,14 @@ pub mod hosted_registry;
 pub mod ingress;
 pub mod jobs;
 pub mod members;
+pub mod node;
 pub mod observability;
 pub mod oci;
 pub mod projects;
 pub mod registries;
 pub mod services;
 pub mod tokens;
+pub mod uploads;
 pub mod users;
 
 pub use error::ApiError;

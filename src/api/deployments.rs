@@ -119,6 +119,14 @@ async fn create_deployment(
         state.routes.clone(),
     );
     let autoscaler = state.autoscaler.clone();
+    let upload_cleanup = match &request {
+        crate::domain::DeploymentRequest::Upload { upload_id, .. } => {
+            uuid::Uuid::parse_str(upload_id)
+                .ok()
+                .map(|id| state.config.uploads_dir.join(id.to_string()))
+        }
+        _ => None,
+    };
 
     tokio::spawn(async move {
         let deps = crate::deploy::coordinator::RunDeps {
@@ -146,6 +154,12 @@ async fn create_deployment(
             for ev in &events {
                 let _ = log.write("AUTOSCALE", &format!("{ev:?}"));
             }
+        }
+        // Best-effort remove the staged upload directory after the deploy
+        // pipeline finishes (success OR failure). The directory is no longer
+        // needed once the build context has been consumed by `run_with_deps`.
+        if let Some(dir) = upload_cleanup {
+            let _ = std::fs::remove_dir_all(&dir);
         }
     });
 
@@ -284,4 +298,117 @@ async fn deployment_log_stream(
 
     Ok(Sse::new(ReceiverStream::new(rx))
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    use crate::app::{AppState, build_router};
+    use crate::config::AppConfig;
+    use crate::domain::{
+        DeploymentStatus, ExternalImageSource, HealthCheck, ServiceConfig, ServiceSource,
+    };
+
+    const ADMIN_TOKEN: &str = "test-admin-token-0123456789abcdef";
+
+    fn test_state_with_dirs(uploads_dir: &std::path::Path, log_dir: &std::path::Path) -> AppState {
+        let mut config = AppConfig::for_test(ADMIN_TOKEN);
+        config.uploads_dir = uploads_dir.to_path_buf();
+        config.log_dir = log_dir.to_path_buf();
+        AppState::builder(config).build()
+    }
+
+    fn make_service(state: &AppState) -> ServiceConfig {
+        let project_id = state.projects.default_project_id().unwrap();
+        state
+            .services
+            .put_service(
+                ServiceConfig::new(
+                    project_id,
+                    "web",
+                    Vec::new(),
+                    ServiceSource::ExternalImage(ExternalImageSource {
+                        image: "busybox".to_string(),
+                        credential: None,
+                        registry_id: None,
+                        image_ref: None,
+                    }),
+                    8080,
+                    HealthCheck::new("/", 5),
+                    None,
+                    Vec::new(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+    }
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn upload_cleanup_rejects_non_uuid_before_building_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let uploads_dir = tmp.path().join("uploads");
+        let log_dir = tmp.path().join("logs");
+        std::fs::create_dir_all(&uploads_dir).unwrap();
+        let outside_dir = tmp.path().join("must-survive");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        std::fs::write(outside_dir.join("sentinel"), b"keep").unwrap();
+
+        let state = test_state_with_dirs(&uploads_dir, &log_dir);
+        let service = make_service(&state);
+        let request_body = serde_json::json!({
+            "source": "upload",
+            "service_id": service.id,
+            "upload_id": outside_dir.to_string_lossy(),
+            "dockerfile_path": "Dockerfile",
+            "context_path": "."
+        });
+
+        let resp = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/deployments")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body = body_json(resp).await;
+        let deployment_id = body["id"].as_str().unwrap().parse().unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let deployment = state
+                    .deployments
+                    .get_deployment(deployment_id)
+                    .unwrap()
+                    .unwrap();
+                if deployment.status == DeploymentStatus::Failed {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("deployment should fail after acquirer rejects upload_id");
+
+        assert!(
+            outside_dir.join("sentinel").exists(),
+            "cleanup must not remove a path derived from a non-UUID upload_id"
+        );
+    }
 }
