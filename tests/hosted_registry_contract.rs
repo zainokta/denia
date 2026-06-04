@@ -114,13 +114,75 @@ async fn upload_lifecycle() {
     assert_eq!(body.as_ref(), payload.as_slice());
 }
 
+// Push a blob through the start → PATCH → commit flow so a manifest can
+// legitimately reference it (referential integrity is now enforced on PUT).
+async fn push_blob(app: &Router, payload: &[u8]) -> String {
+    let digest = format!("sha256:{}", hex::encode(Sha256::digest(payload)));
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/default/api/blobs/uploads/")
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let location = resp
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(&location)
+                .header("authorization", "Bearer test-token")
+                .body(Body::from(payload.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("{location}?digest={digest}"))
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    digest
+}
+
 #[tokio::test]
 async fn manifest_roundtrip() {
     use sha2::{Digest, Sha256};
     let app = test_app_with_project_service().await;
     let token = "Bearer test-token";
     let media_type = "application/vnd.oci.image.manifest.v1+json";
-    let manifest = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000","size":0},"layers":[]}"#.to_vec();
+
+    // Push the config blob the manifest references so referential integrity
+    // passes on PUT.
+    let config_bytes = b"{}";
+    let config_digest = push_blob(&app, config_bytes).await;
+
+    let manifest = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":{}}},"layers":[]}}"#,
+        config_bytes.len()
+    )
+    .into_bytes();
     let digest = format!("sha256:{}", hex::encode(Sha256::digest(&manifest)));
 
     // PUT by tag -> 201 + Docker-Content-Digest

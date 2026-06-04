@@ -70,39 +70,68 @@ impl RegistryGc {
         self.status.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
+    /// Read a manifest blob body for the referenced-set walk. A read failure
+    /// (missing or unreadable blob) is surfaced as an error so the caller
+    /// aborts the sweep — never treats the manifest as referencing nothing.
+    fn read_manifest_body(&self, digest: &str) -> Result<Vec<u8>, RegistryGcError> {
+        self.storage.read_blob(digest).map_err(RegistryGcError::from)
+    }
+
     /// Run one conservative sweep.
     ///
     /// A blob is deleted only when it is (a) not in the referenced set, and
     /// (b) older than the grace period. The referenced set is the union of all
-    /// manifest digests and the config/layer digests parsed from every manifest
-    /// body. Active upload sessions are never touched.
+    /// manifest digests, the config/layer digests parsed from every manifest
+    /// body, AND — for OCI image indexes / Docker manifest lists — the
+    /// per-arch `manifests[]` sub-manifest digests, recursively. Active upload
+    /// sessions are never touched.
+    ///
+    /// If a manifest body recorded in the metadata cannot be read or parsed,
+    /// the sweep ABORTS rather than treating that manifest as referencing
+    /// nothing: silently dropping its dependencies would orphan live layers on
+    /// a transient read error (ADR-031: "deleting a referenced blob breaks
+    /// clients").
     pub fn sweep_once(&self) -> Result<RegistryGcReport, RegistryGcError> {
         let started = Utc::now();
 
-        // Build the referenced digest set.
+        // Build the referenced digest set. Walk every manifest digest known to
+        // the metadata; for each, read+parse its body and follow config,
+        // layers, and (for indexes) sub-manifests. Sub-manifests discovered
+        // this way are themselves walked so their config/layers survive too.
         let mut referenced: HashSet<String> = HashSet::new();
-        for manifest_digest in self.repo.all_manifest_digests()? {
-            // The manifest blob itself is referenced.
-            // Parse its body (best-effort) for config + layer digests.
-            if let Ok(bytes) = self.storage.read_blob(&manifest_digest)
-                && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        let mut queue: Vec<String> = self.repo.all_manifest_digests()?;
+        while let Some(manifest_digest) = queue.pop() {
+            if !referenced.insert(manifest_digest.clone()) {
+                // Already processed (cycle / shared sub-manifest guard).
+                continue;
+            }
+            let bytes = self.read_manifest_body(&manifest_digest)?;
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            if let Some(config_digest) = value
+                .get("config")
+                .and_then(|c| c.get("digest"))
+                .and_then(|d| d.as_str())
             {
-                if let Some(config_digest) = value
-                    .get("config")
-                    .and_then(|c| c.get("digest"))
-                    .and_then(|d| d.as_str())
-                {
-                    referenced.insert(config_digest.to_string());
-                }
-                if let Some(layers) = value.get("layers").and_then(|l| l.as_array()) {
-                    for layer in layers {
-                        if let Some(d) = layer.get("digest").and_then(|d| d.as_str()) {
-                            referenced.insert(d.to_string());
-                        }
+                referenced.insert(config_digest.to_string());
+            }
+            if let Some(layers) = value.get("layers").and_then(|l| l.as_array()) {
+                for layer in layers {
+                    if let Some(d) = layer.get("digest").and_then(|d| d.as_str()) {
+                        referenced.insert(d.to_string());
                     }
                 }
             }
-            referenced.insert(manifest_digest);
+            // OCI image index / Docker manifest list: each `manifests[]` entry
+            // is itself a manifest blob whose config+layers must survive. Queue
+            // it so it is walked recursively.
+            if let Some(manifests) = value.get("manifests").and_then(|m| m.as_array()) {
+                for sub in manifests {
+                    if let Some(d) = sub.get("digest").and_then(|d| d.as_str()) {
+                        referenced.insert(d.to_string());
+                        queue.push(d.to_string());
+                    }
+                }
+            }
         }
 
         let kept_uploads = self.storage.count_active_uploads()?;
