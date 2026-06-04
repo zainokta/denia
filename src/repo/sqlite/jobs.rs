@@ -146,6 +146,56 @@ pub(super) fn update_job_run_q(
     Ok(())
 }
 
+/// Mark a run as Running for the given attempt, stamping `started_at`. Reused
+/// across retry attempts on the same run row (ADR-010: retries reuse the run's
+/// `attempt` count rather than minting a new run per attempt).
+pub(super) fn start_job_run_q(
+    conn: &Connection,
+    run_id: Uuid,
+    attempt: u32,
+) -> Result<(), RepoError> {
+    conn.execute(
+        "UPDATE job_runs SET status = ?1, attempt = ?2, started_at = ?3 WHERE id = ?4",
+        params![
+            serde_json::to_string(&JobRunStatus::Running)?,
+            attempt,
+            Utc::now().to_rfc3339(),
+            run_id.to_string(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Insert a terminal `Skipped` run row recording that a scheduled fire was
+/// suppressed because the job already had an active run (Forbid concurrency,
+/// ADR-010). Created already-finished so it never enters the executor.
+pub(super) fn create_skipped_run_q(conn: &Connection, job_id: Uuid) -> Result<JobRun, RepoError> {
+    let now = Utc::now();
+    let run = JobRun {
+        id: Uuid::now_v7(),
+        job_id,
+        status: JobRunStatus::Skipped,
+        attempt: 1,
+        exit_code: None,
+        started_at: None,
+        finished_at: Some(now),
+        created_at: now,
+    };
+    conn.execute(
+        "INSERT INTO job_runs (id, job_id, status, attempt, finished_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            run.id.to_string(),
+            job_id.to_string(),
+            serde_json::to_string(&run.status)?,
+            run.attempt,
+            now.to_rfc3339(),
+            run.created_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(run)
+}
+
 pub(super) fn active_run_q(conn: &Connection, job_id: Uuid) -> Result<Option<JobRun>, RepoError> {
     let runs = list_job_runs_q(conn, job_id)?;
     let pending = serde_json::to_string(&JobRunStatus::Pending)?;
@@ -263,6 +313,16 @@ impl SqliteStore {
     ) -> Result<(), StateError> {
         let connection = self.connection()?;
         update_job_run_q(&connection, run_id, status, exit_code).map_err(StateError::from)
+    }
+
+    pub fn start_job_run(&self, run_id: Uuid, attempt: u32) -> Result<(), StateError> {
+        let connection = self.connection()?;
+        start_job_run_q(&connection, run_id, attempt).map_err(StateError::from)
+    }
+
+    pub fn create_skipped_run(&self, job_id: Uuid) -> Result<JobRun, StateError> {
+        let connection = self.connection()?;
+        create_skipped_run_q(&connection, job_id).map_err(StateError::from)
     }
 
     pub fn active_run(&self, job_id: Uuid) -> Result<Option<JobRun>, StateError> {

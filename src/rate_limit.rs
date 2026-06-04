@@ -11,9 +11,19 @@ use axum::{
 };
 use tokio::sync::Mutex;
 
+/// How many `check` calls between full sweeps that evict keys whose entire
+/// timestamp window has lapsed. Bounds the cost of GC while keeping the map
+/// from growing without limit under IP churn / spoofed-loopback XFF.
+const SWEEP_INTERVAL: u64 = 1024;
+
+struct BucketState {
+    buckets: HashMap<String, Vec<Instant>>,
+    ops_since_sweep: u64,
+}
+
 #[derive(Clone)]
 struct BucketLimiter {
-    inner: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    inner: Arc<Mutex<BucketState>>,
     max_attempts: usize,
     window: Duration,
 }
@@ -21,16 +31,32 @@ struct BucketLimiter {
 impl BucketLimiter {
     fn new(max_attempts: usize, window_secs: u64) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(BucketState {
+                buckets: HashMap::new(),
+                ops_since_sweep: 0,
+            })),
             max_attempts,
             window: Duration::from_secs(window_secs),
         }
     }
 
     async fn check(&self, key: &str) -> bool {
-        let mut map = self.inner.lock().await;
+        let mut state = self.inner.lock().await;
         let now = Instant::now();
-        let entry = map.entry(key.to_string()).or_default();
+
+        // Periodically evict stale keys so IPs that never return don't leak
+        // memory forever. Per-key trimming below handles live keys; this drops
+        // keys whose whole window has expired.
+        state.ops_since_sweep += 1;
+        if state.ops_since_sweep >= SWEEP_INTERVAL {
+            state.ops_since_sweep = 0;
+            let window = self.window;
+            state
+                .buckets
+                .retain(|_, ts| ts.iter().any(|t| now.duration_since(*t) < window));
+        }
+
+        let entry = state.buckets.entry(key.to_string()).or_default();
         entry.retain(|t| now.duration_since(*t) < self.window);
         if entry.len() >= self.max_attempts {
             return false;
@@ -160,5 +186,24 @@ mod tests {
     fn non_loopback_peer_ignores_forwarded_for() {
         let req = req_with("198.51.100.4:5000", Some("203.0.113.9"));
         assert_eq!(extract_client_ip(&req), "198.51.100.4");
+    }
+
+    #[tokio::test]
+    async fn sweep_evicts_stale_keys() {
+        // Zero-second window: every prior timestamp is immediately stale, so a
+        // sweep must drop the key once it stops being touched.
+        let limiter = BucketLimiter::new(1000, 0);
+        assert!(limiter.check("stale-ip").await);
+        // The first `check` inserts the key. Drive enough additional `check`s on
+        // a *different* key to trigger the periodic sweep, which should evict
+        // the now-stale "stale-ip" entry whose only timestamp has expired.
+        for _ in 0..SWEEP_INTERVAL {
+            limiter.check("live-ip").await;
+        }
+        let state = limiter.inner.lock().await;
+        assert!(
+            !state.buckets.contains_key("stale-ip"),
+            "stale key should have been swept out"
+        );
     }
 }

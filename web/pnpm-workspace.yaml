@@ -1,0 +1,5 @@
+# pnpm 10 reads build-script allowlists from here, not the package.json `pnpm`
+# field (which it now ignores). Native deps that need a build step at install.
+onlyBuiltDependencies:
+  - esbuild
+  - lightningcss

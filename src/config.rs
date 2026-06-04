@@ -91,6 +91,17 @@ pub struct AppConfig {
     /// not deleted (guards against an in-flight push between blob upload and
     /// manifest commit). Default = 1 hour.
     pub registry_gc_grace_secs: u64,
+    /// Maximum on-the-wire size accepted for a single hosted-registry blob
+    /// upload (the cumulative size of all PATCH chunks plus the trailing PUT
+    /// body). Enforced while streaming to disk so an Operator-capable token
+    /// cannot OOM the daemon. Default = 10 GiB. Override with
+    /// `DENIA_REGISTRY_MAX_BLOB_BYTES`.
+    pub registry_max_blob_bytes: u64,
+    /// Maximum size accepted for a single hosted-registry manifest body.
+    /// Manifests are small JSON documents; this is a generous bound that still
+    /// rejects pathological payloads. Default = 16 MiB. Override with
+    /// `DENIA_REGISTRY_MAX_MANIFEST_BYTES`.
+    pub registry_max_manifest_bytes: u64,
     /// Age public key used to encrypt control-plane-managed secrets (registry
     /// credentials, etc.). Required at the point of first encryption; absence
     /// is reported as a 400/500 at API time, not at boot. See ADR-021.
@@ -421,11 +432,15 @@ impl AppConfig {
             .map(PathBuf::from)
             .or_else(|| file_cfg.data_dir.clone())
             .unwrap_or_else(|| PathBuf::from("/var/lib/denia"));
+        // Default DB location matches the provisioned layout (`denia setup`
+        // creates `<data_dir>/sqlite/` and the rendered config.toml points
+        // here). An env-only / `cargo run` deploy now lands in the same place
+        // as a setup install; `SqliteStore::open` creates the parent dir.
         let database_path = env::var("DENIA_DATABASE_PATH")
             .ok()
             .map(PathBuf::from)
             .or_else(|| file_cfg.database_path.clone())
-            .unwrap_or_else(|| data_dir.join("denia.sqlite3"));
+            .unwrap_or_else(|| data_dir.join("sqlite").join("denia.sqlite3"));
         let buildkit_binary = env::var("DENIA_BUILDKIT_BINARY")
             .ok()
             .map(PathBuf::from)
@@ -441,11 +456,18 @@ impl AppConfig {
             .map(PathBuf::from)
             .or_else(|| file_cfg.sops_binary.clone())
             .unwrap_or_else(|| PathBuf::from("sops"));
+        // Defaults to this running binary so the daemon re-execs itself as the
+        // socket proxy. If `current_exe()` fails (rare; e.g. the exe was
+        // unlinked), fall back to the documented absolute install path rather
+        // than a bare relative `denia`, which a hardened unit's reduced PATH
+        // may not resolve.
         let socket_proxy_binary = env::var("DENIA_SOCKET_PROXY_BINARY")
             .ok()
             .map(PathBuf::from)
             .or_else(|| file_cfg.socket_proxy_binary.clone())
-            .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| "denia".into()));
+            .unwrap_or_else(|| {
+                std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/local/bin/denia"))
+            });
         let runtime_dir = data_dir.join("runtime");
         let cgroup_root = env::var("DENIA_CGROUP_ROOT")
             .ok()
@@ -560,6 +582,14 @@ impl AppConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(60 * 60);
+        let registry_max_blob_bytes = env::var("DENIA_REGISTRY_MAX_BLOB_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10u64 * 1024 * 1024 * 1024);
+        let registry_max_manifest_bytes = env::var("DENIA_REGISTRY_MAX_MANIFEST_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(16u64 * 1024 * 1024);
         let age_key_file = env::var("DENIA_AGE_KEY_FILE")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -576,6 +606,16 @@ impl AppConfig {
                     .filter(|v| !v.trim().is_empty())
             })
             .or_else(|| read_age_public_key(&age_key_file));
+        // Aid diagnosis: an unparsable / comment-less key file silently yields
+        // no recipient, which surfaces much later as a 400 on registry create.
+        // Never log key contents — only the path.
+        if age_recipient.is_none() && age_key_file.exists() {
+            tracing::warn!(
+                age_key_file = %age_key_file.display(),
+                "age key file present but no recipient parsed (missing `# public key:` comment); \
+                 set DENIA_AGE_RECIPIENT or age_recipient explicitly"
+            );
+        }
         let uploads_dir = env::var("DENIA_UPLOADS_DIR")
             .ok()
             .map(PathBuf::from)
@@ -639,6 +679,8 @@ impl AppConfig {
             oci_gc_retention_secs,
             registry_gc_interval_secs,
             registry_gc_grace_secs,
+            registry_max_blob_bytes,
+            registry_max_manifest_bytes,
             age_recipient,
             age_key_file,
             uploads_dir,
@@ -691,6 +733,8 @@ impl AppConfig {
             oci_gc_retention_secs: 7 * 24 * 60 * 60,
             registry_gc_interval_secs: 24 * 60 * 60,
             registry_gc_grace_secs: 60 * 60,
+            registry_max_blob_bytes: 10u64 * 1024 * 1024 * 1024,
+            registry_max_manifest_bytes: 16u64 * 1024 * 1024,
             age_recipient: Some("age1test".into()),
             age_key_file: data_dir.join("age.key"),
             uploads_dir: data_dir.join("uploads"),
@@ -1059,6 +1103,38 @@ control_tls = true
         assert_eq!(c.uploads_dir, c.data_dir.join("uploads"));
         assert_eq!(c.upload_max_bytes, 536_870_912);
         assert_eq!(c.upload_max_entries, 200_000);
+    }
+
+    // The env-only / `cargo run` default DB path must match the layout
+    // `denia setup` provisions (`<data_dir>/sqlite/denia.sqlite3`), not the old
+    // `<data_dir>/denia.sqlite3` that disagreed with config.toml.in.
+    #[test]
+    fn database_path_default_matches_provisioned_sqlite_subdir() {
+        let _lock = FROM_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_cfg_dir, _cfg_file) = isolated_config_file();
+        let _admin = EnvGuard::set("DENIA_ADMIN_TOKEN", "x".repeat(64));
+        let _key_file = EnvGuard::set("DENIA_AGE_KEY_FILE", "/nonexistent/denia-test/age.key");
+        let _data_dir = EnvGuard::set("DENIA_DATA_DIR", "/var/lib/denia");
+        unsafe {
+            std::env::remove_var("DENIA_DATABASE_PATH");
+        }
+        let cfg = AppConfig::from_env().expect("config from env");
+        assert_eq!(
+            cfg.database_path,
+            PathBuf::from("/var/lib/denia/sqlite/denia.sqlite3"),
+        );
+    }
+
+    // Explicit DENIA_DATABASE_PATH still wins over the computed default.
+    #[test]
+    fn database_path_env_override_wins() {
+        let _lock = FROM_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_cfg_dir, _cfg_file) = isolated_config_file();
+        let _admin = EnvGuard::set("DENIA_ADMIN_TOKEN", "x".repeat(64));
+        let _key_file = EnvGuard::set("DENIA_AGE_KEY_FILE", "/nonexistent/denia-test/age.key");
+        let _db = EnvGuard::set("DENIA_DATABASE_PATH", "/custom/denia.db");
+        let cfg = AppConfig::from_env().expect("config from env");
+        assert_eq!(cfg.database_path, PathBuf::from("/custom/denia.db"));
     }
 
     #[test]

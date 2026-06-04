@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
 
@@ -19,6 +20,51 @@ pub struct RuntimeConsoleRequest {
     pub rows: u16,
 }
 
+/// How the console shell ended, for the `exit` control frame + audit log
+/// (ADR-033 "exit reason"). `None`-ish ambiguity is captured explicitly so the
+/// audit trail can distinguish "exited 0" from "we never learned".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleExit {
+    /// Shell exited normally with this status code.
+    Code(i32),
+    /// Shell was terminated by a signal (e.g. SIGTERM/SIGKILL on teardown).
+    Signal(i32),
+    /// The exit reason could not be determined (already reaped elsewhere, wait
+    /// failed, or runtime does not track it).
+    Unknown,
+}
+
+impl ConsoleExit {
+    /// The numeric code for the protocol `exit` frame (`{"type":"exit","code":N}`),
+    /// or `None` when the reason is unknown.
+    pub fn frame_code(&self) -> Option<i32> {
+        match self {
+            ConsoleExit::Code(code) => Some(*code),
+            // Convention: a signal N surfaces as 128+N, matching shells.
+            ConsoleExit::Signal(sig) => Some(128 + *sig),
+            ConsoleExit::Unknown => None,
+        }
+    }
+
+    /// Stable human label for the audit log "session end" record.
+    pub fn audit_reason(&self) -> String {
+        match self {
+            ConsoleExit::Code(code) => format!("exit code {code}"),
+            ConsoleExit::Signal(sig) => format!("signal {sig}"),
+            ConsoleExit::Unknown => "unknown".to_string(),
+        }
+    }
+}
+
+/// Tears down a console child: signals it (SIGTERM, escalating to SIGKILL after
+/// a grace period), reaps it, and reports how it ended. Held as a trait object
+/// so the runtime-agnostic [`RuntimeConsoleSession`] can drive teardown without
+/// the API layer knowing about pids/signals. The fake runtime supplies a no-op.
+#[async_trait]
+pub trait ConsoleReaper: Send + Sync {
+    async fn reap(&self) -> ConsoleExit;
+}
+
 /// A live console session: a PTY master attached to a `/bin/sh` that joined the
 /// replica's namespaces and cgroup.
 pub struct RuntimeConsoleSession {
@@ -27,6 +73,21 @@ pub struct RuntimeConsoleSession {
     pub child_pid: u32,
     pub cgroup_path: PathBuf,
     pub pty: Box<dyn ConsolePty>,
+    /// Drives child teardown + reaping. Always set by real runtimes; the fake
+    /// runtime leaves it `None` (its console child is not a real process).
+    pub reaper: Option<Box<dyn ConsoleReaper>>,
+}
+
+impl RuntimeConsoleSession {
+    /// Terminate and reap the console child, returning how it ended. Idempotent
+    /// in practice: the reaper handles an already-exited child. When no reaper
+    /// is present (fake runtime) the reason is `Unknown`.
+    pub async fn close(&mut self) -> ConsoleExit {
+        match self.reaper.take() {
+            Some(reaper) => reaper.reap().await,
+            None => ConsoleExit::Unknown,
+        }
+    }
 }
 
 impl std::fmt::Debug for RuntimeConsoleSession {
@@ -37,6 +98,7 @@ impl std::fmt::Debug for RuntimeConsoleSession {
             .field("child_pid", &self.child_pid)
             .field("cgroup_path", &self.cgroup_path)
             .field("pty", &"<console pty>")
+            .field("reaper", &self.reaper.as_ref().map(|_| "<console reaper>"))
             .finish()
     }
 }

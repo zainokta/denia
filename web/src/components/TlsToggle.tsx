@@ -3,6 +3,8 @@ import { Effect } from 'effect'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
 import type { Service } from '#/effect/schema'
+import { errorMessage } from './ErrorPanel'
+import { useActionToasts } from './Toast'
 
 interface Props {
   service: Service
@@ -16,6 +18,7 @@ const putService = (svc: Service) =>
 
 export function TlsToggle({ service }: Props) {
   const queryClient = useQueryClient()
+  const toast = useActionToasts()
   const tlsEnabled = service.tls_enabled ?? false
 
   const toggle = useMutation({
@@ -28,8 +31,13 @@ export function TlsToggle({ service }: Props) {
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['services'] })
+      // Also invalidate the detail-page query key so a toggle from the service
+      // detail header refreshes the TLS row immediately.
+      queryClient.invalidateQueries({ queryKey: ['services', service.id] })
       queryClient.invalidateQueries({ queryKey: ['ingress', 'routes'] })
+      toast.ok(tlsEnabled ? 'TLS disabled' : 'TLS enabled')
     },
+    onError: (err: unknown) => toast.err(errorMessage(err)),
   })
 
   return (

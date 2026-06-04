@@ -104,6 +104,9 @@ describe('TlsToggle', () => {
         expect.objectContaining({ queryKey: ['services'] }),
       )
       expect(invalidateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ queryKey: ['services', FIXTURE_SERVICE.id] }),
+      )
+      expect(invalidateSpy).toHaveBeenCalledWith(
         expect.objectContaining({ queryKey: ['ingress', 'routes'] }),
       )
     })

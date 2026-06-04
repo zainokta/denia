@@ -12,7 +12,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::api::ApiError;
 use crate::app::AppState;
 use crate::artifacts::acquirer::ArtifactAcquirer;
-use crate::auth::{Principal, ensure_role};
+use crate::auth::Principal;
 use crate::deploy::DeploymentCoordinator;
 use crate::domain::{DeploymentRequest, Role};
 use crate::logs::LogTailer;
@@ -22,6 +22,14 @@ use crate::logs::LogTailer;
 /// could exhaust tasks/file descriptors (mirrors F-8 mitigation in services).
 static DEPLOYMENT_LOG_STREAM_LIMIT: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(64)));
+
+/// Process-wide cap on concurrently-running deploy pipelines. Each accepted
+/// deploy spawns a detached build/run task; without a cap a burst of requests
+/// could spawn unbounded build pipelines and exhaust CPU/memory/file
+/// descriptors. A permit is held for the lifetime of the spawned task and
+/// released when it finishes; over-capacity requests get `429`.
+static DEPLOY_CONCURRENCY_LIMIT: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(8)));
 
 /// Read-model for deployment responses: the persisted `Deployment` plus its
 /// resolved artifact (joined from the `artifacts` table). The domain
@@ -55,10 +63,13 @@ fn ensure_deployment_role(
     project_id: uuid::Uuid,
     role: Role,
 ) -> Result<(), ApiError> {
-    ensure_role(state, principal, project_id, role).map_err(|error| match error {
-        ApiError::Forbidden(_) => ApiError::NotFound("deployment not found".to_string()),
-        other => other,
-    })
+    crate::auth::ensure_role_or_not_found(
+        state,
+        principal,
+        project_id,
+        role,
+        "deployment not found",
+    )
 }
 
 /// `POST /v1/deployments` — async deploy entry point (ADR-024).
@@ -76,6 +87,16 @@ async fn create_deployment(
         return Err(ApiError::NotFound("service not found".to_string()));
     };
     ensure_deployment_role(&state, &principal, service.project_id, Role::Operator)?;
+
+    // Bound the number of in-flight deploy pipelines. The permit is moved into
+    // the spawned task and released when it finishes; if the cap is reached the
+    // operator gets a 429 instead of overwhelming the host with builds.
+    let deploy_permit = DEPLOY_CONCURRENCY_LIMIT
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            ApiError::TooManyRequests("too many concurrent deployments, retry shortly".to_string())
+        })?;
 
     let coordinator = DeploymentCoordinator::new_with_shared_routing(
         state.deployment_repos(),
@@ -136,6 +157,9 @@ async fn create_deployment(
     let tls_enabled = service.tls_enabled;
 
     tokio::spawn(async move {
+        // Hold the concurrency permit for the lifetime of the pipeline; it is
+        // released when this task ends (success or failure).
+        let _deploy_permit = deploy_permit;
         let deps = crate::deploy::coordinator::RunDeps {
             acquirer: &acquirer,
             runner: runner.as_ref(),

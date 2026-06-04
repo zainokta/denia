@@ -160,16 +160,29 @@ async fn create_console_ticket(
         expires_at,
     };
 
-    TICKETS
-        .lock()
-        .map_err(|_| ApiError::Conflict("console ticket store unavailable".to_string()))?
-        .insert(ticket.clone(), value);
+    {
+        let mut tickets = TICKETS
+            .lock()
+            .map_err(|_| ApiError::Conflict("console ticket store unavailable".to_string()))?;
+        // Evict any expired tickets first so minted-but-unused tickets (browser
+        // closed, CLI aborted) cannot accumulate for the process lifetime. The
+        // store is only otherwise pruned on consume, so without this sweep an
+        // operator token could grow the map without bound (review 07, MED).
+        prune_expired(&mut tickets, Utc::now());
+        tickets.insert(ticket.clone(), value);
+    }
 
     Ok(Json(ConsoleTicketResponse {
         ws_path: format!("/v1/services/{service_id}/console/ws?ticket={ticket}"),
         ticket,
         expires_at,
     }))
+}
+
+/// Drop every ticket whose TTL has elapsed at `now`. Called on each mint so the
+/// store stays bounded by the count of *live* (unexpired) tickets.
+fn prune_expired(tickets: &mut HashMap<String, ConsoleTicket>, now: DateTime<Utc>) {
+    tickets.retain(|_, value| value.expires_at > now);
 }
 
 fn consume_ticket(service_id: Uuid, ticket: &str) -> Result<ConsoleTicket, ApiError> {
@@ -279,7 +292,7 @@ async fn handle_console_socket(state: AppState, mut socket: WebSocket, ticket: C
         ))
         .await;
 
-    bridge_console_socket(socket, session).await;
+    let exit = bridge_console_socket(socket, session).await;
 
     tracing::info!(
         %session_id,
@@ -287,11 +300,19 @@ async fn handle_console_socket(state: AppState, mut socket: WebSocket, ticket: C
         deployment_id = %ticket.deployment_id,
         replica_index = ticket.replica_index,
         principal = %ticket.principal_label,
+        exit_reason = %exit.audit_reason(),
         "console session end"
     );
 }
 
-async fn bridge_console_socket(mut socket: WebSocket, mut session: RuntimeConsoleSession) {
+/// Bridge the websocket <-> PTY until either side closes, then tear down and
+/// reap the console child via the session reaper (SIGTERM -> grace -> SIGKILL ->
+/// waitpid). Returns the child's exit reason so the caller can audit it and the
+/// `exit` control frame can carry the real code (ADR-033 "exit reason").
+async fn bridge_console_socket(
+    mut socket: WebSocket,
+    mut session: RuntimeConsoleSession,
+) -> crate::runtime::ConsoleExit {
     use axum::extract::ws::CloseFrame;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -344,14 +365,24 @@ async fn bridge_console_socket(mut socket: WebSocket, mut session: RuntimeConsol
         }
     }
 
-    let _ = crate::syscall::signal::kill(session.child_pid, rustix::process::Signal::TERM);
-    let _ = send_control(&mut socket, ConsoleControlFrame::Exit { code: None }).await;
+    // Terminate + reap the shell, capturing how it ended. This replaces the
+    // previous fire-and-forget SIGTERM that left the child unreaped (zombie) and
+    // forced the exit code to null.
+    let exit = session.close().await;
+    let _ = send_control(
+        &mut socket,
+        ConsoleControlFrame::Exit {
+            code: exit.frame_code(),
+        },
+    )
+    .await;
     let _ = socket
         .send(Message::Close(Some(CloseFrame {
             code: axum::extract::ws::close_code::NORMAL,
             reason: "console closed".into(),
         })))
         .await;
+    exit
 }
 
 async fn send_control(
@@ -587,6 +618,38 @@ mod tests {
             .insert(ticket.clone(), ticket_value(service_id));
         assert!(consume_ticket(service_id, &ticket).is_ok());
         assert!(consume_ticket(service_id, &ticket).is_err());
+    }
+
+    #[test]
+    fn prune_expired_evicts_only_stale_tickets() {
+        let mut store: HashMap<String, ConsoleTicket> = HashMap::new();
+        let now = chrono::Utc::now();
+        let mut fresh = ticket_value(uuid::Uuid::now_v7());
+        fresh.expires_at = now + chrono::TimeDelta::seconds(30);
+        let mut stale = ticket_value(uuid::Uuid::now_v7());
+        stale.expires_at = now - chrono::TimeDelta::seconds(1);
+        store.insert("fresh".to_string(), fresh);
+        store.insert("stale".to_string(), stale);
+
+        prune_expired(&mut store, now);
+
+        assert!(store.contains_key("fresh"));
+        assert!(!store.contains_key("stale"));
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn exit_reason_maps_to_frame_code_and_audit_label() {
+        use crate::runtime::ConsoleExit;
+        assert_eq!(ConsoleExit::Code(0).frame_code(), Some(0));
+        assert_eq!(ConsoleExit::Code(7).frame_code(), Some(7));
+        // Shells surface a signal N as 128+N; SIGKILL=9 -> 137, SIGTERM=15 -> 143.
+        assert_eq!(ConsoleExit::Signal(9).frame_code(), Some(137));
+        assert_eq!(ConsoleExit::Signal(15).frame_code(), Some(143));
+        assert_eq!(ConsoleExit::Unknown.frame_code(), None);
+        assert_eq!(ConsoleExit::Code(2).audit_reason(), "exit code 2");
+        assert_eq!(ConsoleExit::Signal(9).audit_reason(), "signal 9");
+        assert_eq!(ConsoleExit::Unknown.audit_reason(), "unknown");
     }
 
     #[tokio::test]

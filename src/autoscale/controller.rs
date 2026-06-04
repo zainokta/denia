@@ -580,6 +580,19 @@ impl Controller {
                     &ms.limits,
                 );
 
+                // Metrics outage guard: the service has live replicas but every
+                // cgroup read failed this tick (`live_readings == 0`). A total
+                // read failure aggregates to 0% CPU, which would otherwise look
+                // like an idle service and drive a spurious scale-down /
+                // scale-to-zero. Treat it as "unknown" and hold the current
+                // count instead of acting on a phantom-idle sample. Scale-UP is
+                // already impossible at 0% CPU, so nothing is lost by waiting
+                // for the next tick's reading.
+                if u.live_readings == 0 {
+                    self.store.set_desired_replicas(ms.service_id, start).ok();
+                    continue 'service;
+                }
+
                 // Idle scale-to-zero: a `min_replicas==0` service whose bridge
                 // has been idle past `idle_timeout_s` AND whose CPU is below
                 // target drains ALL replicas. This is distinct from the metric
@@ -722,6 +735,13 @@ impl Controller {
             // 4. Persist the actual achieved count.
             self.store.set_desired_replicas(ms.service_id, current).ok();
         }
+
+        // Prune cooldown state for services that are no longer managed (deleted
+        // or no longer autoscaled), so the map does not grow with every service
+        // ever seen. Bounded to the current managed set each tick.
+        let managed_ids: std::collections::HashSet<Uuid> =
+            services.iter().map(|m| m.service_id).collect();
+        self.cooldowns.retain(|id, _| managed_ids.contains(id));
 
         events
     }
@@ -881,6 +901,7 @@ mod tests {
                 avg_mem_pct: self.mem_pct,
                 max_mem_pct: self.mem_pct,
                 replica_count: replicas.len() as u32,
+                live_readings: replicas.len() as u32,
             }
         }
     }
@@ -1333,6 +1354,81 @@ mod tests {
         let events = ctrl.tick(std::slice::from_ref(&ms), 1000).await;
 
         assert!(ctrl.registry.replica_count(svc) >= 1);
+        assert!(!events.contains(&AutoscaleEvent::ScaledToZero {
+            service: "web".to_string()
+        }));
+    }
+
+    /// UsageSource that simulates a total cgroup-read outage: it reports the
+    /// fleet size but zero live readings and 0% CPU (the all-reads-failed shape
+    /// produced by `ServiceUsage::aggregate(&[], attempted)`).
+    struct OutageUsage;
+    impl UsageSource for OutageUsage {
+        fn usage(
+            &mut self,
+            _service_name: &str,
+            replicas: &[Replica],
+            _limits: &ResourceLimits,
+        ) -> ServiceUsage {
+            ServiceUsage {
+                avg_cpu_pct: 0,
+                avg_mem_pct: 0,
+                max_mem_pct: 0,
+                replica_count: replicas.len() as u32,
+                live_readings: 0,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_outage_does_not_scale_down() {
+        let svc = Uuid::now_v7();
+        let ms = managed(svc);
+        let mut ctrl = controller(
+            ledger(4000, 4 << 30),
+            Box::new(FakeUsage {
+                cpu_pct: 100,
+                mem_pct: 0,
+            }),
+        );
+
+        // Drive up to 2 replicas, then let the cooldown window elapse.
+        ctrl.tick(std::slice::from_ref(&ms), 0).await;
+        ctrl.tick(std::slice::from_ref(&ms), 0).await;
+        assert_eq!(ctrl.registry.replica_count(svc), 2);
+
+        // Now every cgroup read fails: 0% CPU but zero live readings. Even well
+        // past any cooldown, the controller must hold at 2 (treat as unknown),
+        // never scale down on a phantom-idle outage sample.
+        ctrl.usage = Box::new(OutageUsage);
+        let e = ctrl.tick(std::slice::from_ref(&ms), 100_000).await;
+        assert_eq!(ctrl.registry.replica_count(svc), 2);
+        assert!(
+            e.is_empty(),
+            "no scale event during a metrics outage: {e:?}"
+        );
+        assert_eq!(ctrl.store.get_desired_replicas(svc).unwrap(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn metrics_outage_does_not_scale_to_zero() {
+        let svc = Uuid::now_v7();
+        let mut ms = managed(svc);
+        ms.policy = scale_to_zero_policy();
+        let mut ctrl = controller(ledger(4000, 4 << 30), Box::new(OutageUsage));
+
+        seed_replica(&mut ctrl, &ms).await;
+        assert_eq!(ctrl.registry.replica_count(svc), 1);
+
+        // Idle by bridge activity AND a metrics outage: must NOT scale to zero.
+        let idle = std::time::Instant::now() - Duration::from_secs(700);
+        ctrl.ingress
+            .set_last_activity(&ms.service_id.to_string(), idle)
+            .await;
+
+        let events = ctrl.tick(std::slice::from_ref(&ms), 1000).await;
+
+        assert_eq!(ctrl.registry.replica_count(svc), 1);
         assert!(!events.contains(&AutoscaleEvent::ScaledToZero {
             service: "web".to_string()
         }));

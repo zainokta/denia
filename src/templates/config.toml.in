@@ -28,6 +28,9 @@ userns_size = 65536
 # buildkit_binary = "/usr/local/bin/buildctl"
 # git_binary = "/usr/bin/git"
 # sops_binary = "/usr/local/bin/sops"
+# socket_proxy_binary: defaults to the running denia binary (current_exe).
+# Set explicitly only if the daemon cannot resolve its own path.
+# socket_proxy_binary = "/usr/local/bin/denia"
 
 # --- Ingress (Pingora) ---
 # ACME HTTP-01 lives on :80; keep it 80 unless you front it (don't -- Denia
@@ -53,3 +56,23 @@ autoscale_headroom_mem_bytes = 536870912
 # Age private key file. The public recipient is auto-derived from the
 # "# public key:" comment unless age_recipient is set explicitly.
 age_key_file = "{{age_key_file}}"
+# age_recipient = "age1..."
+
+# --- OCI layer cache (ADR-022; all optional, shown with defaults) ---
+# oci_cache_dir = "/var/lib/denia/oci-cache"
+# Cache-hit verification: "none" | "size" | "full".
+# oci_cache_verify_on_hit = "size"
+# Blob GC scan interval / retention, in seconds (default 7 days each).
+# oci_gc_interval_secs = 604800
+# oci_gc_retention_secs = 604800
+
+# --- Hosted registry GC (ADR-031; env-only knobs, shown for reference) ---
+# DENIA_REGISTRY_GC_INTERVAL_SECS (default 86400)
+# DENIA_REGISTRY_GC_GRACE_SECS    (default 3600)
+
+# --- Push upload staging (ADR-034; all optional, shown with defaults) ---
+# uploads_dir = "/var/lib/denia/uploads"
+# upload_max_bytes = 536870912            # 512 MiB on-the-wire
+# upload_max_uncompressed_bytes = 2147483648  # 2 GiB extracted
+# upload_max_entries = 200000
+# upload_ttl_secs = 3600

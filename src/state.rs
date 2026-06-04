@@ -37,6 +37,10 @@ pub enum StateError {
     AdminAlreadyInitialized,
     #[error("invalid column value: {0}")]
     InvalidColumn(String),
+    #[error("validation error: {0}")]
+    Validation(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
 }
 
 impl From<RepoError> for StateError {
@@ -56,6 +60,8 @@ impl From<RepoError> for StateError {
             RepoError::RegistryInUse => StateError::RegistryInUse,
             RepoError::AdminAlreadyInitialized => StateError::AdminAlreadyInitialized,
             RepoError::InvalidColumn(s) => StateError::InvalidColumn(s),
+            RepoError::Validation(s) => StateError::Validation(s),
+            RepoError::Conflict(s) => StateError::Conflict(s),
         }
     }
 }
@@ -80,6 +86,15 @@ pub struct SqliteStore {
 impl SqliteStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, StateError> {
         let path = path.as_ref();
+        // Ensure the parent directory exists. The default layout nests the DB
+        // under `<data_dir>/sqlite/`; a `denia setup` install pre-creates it
+        // `0700 denia:denia`, but an env-only / `cargo run` deploy may not, so
+        // create it here so `Connection::open` does not fail with ENOENT.
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;

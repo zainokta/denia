@@ -7,11 +7,19 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessEntry {
+    /// The store key. NOTE: despite the name, the ingress producer and the
+    /// `/v1/services/{id}/requests` reader key this by the **service id**
+    /// (`service.id.to_string()`), not the human service name — keying by name
+    /// was the cross-project disclosure risk fixed in F-3. The serialized field
+    /// name is kept as `service_name` because the web console (area 08) is
+    /// aligned to that JSON shape; renaming would break it.
     pub service_name: String,
     pub method: String,
     pub path: String,
     pub status: u16,
     pub bytes: Option<u64>,
+    /// Served latency in milliseconds. Populated by the ingress producer from a
+    /// per-request start `Instant`; `None` only for entries built without timing.
     pub duration_ms: Option<u64>,
     pub recorded_at: String,
 }
@@ -70,6 +78,14 @@ fn is_token_segment(s: &str) -> bool {
     s.len() > 32 && s.chars().all(is_hex)
 }
 
+/// Redact likely identifiers/secrets from a request path before it is stored.
+/// UUID segments become `{id}` and long (>32-char) hex segments become
+/// `{token}`; query strings are stripped by the caller. This is the access-log
+/// PII/secret defense, but it is best-effort: a secret embedded as a shorter or
+/// non-hex path segment (e.g. a 20-char base64 API key) is NOT detected and
+/// passes through verbatim. Operators must therefore treat "do not put secrets
+/// in URL path segments" as an assumption (review 07 LOW). Headers and query
+/// strings — the usual secret carriers — are never recorded.
 pub fn sanitize_path(path: &str) -> String {
     let mut result = String::with_capacity(path.len());
     for segment in path.split('/') {
