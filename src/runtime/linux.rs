@@ -377,7 +377,7 @@ impl LinuxRuntime {
             self.set_traverse_mode(&plan.rootfs_path)?;
         }
         self.prepare_socket_directory(plan)?;
-        self.chown_overlay_dir(&denia_dir)?;
+        restore_current_process_owner(&denia_dir)?;
         let helper = self.runtime_helper_staging(SOCKET_PROXY_TARGET)?;
         self.stage_runtime_helper(&plan.upper, &helper)?;
         prepare_cgroup_directory(&self.cgroup_root, &plan.cgroup_path, CGROUP_CONTROLLERS)?;
@@ -584,13 +584,17 @@ fn copy_runtime_helper_file(src: &Path, dest: &Path) -> Result<(), RuntimeError>
         create_dir_all("create runtime helper directory", parent)?;
     }
     let tmp = dest.with_extension(format!("{}.tmp", uuid::Uuid::now_v7()));
-    if std::fs::hard_link(src, &tmp).is_err() {
-        std::fs::copy(src, &tmp).map_err(path_io("copy runtime helper", &tmp))?;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o555))
-            .map_err(path_io("set runtime helper permissions", &tmp))?;
-    }
+    std::fs::copy(src, &tmp).map_err(path_io("copy runtime helper", &tmp))?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o555))
+        .map_err(path_io("set runtime helper permissions", &tmp))?;
     std::fs::rename(&tmp, dest).map_err(path_io("publish runtime helper", dest))?;
     Ok(())
+}
+
+fn restore_current_process_owner(path: &Path) -> Result<(), RuntimeError> {
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+    chown::recursive_lchown(path, uid, gid).map_err(RuntimeError::Syscall)
 }
 
 #[async_trait]
@@ -778,7 +782,7 @@ impl Runtime for LinuxRuntime {
             self.set_traverse_mode(bundle)?;
             self.set_traverse_mode(&rootfs_path)?;
         }
-        self.chown_overlay_dir(&denia_dir)?;
+        restore_current_process_owner(&denia_dir)?;
 
         prepare_cgroup_directory(&self.cgroup_root, &cgroup_path, CGROUP_CONTROLLERS)?;
         // Resource-limit writes propagate errors (matching the service `prepare`
@@ -1275,7 +1279,7 @@ mod tests {
     };
     use crate::runtime::runtime_trait::Runtime;
     use crate::syscall::ns::NamespaceConfig;
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
 
     fn write_process_bundle(
@@ -1326,6 +1330,14 @@ mod tests {
             io_weight: None,
             replica_index: 0,
         }
+    }
+
+    fn tiny_socket_proxy(tmp: &tempfile::TempDir) -> PathBuf {
+        let path = tmp.path().join("denia-helper");
+        std::fs::write(&path, b"#!/bin/sh\n").expect("helper");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("helper mode");
+        path
     }
 
     #[test]
@@ -1498,7 +1510,9 @@ mod tests {
 
         let (artifact, _bundle_dir, rootfs) =
             write_process_bundle(&artifact_dir, "sha256:ro-rootfs");
-        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
+        let helper = tiny_socket_proxy(&tmp);
+        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir)
+            .with_socket_proxy(helper);
         let request = runtime_request(&runtime_dir, artifact, "test-svc");
         let plan = runtime.plan(&request).expect("plan");
 
@@ -1524,6 +1538,13 @@ mod tests {
             plan.upper.join(".denia").is_dir(),
             "prepare must create the .denia directory in the per-replica upper layer"
         );
+        let denia_metadata =
+            std::fs::symlink_metadata(plan.upper.join(".denia")).expect(".denia metadata");
+        assert_eq!(
+            denia_metadata.uid(),
+            unsafe { libc::getuid() },
+            ".denia must stay daemon-owned so helper staging can create temp files after upper chown"
+        );
     }
 
     #[test]
@@ -1537,7 +1558,9 @@ mod tests {
 
         let (artifact, _bundle_dir, _rootfs) =
             write_process_bundle(&artifact_dir, "sha256:stale-socket");
-        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
+        let helper = tiny_socket_proxy(&tmp);
+        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir)
+            .with_socket_proxy(helper);
         let request = runtime_request(&runtime_dir, artifact, "test-svc");
         let plan = runtime.plan(&request).expect("plan");
         std::fs::create_dir_all(plan.socket_path.parent().unwrap()).expect("socket dir");
@@ -1563,7 +1586,9 @@ mod tests {
         let (artifact, _bundle_dir, _rootfs) =
             write_process_bundle(&artifact_dir, "sha256:socket-link");
         let outside_socket = tmp.path().join("outside-socket");
-        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
+        let helper = tiny_socket_proxy(&tmp);
+        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir)
+            .with_socket_proxy(helper);
         let request = runtime_request(&runtime_dir, artifact, "test-svc");
         let plan = runtime.plan(&request).expect("plan");
         std::fs::create_dir_all(plan.socket_path.parent().unwrap()).expect("socket dir");
@@ -1595,7 +1620,9 @@ mod tests {
         let (artifact, _bundle_dir, _rootfs) =
             write_process_bundle(&artifact_dir, "sha256:start-cleanup");
         let outside_socket = tmp.path().join("outside-socket");
-        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
+        let helper = tiny_socket_proxy(&tmp);
+        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir)
+            .with_socket_proxy(helper);
         let request = runtime_request(&runtime_dir, artifact, "test-svc");
         let plan = runtime.plan(&request).expect("plan");
         std::fs::create_dir_all(plan.socket_path.parent().unwrap()).expect("socket dir");
@@ -1619,8 +1646,9 @@ mod tests {
 
     #[test]
     fn plan_rejects_missing_socket_proxy_source() {
-        // The socket-proxy is resolved at plan time (it is bound read-only into
-        // the guest), so a missing source surfaces from `plan`, not `prepare`.
+        // The socket-proxy is resolved at plan time to construct the helper
+        // argv/staging plan, so a missing source surfaces from `plan`, not
+        // `prepare`.
         let tmp = tempfile::tempdir().expect("temp dir");
         let runtime_dir = tmp.path().join("runtime");
         let artifact_dir = tmp.path().join("artifacts");
