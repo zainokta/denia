@@ -477,9 +477,14 @@ pub fn build_router(state: AppState) -> Router {
                     crate::registry::api_v2::registry_auth,
                 ))
                 // Exempt the registry from the global 1 MiB body cap below:
-                // image layer uploads (PATCH/PUT) are far larger. This inner
-                // layer overrides the outer DefaultBodyLimit for `/v2` only;
-                // `/v1` stays capped at 1 MiB.
+                // image layer uploads (PATCH/PUT/POST) are far larger. The
+                // `/v2` write handlers do NOT buffer the body — they stream it
+                // to disk while enforcing their own per-request size cap
+                // (`registry_max_blob_bytes` / `registry_max_manifest_bytes`),
+                // so disabling axum's buffered-extractor limit here is safe and
+                // preserves the ADR-015 bounded-RAM guarantee on the inbound
+                // path. This inner layer overrides the outer DefaultBodyLimit
+                // for `/v2` only; `/v1` stays capped at 1 MiB.
                 .layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
