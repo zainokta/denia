@@ -167,7 +167,17 @@ async fn update_registry_handler(
             encrypt_payload(&state, project_id, &secret_ref, &payload).await?;
             Some(secret_ref)
         }
-        (None, _) => None,
+        (None, Some(prev_ref)) => {
+            // Credentials cleared (auth → Anonymous): remove the orphaned
+            // encrypted file so stale secret material does not linger on disk.
+            let store = SopsSecretStore::new(state.config.data_dir.clone());
+            store
+                .delete(project_id, &prev_ref)
+                .await
+                .map_err(|e| ApiError::BadRequest(format!("secret cleanup failed: {e}")))?;
+            None
+        }
+        (None, None) => None,
     };
     let mut updated = Registry::new(
         project_id,
@@ -196,5 +206,12 @@ async fn delete_registry_handler(
         return Err(ApiError::NotFound("registry not found".into()));
     }
     state.registries.delete_registry(registry_id)?;
+    // Remove the encrypted credential file (if any) so it does not outlive the
+    // registry row it belonged to. Best-effort, mirrors the update→Anonymous
+    // cleanup path.
+    if let Some(secret_ref) = registry.credential_ref.as_ref() {
+        let store = SopsSecretStore::new(state.config.data_dir.clone());
+        let _ = store.delete(project_id, secret_ref).await;
+    }
     Ok(Json(serde_json::json!({"deleted": true})))
 }

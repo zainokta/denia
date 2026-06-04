@@ -127,9 +127,7 @@ async fn create_service_domain(
         created_at: now,
     };
     state.domains.put_service_domain(&d).map_err(|e| match e {
-        RepoError::Sqlite(rusqlite::Error::SqliteFailure(err, _))
-            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
+        RepoError::Sqlite(ref err) if crate::api::error::is_constraint_violation(err) => {
             ApiError::Conflict("hostname already in use".into())
         }
         other => ApiError::Repo(other),
@@ -196,8 +194,9 @@ async fn verify_service_domain(
         .verify(&d.hostname, &d.challenge_token)
         .await;
 
-    {
-        let mut guard = state.verifying_domains.lock().unwrap();
+    // Release the in-flight guard. Use the same graceful poisoned-lock handling
+    // as the acquire path above so a poisoned mutex can never panic the worker.
+    if let Ok(mut guard) = state.verifying_domains.lock() {
         guard.remove(&d.id);
     }
 
@@ -210,7 +209,12 @@ async fn verify_service_domain(
                 None,
             )?;
             crate::deploy::apply_routes(&state)?;
-            state.domains.get_service_domain(d.id)?.unwrap()
+            // The row can be deleted concurrently between the status write and
+            // this re-read; surface a typed 404 rather than panicking.
+            state
+                .domains
+                .get_service_domain(d.id)?
+                .ok_or_else(|| ApiError::NotFound("domain not found".into()))?
         }
         Err(e) => {
             state.domains.update_service_domain_status(
@@ -219,7 +223,10 @@ async fn verify_service_domain(
                 None,
                 Some(e.to_string()),
             )?;
-            state.domains.get_service_domain(d.id)?.unwrap()
+            state
+                .domains
+                .get_service_domain(d.id)?
+                .ok_or_else(|| ApiError::NotFound("domain not found".into()))?
         }
     };
     Ok(Json(updated))

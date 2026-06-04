@@ -40,10 +40,7 @@ fn ensure_job_role(
     project_id: uuid::Uuid,
     role: Role,
 ) -> Result<(), ApiError> {
-    ensure_role(state, principal, project_id, role).map_err(|error| match error {
-        ApiError::Forbidden(_) => ApiError::NotFound("job not found".to_string()),
-        other => other,
-    })
+    crate::auth::ensure_role_or_not_found(state, principal, project_id, role, "job not found")
 }
 
 async fn list_jobs(
