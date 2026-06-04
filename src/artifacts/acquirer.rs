@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{os::unix::fs::PermissionsExt, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -368,7 +368,16 @@ impl ArtifactAcquirer {
         };
         if !rootfs_exists {
             let staged_rootfs = bundle_dir.join(format!("rootfs.{}.tmp", uuid::Uuid::now_v7()));
-            self.unpacker.unpack(layers, &staged_rootfs)?;
+            if let Err(error) = self.unpacker.unpack(layers, &staged_rootfs) {
+                let _ = std::fs::remove_dir_all(&staged_rootfs);
+                return Err(ArtifactAcquireError::Oci(error));
+            }
+            if let Err(error) =
+                std::fs::set_permissions(&staged_rootfs, std::fs::Permissions::from_mode(0o755))
+            {
+                let _ = std::fs::remove_dir_all(&staged_rootfs);
+                return Err(ArtifactAcquireError::Io(error));
+            }
             let base = self.config.userns_base;
             if let Err(error) = syscall::chown::recursive_lchown(&staged_rootfs, base, base) {
                 let io_err = error.to_string();
@@ -661,6 +670,7 @@ fn default_workdir() -> String {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
 
@@ -864,5 +874,76 @@ mod tests {
             1,
             "complete bundle should be reused without unpacking into existing rootfs"
         );
+    }
+
+    #[tokio::test]
+    async fn external_image_acquire_publishes_rootfs_with_traverse_mode() {
+        struct StaticPuller;
+        #[async_trait]
+        impl OciImagePuller for StaticPuller {
+            async fn pull(
+                &self,
+                _image: &str,
+                _auth: RegistryAuth,
+            ) -> Result<PulledImage, OciError> {
+                Ok(PulledImage {
+                    digest: "sha256:mode".to_string(),
+                    config: crate::oci::config::OciImageConfig {
+                        config: Some(crate::oci::config::OciImageProcessConfig {
+                            entrypoint: Some(vec!["/app".to_string()]),
+                            cmd: None,
+                            env_vars: None,
+                            working_dir: None,
+                        }),
+                        rootfs: None,
+                    },
+                    layers: Vec::new(),
+                    _staging: None,
+                    _cache_reservations: Vec::new(),
+                })
+            }
+
+            async fn read_layout(&self, _d: &Path) -> Result<PulledImage, OciError> {
+                unreachable!("StaticPuller::read_layout not expected")
+            }
+        }
+
+        struct PrivateRootfsUnpacker;
+        impl OciRootfsUnpacker for PrivateRootfsUnpacker {
+            fn unpack(&self, _layers: &[LayerBlob], rootfs_dir: &Path) -> Result<(), OciError> {
+                std::fs::create_dir_all(rootfs_dir).map_err(OciError::Io)?;
+                std::fs::set_permissions(rootfs_dir, std::fs::Permissions::from_mode(0o700))
+                    .map_err(OciError::Io)
+            }
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = AppConfig::for_test("test-token");
+        config.artifact_dir = tmp.path().to_path_buf();
+        config.userns_base = std::fs::metadata(tmp.path()).unwrap().uid();
+        let acquirer = ArtifactAcquirer::with_traits(
+            config.clone(),
+            Arc::new(StaticPuller),
+            Arc::new(PrivateRootfsUnpacker),
+        );
+        let runner = FakeCommandRunner::new(vec![]);
+
+        acquirer
+            .acquire_rootfs_bundle_from_image_config(
+                &runner,
+                ArtifactAcquireRequest::ExternalImage {
+                    image: "ghcr.io/acme/web:latest".to_string(),
+                },
+                RegistryAuth::Anonymous,
+            )
+            .await
+            .expect("acquire rootfs bundle");
+
+        let mode = std::fs::metadata(config.artifact_dir.join("sha256-mode").join("rootfs"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "published rootfs must be traversable");
     }
 }

@@ -507,6 +507,9 @@ impl LinuxRuntime {
         let mut perms = std::fs::metadata(path)
             .map_err(path_io("stat directory for permissions", path))?
             .permissions();
+        if perms.mode() & 0o777 == 0o755 {
+            return Ok(());
+        }
         perms.set_mode(0o755);
         std::fs::set_permissions(path, perms)
             .map_err(path_io("set directory permissions to 0755", path))
