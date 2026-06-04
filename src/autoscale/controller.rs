@@ -212,11 +212,35 @@ impl Controller {
                 self.append_service_log(ms.service_id, "scaling up from zero");
                 Ok(())
             }
+            // Failure arms log the reason to BOTH the per-service log (so the
+            // console LOGS panel shows why a request 503'd instead of staying
+            // blank) and the daemon journal. Without this the runtime launch
+            // error is discarded and a cold-start failure is invisible.
             Err(LifecycleError::Capacity) => {
+                let msg = "scale-up denied: insufficient host capacity";
+                tracing::warn!(service = %ms.service_name, service_id = %ms.service_id, "{msg}");
+                self.append_service_log(ms.service_id, msg);
                 Err(ActivationError::Failed("insufficient_capacity".into()))
             }
-            Err(LifecycleError::Health) => Err(ActivationError::Failed("health".into())),
-            Err(LifecycleError::Runtime(e)) => Err(ActivationError::Failed(e)),
+            Err(LifecycleError::Health) => {
+                let msg = format!(
+                    "scale-up failed: replica launched but never passed its health check \
+                     (the app did not answer on its socket — verify it listens on \
+                     0.0.0.0/127.0.0.1:{} and that the configured port matches)",
+                    spec.internal_port
+                );
+                tracing::warn!(service = %ms.service_name, service_id = %ms.service_id, internal_port = spec.internal_port, "{msg}");
+                self.append_service_log(ms.service_id, &msg);
+                Err(ActivationError::Failed("health".into()))
+            }
+            Err(LifecycleError::Runtime(e)) => {
+                tracing::warn!(service = %ms.service_name, service_id = %ms.service_id, error = %e, "scale-up failed: runtime launch error");
+                self.append_service_log(
+                    ms.service_id,
+                    &format!("scale-up failed: runtime launch error: {e}"),
+                );
+                Err(ActivationError::Failed(e))
+            }
         }
     }
 
