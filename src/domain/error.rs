@@ -30,4 +30,14 @@ pub enum DomainError {
     InvalidGitBuildPath { field: String, reason: String },
     #[error("invalid autoscale policy: {0}")]
     InvalidAutoscale(String),
+    #[error("service endpoint name cannot be empty")]
+    EmptyEndpointName,
+    #[error(
+        "invalid service endpoint name '{0}': only ASCII alphanumeric, '-' and '_' are allowed"
+    )]
+    InvalidEndpointName(String),
+    #[error("service endpoint port must be between 1 and 65535")]
+    InvalidEndpointPort,
+    #[error("http service endpoints cannot declare a public port")]
+    HttpEndpointPublicPort,
 }

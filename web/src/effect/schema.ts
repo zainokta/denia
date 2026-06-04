@@ -272,6 +272,24 @@ export const AutoscalePolicy = Schema.Struct({
 })
 export type AutoscalePolicy = typeof AutoscalePolicy.Type
 
+// Mirrors the backend `ServiceEndpointProtocol`/`ServiceEndpoint` serde shape
+// (src/domain/service.rs, ADR-036). General-purpose protocol ingress: a service
+// exposes one or more named endpoints. `http` endpoints are routed by hostname
+// and never carry a public port; `tcp`/`udp` endpoints get a Denia-allocated
+// public port. `public_port` is null until the allocator assigns one (and stays
+// null for http). Legacy services carry no endpoints and project to a single
+// default http endpoint on `internal_port` — see `effectiveEndpoints`.
+export const ServiceEndpointProtocol = Schema.Literals(['http', 'tcp', 'udp'])
+export type ServiceEndpointProtocol = typeof ServiceEndpointProtocol.Type
+
+export const ServiceEndpoint = Schema.Struct({
+  name: Schema.String,
+  protocol: ServiceEndpointProtocol,
+  internal_port: Schema.Number,
+  public_port: Schema.NullOr(Schema.Number),
+})
+export type ServiceEndpoint = typeof ServiceEndpoint.Type
+
 export class Service extends Schema.Class<Service>('Service')({
   id: Schema.String,
   project_id: Schema.String,
@@ -286,7 +304,34 @@ export class Service extends Schema.Class<Service>('Service')({
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
   autoscale: Schema.optional(Schema.NullOr(AutoscalePolicy)),
+  // `endpoints` is `#[serde(default)]` on the backend and was added after the
+  // first services shipped, so rows persisted before ADR-036 omit it. Decode it
+  // as an optional key defaulting to an empty list rather than a required field
+  // so those legacy configs still validate at the wire boundary.
+  endpoints: Schema.optionalKey(Schema.Array(ServiceEndpoint)).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
 }) {}
+
+// Backend `ServiceConfig::effective_endpoints`: a service with no explicit
+// endpoints behaves as a single http endpoint on its `internal_port`. Mirror it
+// client-side so the UI shows the same effective shape the runtime will use.
+export function effectiveEndpoints(
+  service: Pick<Service, 'internal_port' | 'endpoints'>,
+): ReadonlyArray<ServiceEndpoint> {
+  const endpoints = service.endpoints ?? []
+  if (endpoints.length === 0) {
+    return [
+      {
+        name: 'http',
+        protocol: 'http',
+        internal_port: service.internal_port,
+        public_port: null,
+      },
+    ]
+  }
+  return endpoints
+}
 
 export const Services = Schema.Array(Service)
 
