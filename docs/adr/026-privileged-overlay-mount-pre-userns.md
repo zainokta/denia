@@ -101,6 +101,11 @@ produced a circular `/dev/null` symlink that broke the socket-proxy's
 `Stdio::null()` and any workload opening `/dev/null`. The recursive self-bind +
 `pivot_root` carry the `/dev` tmpfs and its node binds into the workload.
 
+The pivot scratch directory (`/.old_root`) and `/proc` mountpoint are also
+created in this pre-userns stage. Creating them later through the inherited
+overlay view can report `EROFS` on hosts where the destination path resolves via
+the read-only lower image.
+
 **socket-proxy runtime libraries.** socket-proxy is the daemon binary itself
 (`current_exe()`), dynamically linked against the host glibc + loader. Placed as
 a lone file into an arbitrary workload image, its loader resolves `libc.so.6`,
