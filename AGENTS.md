@@ -70,7 +70,7 @@ Guidelines for AI agents working on Denia, a Rust backend PaaS that runs workloa
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **denia-push-working-tree-deploy** (5992 symbols, 14133 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **denia** (7408 symbols, 16259 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -86,7 +86,7 @@ This project is indexed by GitNexus as **denia-push-working-tree-deploy** (5992 
 
 1. `gitnexus_query({query: "<error or symptom>"})` — find execution flows related to the issue
 2. `gitnexus_context({name: "<suspect function>"})` — see all callers, callees, and process participation
-3. `READ gitnexus://repo/denia-push-working-tree-deploy/process/{processName}` — trace the full execution flow step by step
+3. `READ gitnexus://repo/denia/process/{processName}` — trace the full execution flow step by step
 4. For regressions: `gitnexus_detect_changes({scope: "compare", base_ref: "main"})` — see what your branch changed
 
 ## When Refactoring
@@ -125,10 +125,10 @@ This project is indexed by GitNexus as **denia-push-working-tree-deploy** (5992 
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/denia-push-working-tree-deploy/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/denia-push-working-tree-deploy/clusters` | All functional areas |
-| `gitnexus://repo/denia-push-working-tree-deploy/processes` | All execution flows |
-| `gitnexus://repo/denia-push-working-tree-deploy/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/denia/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/denia/clusters` | All functional areas |
+| `gitnexus://repo/denia/processes` | All execution flows |
+| `gitnexus://repo/denia/process/{name}` | Step-by-step execution trace |
 
 ## Self-Check Before Finishing
 
