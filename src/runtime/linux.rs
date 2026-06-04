@@ -345,6 +345,12 @@ impl LinuxRuntime {
         create_dir_all("create replica merged directory", &plan.merged)?;
         let denia_dir = plan.upper.join(".denia");
         create_runtime_directory(&denia_dir)?;
+        prepare_overlay_mountpoints(
+            &plan.upper,
+            &plan.namespace.workdir,
+            plan.namespace.mount_proc,
+            plan.namespace.setup_dev,
+        )?;
         self.prepare_socket_directory(plan)?;
 
         // Persistent ancestor dirs: traverse-only (mode 0755), ownership left
@@ -420,7 +426,7 @@ impl LinuxRuntime {
 
     pub fn cleanup(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
         remove_cgroup_dir_if_exists(&plan.cgroup_path)?;
-        let _ = rustix::mount::unmount(&plan.merged, rustix::mount::UnmountFlags::DETACH);
+        unmount_runtime_mounts(&plan.replica_dir);
         // Remove the per-replica host socket dir; it lives under <data_dir>/sock
         // (outside replica_dir) so the wipe below won't catch it.
         if let Some(dir) = plan.socket_path.parent() {
@@ -602,6 +608,46 @@ fn restore_current_process_owner(path: &Path) -> Result<(), RuntimeError> {
     chown::recursive_lchown(path, uid, gid).map_err(RuntimeError::Syscall)
 }
 
+fn prepare_overlay_mountpoints(
+    upper: &Path,
+    workdir: &str,
+    mount_proc: bool,
+    setup_dev: bool,
+) -> Result<(), RuntimeError> {
+    create_runtime_directory(&upper.join(".old_root"))?;
+    if mount_proc {
+        create_runtime_directory(&upper.join("proc"))?;
+    }
+    if setup_dev {
+        create_runtime_directory(&upper.join("dev"))?;
+    }
+    if workdir != "/" {
+        create_dir_all(
+            "create runtime workdir",
+            &upper_guest_path(upper, Path::new(workdir))?,
+        )?;
+    }
+    Ok(())
+}
+
+fn unmount_runtime_mounts(replica_dir: &Path) {
+    let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return;
+    };
+    let mut mountpoints = mountinfo
+        .lines()
+        .filter_map(|line| {
+            let mountpoint = line.split_whitespace().nth(4)?;
+            let path = PathBuf::from(mountpoint);
+            path.starts_with(replica_dir).then_some(path)
+        })
+        .collect::<Vec<_>>();
+    mountpoints.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+    for mountpoint in mountpoints {
+        let _ = rustix::mount::unmount(&mountpoint, rustix::mount::UnmountFlags::DETACH);
+    }
+}
+
 #[async_trait]
 impl Runtime for LinuxRuntime {
     async fn start(&self, request: RuntimeStartRequest) -> Result<RuntimeStatus, RuntimeError> {
@@ -770,6 +816,7 @@ impl Runtime for LinuxRuntime {
         create_dir_all("create job merged directory", &merged)?;
         let denia_dir = upper.join(".denia");
         create_runtime_directory(&denia_dir)?;
+        prepare_overlay_mountpoints(&upper, &process.workdir, true, true)?;
         // Persistent ancestor dirs need the traverse bit so the workload's mapped
         // userns-root can reach the read-only lower; the ephemeral overlay layers
         // are chowned to the userns base so guest writes/copy-ups are owned by the
@@ -897,6 +944,7 @@ impl Runtime for LinuxRuntime {
         };
         if let Some(tracked) = tracked.as_mut() {
             terminate_tracked_child(tracked).await?;
+            self.wait_cgroup_drained(&tracked.plan.cgroup_path).await;
             self.cleanup(&tracked.plan)?;
         }
         Ok(())
@@ -1548,6 +1596,18 @@ mod tests {
         assert!(
             plan.upper.join(".denia").is_dir(),
             "prepare must create the .denia directory in the per-replica upper layer"
+        );
+        assert!(
+            plan.upper.join(".old_root").is_dir(),
+            "prepare must pre-create the pivot scratch directory in the upper layer"
+        );
+        assert!(
+            plan.upper.join("proc").is_dir(),
+            "prepare must pre-create the proc mountpoint in the upper layer"
+        );
+        assert!(
+            plan.upper.join("dev").is_dir(),
+            "prepare must pre-create the dev mountpoint in the upper layer"
         );
         let denia_metadata =
             std::fs::symlink_metadata(plan.upper.join(".denia")).expect(".denia metadata");
