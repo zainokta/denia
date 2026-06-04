@@ -53,6 +53,7 @@ Each ADR should include:
 | [033](033-service-console.md) | Service Console | Accepted | 2026-06-03 |
 | [034](034-client-driven-deploy-upload.md) | Client-Driven Deploy via Working-Tree Upload | Accepted | 2026-06-03 |
 | [035](035-control-domain-ingress.md) | Control Domain Over Ingress | Accepted | 2026-06-03 |
+| [036](036-general-purpose-protocol-ingress.md) | General-Purpose Protocol Ingress | Proposed | 2026-06-04 |
 
 ## Contributing
 

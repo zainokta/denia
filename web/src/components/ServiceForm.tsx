@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
-import type { Service, ServiceInput } from '#/effect/schema'
+import type { Service, ServiceEndpoint, ServiceInput } from '#/effect/schema'
 import { DomainTagInput } from '#/components/DomainTagInput'
 import { FieldHint } from '#/components/FieldHint'
 
@@ -32,10 +32,35 @@ interface EnvRow {
   value: string
 }
 
+type EndpointProtocol = ServiceEndpoint['protocol']
+
+interface EndpointRow {
+  id: string
+  name: string
+  protocol: EndpointProtocol
+  internalPort: string
+}
+
+// Mirrors backend `validate_endpoint_name` (src/domain/service.rs): ASCII
+// alphanumeric plus '-' and '_'. Validated client-side so the operator sees the
+// problem inline instead of a 400 on submit.
+const ENDPOINT_NAME_RE = /^[A-Za-z0-9_-]+$/
+
 const inputClass = 'field-input'
 
 function envFromInitial(env: ReadonlyArray<readonly [string, string]>): EnvRow[] {
   return env.map(([key, value]) => ({ id: crypto.randomUUID(), key, value }))
+}
+
+function endpointsFromInitial(
+  endpoints: ReadonlyArray<ServiceEndpoint>,
+): EndpointRow[] {
+  return endpoints.map((e) => ({
+    id: crypto.randomUUID(),
+    name: e.name,
+    protocol: e.protocol,
+    internalPort: String(e.internal_port),
+  }))
 }
 
 export function ServiceForm({
@@ -104,6 +129,10 @@ export function ServiceForm({
 
   const [envRows, setEnvRows] = useState<EnvRow[]>(
     initial ? envFromInitial(initial.env) : [],
+  )
+
+  const [endpointRows, setEndpointRows] = useState<EndpointRow[]>(
+    initial?.endpoints ? endpointsFromInitial(initial.endpoints) : [],
   )
 
   const [sourceType, setSourceType] = useState<SourceType>(initialType)
@@ -230,12 +259,29 @@ export function ServiceForm({
     return null
   })()
 
+  // Endpoint validation mirrors backend `ServiceEndpoint::validate`: a non-empty
+  // safe name and an internal port in 1–65535. Public ports are auto-allocated
+  // (ADR-036), so the form never collects them.
+  const endpointsError: string | null = (() => {
+    for (const row of endpointRows) {
+      const name = row.name.trim()
+      if (name.length === 0) return 'endpoint name is required'
+      if (!ENDPOINT_NAME_RE.test(name))
+        return `endpoint "${name}": only letters, digits, - and _ allowed`
+      const port = Number.parseInt(row.internalPort, 10)
+      if (!Number.isInteger(port) || port < 1 || port > 65535)
+        return `endpoint "${name}": internal port must be 1–65535`
+    }
+    return null
+  })()
+
   const valid =
     !nameEmpty &&
     portValid &&
     source !== undefined &&
     projectId.length > 0 &&
-    autoscaleError === null
+    autoscaleError === null &&
+    endpointsError === null
 
   const missing: string[] = []
   if (projectId.length === 0) missing.push('project')
@@ -247,6 +293,7 @@ export function ServiceForm({
     else missing.push('registry + ref')
   }
   if (autoscaleError !== null) missing.push('autoscale config')
+  if (endpointsError !== null) missing.push('endpoint config')
 
   // Inline error shows only for a required field that's been blurred and is
   // still empty/invalid.
@@ -286,6 +333,16 @@ export function ServiceForm({
         .filter((row) => row.key.trim().length > 0)
         .map((row) => [row.key.trim(), row.value] as [string, string]),
       tls_enabled: parsedDomains.length > 0 && tlsEnabled,
+      endpoints: endpointRows
+        .filter((row) => row.name.trim().length > 0)
+        .map((row) => ({
+          name: row.name.trim(),
+          protocol: row.protocol,
+          internal_port: Number.parseInt(row.internalPort, 10) || 0,
+          // Public ports are Denia-allocated server-side (ADR-036); http never
+          // carries one. The form always sends null.
+          public_port: null,
+        })),
       autoscale: autoscaleEnabled
         ? {
             min_replicas: Number.parseInt(minReplicas, 10) || 0,
@@ -312,6 +369,17 @@ export function ServiceForm({
       rows.map((row, i) => (i === index ? { ...row, ...patch } : row)),
     )
   }
+
+  const updateEndpointRow = (index: number, patch: Partial<EndpointRow>) => {
+    setEndpointRows((rows) =>
+      rows.map((row, i) => (i === index ? { ...row, ...patch } : row)),
+    )
+  }
+
+  // Narrow the native select value to the protocol union without a cast, keeping
+  // with the form's cast-free convention.
+  const toProtocol = (value: string): EndpointProtocol =>
+    value === 'http' ? 'http' : value === 'udp' ? 'udp' : 'tcp'
 
   return (
     <form onSubmit={handleSubmit}>
@@ -404,6 +472,109 @@ export function ServiceForm({
         {err('port', !portValid) ? (
           <p id="sf-port-error" className="field-error" role="alert">
             port must be a positive integer
+          </p>
+        ) : null}
+      </div>
+
+      <div className="mb-5">
+        <div className="form-section-head" style={{ marginBottom: '0.4rem' }}>
+          <p className="kicker">protocol endpoints</p>
+          <span className="text-xs text-[var(--fg-muted)]">(optional)</span>
+        </div>
+        <p
+          className="field-help"
+          style={{ marginTop: 0, marginBottom: '0.75rem' }}
+          id="sf-endpoints-help"
+        >
+          The internal port above is served as HTTP and routed by domain. Add
+          TCP/UDP endpoints for game servers or raw protocols — public ports are
+          auto-allocated by Denia. TCP/UDP services are always-on (no
+          scale-to-zero).
+        </p>
+
+        {endpointRows.map((row, i) => (
+          <div key={row.id} className="mb-2 flex flex-wrap items-center gap-2">
+            <input
+              type="text"
+              aria-label={`endpoint name ${i}`}
+              placeholder="name"
+              value={row.name}
+              onChange={(e) => updateEndpointRow(i, { name: e.target.value })}
+              className={`${inputClass} w-32`}
+            />
+            <select
+              aria-label={`endpoint protocol ${i}`}
+              value={row.protocol}
+              onChange={(e) =>
+                updateEndpointRow(i, { protocol: toProtocol(e.target.value) })
+              }
+              className={`${inputClass} w-24`}
+            >
+              <option value="http">http</option>
+              <option value="tcp">tcp</option>
+              <option value="udp">udp</option>
+            </select>
+            <span className="field-input-group">
+              <input
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={65535}
+                aria-label={`endpoint internal port ${i}`}
+                placeholder="port"
+                value={row.internalPort}
+                onChange={(e) =>
+                  updateEndpointRow(i, { internalPort: e.target.value })
+                }
+                className={`${inputClass} w-24 tnum`}
+              />
+              <span className="field-suffix">internal</span>
+            </span>
+            <span
+              className="badge"
+              title="public port is auto-allocated by Denia"
+            >
+              {row.protocol === 'http' ? 'via domain' : 'public: auto'}
+            </span>
+            <button
+              type="button"
+              className="btn text-xs"
+              aria-label={`remove endpoint ${i}`}
+              onClick={() =>
+                setEndpointRows((rows) => rows.filter((_, idx) => idx !== i))
+              }
+            >
+              remove
+            </button>
+          </div>
+        ))}
+
+        <button
+          type="button"
+          className="btn text-xs"
+          aria-describedby="sf-endpoints-help"
+          onClick={() =>
+            setEndpointRows((rows) => [
+              ...rows,
+              {
+                id: crypto.randomUUID(),
+                name: '',
+                protocol: 'tcp',
+                internalPort: '',
+              },
+            ])
+          }
+        >
+          add endpoint
+        </button>
+
+        {endpointsError ? (
+          <p
+            className="field-error"
+            role="alert"
+            style={{ marginTop: '0.6rem' }}
+          >
+            {endpointsError}
           </p>
         ) : null}
       </div>

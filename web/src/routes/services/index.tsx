@@ -331,9 +331,24 @@ export function ServicesIndex() {
                           )}
                         </td>
                         <td className="text-faint" style={{ fontSize: 'var(--text-label)' }}>
-                          {svc.domains.length > 0
-                            ? svc.domains.join(', ')
-                            : `:${svc.internal_port}`}
+                          <span className="cluster" style={{ gap: '0.4rem' }}>
+                            <span>
+                              {svc.domains.length > 0
+                                ? svc.domains.join(', ')
+                                : `:${svc.internal_port}`}
+                            </span>
+                            {(svc.endpoints ?? [])
+                              .filter((e) => e.protocol !== 'http')
+                              .map((e) => (
+                                <span
+                                  key={`${e.protocol}-${e.name}-${e.internal_port}`}
+                                  className="badge"
+                                  title={`${e.name} (${e.protocol})`}
+                                >
+                                  {e.protocol}:{e.internal_port}
+                                </span>
+                              ))}
+                          </span>
                         </td>
                         {canOperateService() ? (
                           <td>

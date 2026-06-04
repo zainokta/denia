@@ -223,4 +223,71 @@ describe('ServiceForm', () => {
       expect(submit.hasAttribute('disabled')).toBe(true)
     })
   })
+
+  describe('endpoints', () => {
+    function fillBaseFields() {
+      fill('name', 'game')
+      fill('internal port', '7777')
+      fill('image', 'ghcr.io/acme/game:latest')
+    }
+
+    it('submits an empty endpoints list when none are added', () => {
+      const onSubmit = vi.fn<(value: ServiceInput | Service) => void>()
+      render(<ServiceForm projects={projects} onSubmit={onSubmit} />)
+
+      fillBaseFields()
+      fireEvent.click(screen.getByRole('button', { name: /create service/i }))
+
+      const value = onSubmit.mock.calls[0]![0]
+      expect(value.endpoints).toEqual([])
+    })
+
+    it('includes an added tcp endpoint in the submitted payload', () => {
+      const onSubmit = vi.fn<(value: ServiceInput | Service) => void>()
+      render(<ServiceForm projects={projects} onSubmit={onSubmit} />)
+
+      fillBaseFields()
+      fireEvent.click(screen.getByRole('button', { name: 'add endpoint' }))
+      fill('endpoint name 0', 'query')
+      fill('endpoint internal port 0', '27015')
+
+      fireEvent.click(screen.getByRole('button', { name: /create service/i }))
+
+      const value = onSubmit.mock.calls[0]![0]
+      expect(value.endpoints).toEqual([
+        {
+          name: 'query',
+          protocol: 'tcp',
+          internal_port: 27015,
+          public_port: null,
+        },
+      ])
+    })
+
+    it('blocks submit when an endpoint name is invalid', () => {
+      const onSubmit = vi.fn<(value: ServiceInput | Service) => void>()
+      render(<ServiceForm projects={projects} onSubmit={onSubmit} />)
+
+      fillBaseFields()
+      fireEvent.click(screen.getByRole('button', { name: 'add endpoint' }))
+      fill('endpoint name 0', 'bad name')
+      fill('endpoint internal port 0', '27015')
+
+      const submit = screen.getByRole('button', { name: /create service/i })
+      expect(submit.hasAttribute('disabled')).toBe(true)
+    })
+
+    it('blocks submit when an endpoint port is out of range', () => {
+      const onSubmit = vi.fn<(value: ServiceInput | Service) => void>()
+      render(<ServiceForm projects={projects} onSubmit={onSubmit} />)
+
+      fillBaseFields()
+      fireEvent.click(screen.getByRole('button', { name: 'add endpoint' }))
+      fill('endpoint name 0', 'query')
+      fill('endpoint internal port 0', '70000')
+
+      const submit = screen.getByRole('button', { name: /create service/i })
+      expect(submit.hasAttribute('disabled')).toBe(true)
+    })
+  })
 })
