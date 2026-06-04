@@ -1219,7 +1219,7 @@ mod tests {
     };
     use crate::runtime::runtime_trait::Runtime;
     use crate::syscall::ns::NamespaceConfig;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
 
     fn write_process_bundle(
@@ -1617,6 +1617,28 @@ mod tests {
             "+cpu +memory +pids +io\n"
         );
         assert!(deployment.exists());
+    }
+
+    #[test]
+    fn prepare_cgroup_directory_skips_already_enabled_readonly_controller_file() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path().join("cgroup");
+        let deployment = root.join("service").join("deployment");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::write(root.join("cgroup.controllers"), "cpu memory pids io\n")
+            .expect("controllers");
+        let subtree_control = root.join("cgroup.subtree_control");
+        std::fs::write(&subtree_control, "cpu memory pids io\n").expect("subtree");
+        std::fs::set_permissions(&subtree_control, std::fs::Permissions::from_mode(0o444))
+            .expect("readonly subtree");
+
+        prepare_cgroup_directory(&root, &deployment, CGROUP_CONTROLLERS).expect("prepare cgroup");
+
+        assert!(deployment.exists());
+        assert_eq!(
+            std::fs::read_to_string(&subtree_control).expect("subtree"),
+            "cpu memory pids io\n"
+        );
     }
 
     #[test]
