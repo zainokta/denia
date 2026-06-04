@@ -625,6 +625,7 @@ fn parent_finish_launch(
 ) -> Result<u32, SyscallError> {
     pipes.close_child_ends();
     if let Err(error) = pipes.read_child_ready("initial child ready") {
+        let error = pipes.diagnose_child_ready_error("initial child ready", error);
         return abort_launch(pid, pipes, error);
     }
 
@@ -639,6 +640,7 @@ fn parent_finish_launch(
     }
 
     if let Err(error) = pipes.read_child_ready("post-unshare child ready") {
+        let error = pipes.diagnose_child_ready_error("post-unshare child ready", error);
         return abort_launch(pid, pipes, error);
     }
 
@@ -750,12 +752,34 @@ impl SyncPipes {
         }
     }
 
+    fn diagnose_child_ready_error(&self, stage: &'static str, error: SyscallError) -> SyscallError {
+        if !matches!(
+            error,
+            SyscallError::Io(ref io_error)
+                if io_error.kind() == std::io::ErrorKind::UnexpectedEof
+        ) {
+            return error;
+        }
+
+        match self.read_child_setup_status_with_timeout(Duration::from_millis(50)) {
+            Err(SyscallError::ChildSetup { stage }) => SyscallError::ChildSetup { stage },
+            Err(SyscallError::Io(error)) => SyscallError::Io(error),
+            _ => SyscallError::ChildSetup {
+                stage: Box::leak(format!("{stage}: sync pipe closed").into_boxed_str()),
+            },
+        }
+    }
+
     fn write_parent_release(&self, byte: u8) -> std::io::Result<()> {
         write_byte(self.parent_release_write, byte)
     }
 
     fn read_child_setup_status(&self) -> Result<(), SyscallError> {
-        match read_optional_byte_timeout(self.child_error_read, CHILD_SETUP_TIMEOUT) {
+        self.read_child_setup_status_with_timeout(CHILD_SETUP_TIMEOUT)
+    }
+
+    fn read_child_setup_status_with_timeout(&self, timeout: Duration) -> Result<(), SyscallError> {
+        match read_optional_byte_timeout(self.child_error_read, timeout) {
             TimedByte::Byte(stage) => {
                 // Best-effort drain of the errno follow-up bytes child_setup_fail
                 // also writes. Failures here just leave errno unknown.
@@ -2261,6 +2285,41 @@ mod tests {
     #[test]
     fn child_setup_stage_names_ro_bind_failure() {
         assert_eq!(child_setup_stage(b'b'), "read-only bind mount");
+    }
+
+    #[test]
+    fn child_ready_eof_reports_buffered_child_setup_stage() {
+        let pipes = SyncPipes::new().expect("pipes");
+        let errno = libc::EPERM.to_le_bytes();
+        let payload = [b'X', errno[0], errno[1], errno[2], errno[3]];
+        let written = unsafe {
+            libc::write(
+                pipes.child_error_write,
+                payload.as_ptr().cast(),
+                payload.len(),
+            )
+        };
+        assert_eq!(written, payload.len() as isize);
+        close_fd(pipes.child_ready_write);
+        close_fd(pipes.child_error_write);
+
+        let error = pipes
+            .read_child_ready("post-unshare child ready")
+            .map_err(|error| pipes.diagnose_child_ready_error("post-unshare child ready", error))
+            .expect_err("ready EOF should report child setup stage");
+
+        assert!(
+            matches!(
+                error,
+                SyscallError::ChildSetup { stage }
+                    if stage == "unshare user/pid namespace errno=1 (EPERM)"
+            ),
+            "expected child setup stage, got {error:?}"
+        );
+        close_fd(pipes.child_ready_read);
+        close_fd(pipes.parent_release_read);
+        close_fd(pipes.parent_release_write);
+        close_fd(pipes.child_error_read);
     }
 
     #[test]
