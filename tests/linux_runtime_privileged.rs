@@ -617,9 +617,17 @@ async fn console_exec_reads_service_environment() {
         })
         .await
         .expect("open console");
-    tokio::io::AsyncWriteExt::write_all(&mut session.pty, b"echo $DENIA_CONSOLE_TEST; exit\n")
-        .await
-        .expect("write console command");
+    tokio::io::AsyncWriteExt::write_all(
+        &mut session.pty,
+        b"echo env=$DENIA_CONSOLE_TEST; \
+          echo self_pid_ns=$(readlink /proc/self/ns/pid); \
+          echo init_pid_ns=$(readlink /proc/1/ns/pid); \
+          echo uid=$(id -u); \
+          touch /tmp/denia-console-write-test && echo write=ok; \
+          exit\n",
+    )
+    .await
+    .expect("write console command");
     let mut output = Vec::new();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -628,10 +636,30 @@ async fn console_exec_reads_service_environment() {
     .await
     .expect("console output timeout")
     .expect("read console output");
+    let output = String::from_utf8_lossy(&output);
     assert!(
-        String::from_utf8_lossy(&output).contains("inside"),
-        "console output should contain service env, got {:?}",
-        String::from_utf8_lossy(&output)
+        output.contains("env=inside"),
+        "console output should contain service env, got {output:?}"
+    );
+    let self_pid_ns = output
+        .lines()
+        .find_map(|line| line.strip_prefix("self_pid_ns="))
+        .expect("console output should include self pid namespace");
+    let init_pid_ns = output
+        .lines()
+        .find_map(|line| line.strip_prefix("init_pid_ns="))
+        .expect("console output should include init pid namespace");
+    assert_eq!(
+        self_pid_ns, init_pid_ns,
+        "console shell must be born in the replica PID namespace, got {output:?}"
+    );
+    assert!(
+        output.contains("uid=0"),
+        "console shell should run as mapped root, got {output:?}"
+    );
+    assert!(
+        output.contains("write=ok"),
+        "console shell should be able to write as mapped root, got {output:?}"
     );
     runtime
         .stop(&RuntimeInstanceId {

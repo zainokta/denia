@@ -107,6 +107,7 @@ impl Runtime for FakeRuntime {
         Ok(RuntimeConsoleSession {
             session_id: request.session_id,
             replica_index: request.replica_index,
+            supervisor_pid: 4321,
             child_pid: 4321,
             cgroup_path: "/sys/fs/cgroup/denia/fake".into(),
             pty: Box::new(server),
