@@ -6,7 +6,13 @@ use rustix::process::{Gid, Uid};
 use crate::syscall::SyscallError;
 
 pub fn recursive_lchown(root: &Path, uid: u32, gid: u32) -> Result<(), SyscallError> {
-    chown_entry(root, uid, gid)?;
+    // Post-order: enumerate and recurse BEFORE chowning `root` itself.
+    // Chowning a directory away from the daemon's uid drops it to the dir's
+    // "other" mode bits; a subsequent `read_dir` on a mode-0700 dir (common in
+    // OCI base images, e.g. `/root`) would then fail EACCES because the daemon
+    // holds CAP_CHOWN but not CAP_DAC_READ_SEARCH. Reading while still owned by
+    // the daemon avoids that; the entry is chowned only after it is fully
+    // traversed.
     let metadata = std::fs::symlink_metadata(root)?;
     if metadata.is_dir() {
         for entry in std::fs::read_dir(root)? {
@@ -14,6 +20,7 @@ pub fn recursive_lchown(root: &Path, uid: u32, gid: u32) -> Result<(), SyscallEr
             recursive_lchown(&entry.path(), uid, gid)?;
         }
     }
+    chown_entry(root, uid, gid)?;
     Ok(())
 }
 
