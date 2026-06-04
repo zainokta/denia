@@ -675,45 +675,10 @@ fn attach_pid_to_cgroup(pid: u32, cgroup_procs_path: &Path) -> Result<(), Syscal
             path: cgroup_procs_path.to_path_buf(),
             reason: format!("open: {error}"),
         })?;
-    let src_cg = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
-        .unwrap_or_else(|e| format!("<read err: {e}>"));
-    let parent_cg =
-        std::fs::read_to_string("/proc/self/cgroup").unwrap_or_else(|e| format!("<read err: {e}>"));
-    let leaf_dir = cgroup_procs_path.parent().unwrap_or(cgroup_procs_path);
-    let leaf_type = std::fs::read_to_string(leaf_dir.join("cgroup.type"))
-        .unwrap_or_else(|e| format!("<read err: {e}>"));
-    let leaf_controllers = std::fs::read_to_string(leaf_dir.join("cgroup.controllers"))
-        .unwrap_or_else(|e| format!("<read err: {e}>"));
-    let leaf_subtree = std::fs::read_to_string(leaf_dir.join("cgroup.subtree_control"))
-        .unwrap_or_else(|e| format!("<read err: {e}>"));
-    let leaf_events = std::fs::read_to_string(leaf_dir.join("cgroup.events"))
-        .unwrap_or_else(|e| format!("<read err: {e}>"));
-    let pid_status_state = std::fs::read_to_string(format!("/proc/{pid}/status"))
-        .ok()
-        .map(|s| {
-            s.lines()
-                .filter(|l| {
-                    l.starts_with("State:")
-                        || l.starts_with("Tgid:")
-                        || l.starts_with("Pid:")
-                        || l.starts_with("PPid:")
-                        || l.starts_with("Threads:")
-                })
-                .collect::<Vec<_>>()
-                .join(" | ")
-        })
-        .unwrap_or_default();
-    tracing::info!(
+    tracing::debug!(
         pid,
         target = %cgroup_procs_path.display(),
-        src_cgroup = %src_cg.trim(),
-        parent_cgroup = %parent_cg.trim(),
-        leaf_type = %leaf_type.trim(),
-        leaf_controllers = %leaf_controllers.trim(),
-        leaf_subtree = %leaf_subtree.trim(),
-        leaf_events = %leaf_events.trim().replace('\n', " | "),
-        pid_state = %pid_status_state.trim(),
-        "cgroup attach attempt"
+        "attaching workload pid to cgroup"
     );
     // Must be a SINGLE write(2) — `writeln!`/`write_fmt` can emit the digits
     // and the newline as two separate writes, which the kernel's
@@ -937,7 +902,14 @@ fn read_exact_byte(fd: RawFd) -> std::io::Result<u8> {
             std::io::ErrorKind::UnexpectedEof,
             "sync pipe closed",
         )),
-        TimedByte::Timeout => unreachable!("read_byte_now never returns timeout"),
+        // `read_byte_now` never returns `Timeout` (only `read_*_byte_timeout`
+        // does, via the poll path), so this arm is not reachable today. Return a
+        // typed error rather than panicking on the launch path, per the
+        // "no panics for expected failures" rule.
+        TimedByte::Timeout => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "sync pipe read timed out",
+        )),
         TimedByte::Error(error) => Err(error),
     }
 }
@@ -1124,7 +1096,13 @@ unsafe fn child_stage1(
 }
 
 fn wait_for_stage2(pid: libc::pid_t) -> ! {
-    let pid = rustix::process::Pid::from_raw(pid).expect("pid from fork must be non-zero");
+    // The caller only invokes this on the `pid > 0` fork branch, so `pid` is
+    // always a valid non-zero child pid and `from_raw` always returns `Some`.
+    // Exit cleanly rather than panicking in this intermediate process if that
+    // invariant is ever violated (avoids unwinding a forked process).
+    let Some(pid) = rustix::process::Pid::from_raw(pid) else {
+        unsafe { libc::_exit(CHILD_SETUP_EXIT_CODE) };
+    };
     loop {
         match rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty()) {
             Ok(Some((_, status))) => {
@@ -1256,6 +1234,22 @@ unsafe fn child_bind_dir_rw(
     {
         unsafe { child_setup_fail(pipes, b'k') };
     }
+
+    // Remount the (read-WRITE) socket bind nosuid+nodev for defense-in-depth: the
+    // workload only needs to bind a unix socket here, never a setuid binary or a
+    // device node. Mount flags on the initial `MS_BIND` are ignored by the
+    // kernel, so a `MS_REMOUNT|MS_BIND` pass is required to set them. Best-effort:
+    // a kernel that rejects the remount must not fail the launch, since the bind
+    // itself (the load-bearing step) already succeeded.
+    let _ = unsafe {
+        libc::mount(
+            std::ptr::null(),
+            full.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND | libc::MS_REMOUNT | libc::MS_NOSUID | libc::MS_NODEV,
+            std::ptr::null(),
+        )
+    };
 }
 
 fn mkdir_mountpoint_component_no_symlink(component: &std::ffi::CStr) -> Result<(), i32> {
@@ -1282,6 +1276,19 @@ fn mkdir_mountpoint_component_no_symlink(component: &std::ffi::CStr) -> Result<(
         libc::S_IFLNK => Err(libc::ELOOP),
         _ => Err(libc::ENOTDIR),
     }
+}
+
+/// True if `path` is an existing regular file (checked with `lstat`, so a
+/// symlink reports false). Used to tolerate `EEXIST` on a file mountpoint only
+/// when the pre-existing entry is a real regular file and not a symlink that
+/// could redirect the subsequent bind mount.
+fn mountpoint_is_regular_file(path: &std::ffi::CStr) -> bool {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::lstat(path.as_ptr(), stat.as_mut_ptr()) } < 0 {
+        return false;
+    }
+    let stat = unsafe { stat.assume_init() };
+    stat.st_mode & libc::S_IFMT == libc::S_IFREG
 }
 
 /// Build `<base>/dev` as a fresh tmpfs and bind the host's character device
@@ -1513,13 +1520,23 @@ unsafe fn child_exec(
         unsafe { child_setup_fail(pipes, b'B') };
     }
 
-    if let Err(e) = apply_rlimits(plan.max_fds, plan.max_procs) {
+    if let Err(e) = apply_rlimits(plan.max_fds, plan.max_procs, plan.max_pids) {
         unsafe { child_setup_fail_errno(pipes, b'L', e.raw_os_error()) };
     }
 
     if plan.seccomp && seccomp::install_filter().is_err() {
         unsafe { child_setup_fail(pipes, b'S') };
     }
+
+    // Defensively close any inherited daemon fds (SQLite, the Pingora :80/:443
+    // listeners, log files, ACME state) before execve so a single non-CLOEXEC fd
+    // anywhere in the daemon cannot leak into the workload across the pivot. std
+    // and tokio open fds O_CLOEXEC by default, so today nothing leaks; this is a
+    // belt-and-braces sweep matching runc/crun. stdin/stdout/stderr (0/1/2) were
+    // already set up; the child's error pipe (`child_error_write`) is kept open
+    // until execve so a late failure can still be reported, and it is O_CLOEXEC
+    // so it closes automatically on a successful execve. See L1.
+    unsafe { close_inherited_fds(pipes.child_error_write) };
 
     // Drop into the mapped user-namespace root (uid/gid 0 inside the userns =
     // host userns_base) as the LAST step before execve. The id-map is written by
@@ -1606,7 +1623,11 @@ fn mask_proc_paths() -> Result<(), rustix::io::Errno> {
     Ok(())
 }
 
-fn apply_rlimits(max_fds: Option<u64>, max_procs: Option<u64>) -> Result<(), rustix::io::Errno> {
+fn apply_rlimits(
+    max_fds: Option<u64>,
+    max_procs: Option<u64>,
+    max_pids: Option<u64>,
+) -> Result<(), rustix::io::Errno> {
     if let Some(max) = max_fds {
         rustix::process::setrlimit(
             rustix::process::Resource::Nofile,
@@ -1616,7 +1637,18 @@ fn apply_rlimits(max_fds: Option<u64>, max_procs: Option<u64>) -> Result<(), rus
             },
         )?;
     }
-    if let Some(max) = max_procs {
+    // `RLIMIT_NPROC` is the per-uid process/thread cap. Both `max_procs` and
+    // `max_pids` express that limit (the latter from the deployment/job
+    // `pids_max`); apply the tighter of the two as a process-level backstop
+    // complementing the cgroup `pids.max`. Without this, `max_pids` would be a
+    // dead field and pid limiting would rely solely on the cgroup.
+    let nproc = match (max_procs, max_pids) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    if let Some(max) = nproc {
         rustix::process::setrlimit(
             rustix::process::Resource::Nproc,
             rustix::process::Rlimit {
@@ -1658,44 +1690,53 @@ unsafe fn child_apply_ro_bind(pipes: &SyncPipes, base: &std::ffi::CStr, bind: &R
 
     // Create each parent directory component of the full dest. `base` already
     // exists; `dest` is absolute, so start past the base prefix and its leading
-    // '/', and mkdir at every subsequent slash.
+    // '/', and mkdir at every subsequent slash. The `base` tree is the overlay
+    // `merged` view (image-controlled), so an existing component must be checked
+    // with `lstat` and rejected if it is a symlink — otherwise a rootfs that
+    // pre-creates `/.denia` (or `/.denia/lib`) as a symlink to an absolute host
+    // path could redirect this privileged, pre-userns mountpoint creation (and
+    // the subsequent bind) onto a host location outside the new root. This is the
+    // same guard `child_bind_dir_rw` already applies to the socket bind dest;
+    // both bind paths now share `mkdir_mountpoint_component_no_symlink`. See H1 /
+    // ADR-026.
     let mut index = base_bytes.len() + 1;
     while index < full_bytes.len() {
         if full_bytes[index] == b'/' {
             let mut component = full_bytes[..index].to_vec();
             component.push(0);
             let component = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(&component) };
-            if unsafe { libc::mkdir(component.as_ptr(), 0o755) } < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() != Some(libc::EEXIST) {
-                    unsafe { child_setup_fail(pipes, b'b') };
-                }
+            if mkdir_mountpoint_component_no_symlink(component).is_err() {
+                unsafe { child_setup_fail(pipes, b'b') };
             }
         }
         index += 1;
     }
 
     if bind.dest_is_file {
+        // O_NOFOLLOW so a symlink planted at the final component is rejected
+        // (ELOOP) instead of being followed onto a host path; O_EXCL so the file
+        // mountpoint is freshly created. An EEXIST is tolerated only after an
+        // `lstat` confirms the existing entry is a regular file (not a symlink or
+        // other type), mirroring the no-symlink directory guard above.
         let fd = unsafe {
             libc::open(
                 full_dest.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 0o644,
             )
         };
         if fd < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() != Some(libc::EEXIST) {
+            let errno = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO);
+            if errno != libc::EEXIST || !mountpoint_is_regular_file(full_dest) {
                 unsafe { child_setup_fail(pipes, b'b') };
             }
         } else {
             let _ = unsafe { libc::close(fd) };
         }
-    } else if unsafe { libc::mkdir(full_dest.as_ptr(), 0o755) } < 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::EEXIST) {
-            unsafe { child_setup_fail(pipes, b'b') };
-        }
+    } else if mkdir_mountpoint_component_no_symlink(full_dest).is_err() {
+        unsafe { child_setup_fail(pipes, b'b') };
     }
 
     // The bind source is a host-absolute path resolved in the initial mount
@@ -1719,7 +1760,9 @@ unsafe fn child_apply_ro_bind(pipes: &SyncPipes, base: &std::ffi::CStr, bind: &R
             std::ptr::null(),
             full_dest.as_ptr(),
             std::ptr::null(),
-            libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID,
+            // RO + nosuid + nodev: a read-only helper bind must never expose a
+            // setuid bit or a device node for defense-in-depth.
+            libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
             std::ptr::null(),
         )
     } < 0
@@ -1764,6 +1807,23 @@ fn redirect_stdio_fd(pipes: &SyncPipes, fd: RawFd, target_fd: libc::c_int) {
         unsafe { child_setup_fail(pipes, b'O') };
     }
     close_fd(fd);
+}
+
+/// Close every inherited file descriptor at or above fd 3 except `keep`, just
+/// before `execve`, so no stray daemon fd leaks into the workload across the
+/// pivot. Uses the `close_range(2)` syscall directly (async-signal-safe: a
+/// single raw syscall, no allocation). Closes `[3, keep-1]` and `[keep+1, ~0]`
+/// so the still-needed error-reporting pipe survives. Best-effort: on a kernel
+/// without `close_range` (< 5.9) the syscall returns `ENOSYS` and the existing
+/// CLOEXEC discipline remains the guarantee, so the error is ignored.
+unsafe fn close_inherited_fds(keep: RawFd) {
+    const FIRST: libc::c_uint = 3;
+    let keep = keep as libc::c_uint;
+    if keep > FIRST {
+        let _ = unsafe { libc::syscall(libc::SYS_close_range, FIRST, keep - 1, 0) };
+    }
+    let lo = std::cmp::max(FIRST, keep.saturating_add(1));
+    let _ = unsafe { libc::syscall(libc::SYS_close_range, lo, libc::c_uint::MAX, 0) };
 }
 
 const CHILD_SETUP_EXIT_CODE: i32 = 127;
@@ -2130,6 +2190,50 @@ mod tests {
 
         assert_eq!(err, libc::ELOOP);
         assert!(!escaped.path().join("lib").exists());
+    }
+
+    #[test]
+    fn ro_bind_mountpoint_creation_rejects_symlink_components() {
+        // The RO-bind mountpoint chain (child_apply_ro_bind) shares the same
+        // symlink-rejecting component creator as the socket bind, so an
+        // image-controlled `merged` base that pre-creates `/.denia` as a symlink
+        // to an absolute host path cannot redirect the privileged, pre-userns
+        // mountpoint creation outside the new root. See H1 / ADR-026.
+        let root = tempfile::tempdir().expect("root");
+        let escaped = tempfile::tempdir().expect("escaped");
+        let link = root.path().join(".denia");
+        std::os::unix::fs::symlink(escaped.path(), &link).expect("symlink");
+        let component = CString::new(link.as_os_str().as_bytes()).expect("component");
+
+        let err = mkdir_mountpoint_component_no_symlink(&component)
+            .expect_err("symlink mountpoint components must be rejected");
+
+        assert_eq!(err, libc::ELOOP);
+        assert!(!escaped.path().join("socket-proxy").exists());
+    }
+
+    #[test]
+    fn mountpoint_is_regular_file_rejects_symlink_and_dir() {
+        let dir = tempfile::tempdir().expect("dir");
+        let file_path = dir.path().join("real");
+        std::fs::write(&file_path, b"x").expect("write file");
+        let file_c = CString::new(file_path.as_os_str().as_bytes()).expect("file cstr");
+        assert!(mountpoint_is_regular_file(&file_c));
+
+        let link_path = dir.path().join("link");
+        std::os::unix::fs::symlink(&file_path, &link_path).expect("symlink");
+        let link_c = CString::new(link_path.as_os_str().as_bytes()).expect("link cstr");
+        assert!(
+            !mountpoint_is_regular_file(&link_c),
+            "a symlink (even to a regular file) must not be accepted as a file mountpoint"
+        );
+
+        let dir_c = CString::new(dir.path().as_os_str().as_bytes()).expect("dir cstr");
+        assert!(!mountpoint_is_regular_file(&dir_c));
+
+        let missing_c = CString::new(dir.path().join("missing").as_os_str().as_bytes())
+            .expect("missing cstr");
+        assert!(!mountpoint_is_regular_file(&missing_c));
     }
 
     #[test]
