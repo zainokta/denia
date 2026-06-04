@@ -283,17 +283,17 @@ step_install_prereqs() {
             run_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -y
             run_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y \
                 build-essential pkg-config libssl-dev libclang-dev clang cmake perl ca-certificates \
-                curl git age iproute2 procps
+                curl git age acl iproute2 procps
             ;;
         dnf)
             run_cmd dnf install -y \
                 @development-tools pkgconf-pkg-config openssl-devel clang clang-devel cmake perl ca-certificates \
-                curl git age iproute procps-ng
+                curl git age acl iproute procps-ng
             ;;
         pacman)
             run_cmd pacman -Sy --noconfirm \
                 base-devel pkgconf openssl clang cmake perl ca-certificates \
-                curl git age iproute2 procps-ng
+                curl git age acl iproute2 procps-ng
             ;;
         zypper)
             run_cmd zypper --non-interactive refresh
@@ -301,7 +301,7 @@ step_install_prereqs() {
                 -t pattern devel_basis
             run_cmd zypper --non-interactive install -y \
                 pkg-config libopenssl-devel clang clang-devel cmake perl ca-certificates \
-                curl git age iproute2 procps
+                curl git age acl iproute2 procps
             ;;
     esac
     ok "system packages installed"

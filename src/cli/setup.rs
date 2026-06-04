@@ -46,6 +46,7 @@ fn plan() -> Vec<Step> {
         GenerateAgeIdentityIfAbsent,
         GenerateAdminTokenIfAbsent,
         WriteConfigIfAbsent,
+        RepairUserConfigAccess,
         WriteSystemdUnit,
         SystemctlDaemonReload,
         SystemctlEnableNow,
@@ -62,6 +63,7 @@ enum Step {
     GenerateAgeIdentityIfAbsent,
     GenerateAdminTokenIfAbsent,
     WriteConfigIfAbsent,
+    RepairUserConfigAccess,
     WriteSystemdUnit,
     SystemctlDaemonReload,
     SystemctlEnableNow,
@@ -97,6 +99,10 @@ impl Step {
                 "write {} 0640 {}:denia (if absent)",
                 ctx.config_file.display(),
                 ctx.install_user
+            ),
+            RepairUserConfigAccess => format!(
+                "repair {} file modes and denia traverse ACLs",
+                ctx.user_config_dir.display()
             ),
             WriteSystemdUnit => "write /etc/systemd/system/denia.service (always overwrite)".into(),
             SystemctlDaemonReload => "systemctl daemon-reload".into(),
@@ -139,6 +145,7 @@ impl Step {
                     io::write_owned_secret(&ctx.config_file, &body, &ctx.install_user)?;
                 }
             }
+            RepairUserConfigAccess => provision::repair_user_config_access(ctx)?,
             WriteSystemdUnit => systemd::write_unit(ctx)?,
             SystemctlDaemonReload => systemd::daemon_reload()?,
             SystemctlEnableNow => systemd::enable_now("denia.service")?,

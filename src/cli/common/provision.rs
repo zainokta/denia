@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use std::os::unix::fs::PermissionsExt;
+
 use super::paths::InstallContext;
 
 /// Create the system group `name` if it doesn't already exist.
@@ -92,6 +94,109 @@ pub fn ensure_user_config_dir(ctx: &InstallContext) -> anyhow::Result<()> {
     ensure_dir(&ctx.user_config_dir, 0o750, &ctx.install_user, "denia")
 }
 
+/// Repair all access needed for the `denia` system user to read the operator
+/// config directory created by `denia setup`.
+pub fn repair_user_config_access(ctx: &InstallContext) -> anyhow::Result<()> {
+    for repair in user_config_access_repair_plan(ctx) {
+        apply_access_repair(&repair)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AccessRepair {
+    GrantUserExecute {
+        path: PathBuf,
+        user: String,
+    },
+    EnsureDir {
+        path: PathBuf,
+        mode: u32,
+        owner: String,
+        group: String,
+    },
+    EnsureFile {
+        path: PathBuf,
+        mode: u32,
+        owner: String,
+        group: String,
+    },
+}
+
+fn user_config_access_repair_plan(ctx: &InstallContext) -> Vec<AccessRepair> {
+    let config_parent = ctx
+        .user_config_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| ctx.install_home.join(".config"));
+    vec![
+        AccessRepair::GrantUserExecute {
+            path: ctx.install_home.clone(),
+            user: "denia".to_string(),
+        },
+        AccessRepair::GrantUserExecute {
+            path: config_parent,
+            user: "denia".to_string(),
+        },
+        AccessRepair::EnsureDir {
+            path: ctx.user_config_dir.clone(),
+            mode: 0o750,
+            owner: ctx.install_user.clone(),
+            group: "denia".to_string(),
+        },
+        AccessRepair::EnsureFile {
+            path: ctx.config_file.clone(),
+            mode: 0o640,
+            owner: ctx.install_user.clone(),
+            group: "denia".to_string(),
+        },
+        AccessRepair::EnsureFile {
+            path: ctx.token_file.clone(),
+            mode: 0o640,
+            owner: ctx.install_user.clone(),
+            group: "denia".to_string(),
+        },
+        AccessRepair::EnsureFile {
+            path: ctx.age_key_file.clone(),
+            mode: 0o640,
+            owner: ctx.install_user.clone(),
+            group: "denia".to_string(),
+        },
+    ]
+}
+
+fn apply_access_repair(repair: &AccessRepair) -> anyhow::Result<()> {
+    match repair {
+        AccessRepair::GrantUserExecute { path, user } => {
+            if path.exists() {
+                reject_symlink_components(path)?;
+                let p = path.display().to_string();
+                run("setfacl", &["-m", &format!("u:{user}:x"), &p])?;
+            }
+        }
+        AccessRepair::EnsureDir {
+            path,
+            mode,
+            owner,
+            group,
+        } => ensure_dir(path, *mode, owner, group)?,
+        AccessRepair::EnsureFile {
+            path,
+            mode,
+            owner,
+            group,
+        } => {
+            if path.exists() {
+                reject_symlink_components(path)?;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(*mode))?;
+                let p = path.display().to_string();
+                run("chown", &[&format!("{owner}:{group}"), &p])?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn reject_symlink_components(path: &Path) -> anyhow::Result<()> {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -142,6 +247,51 @@ fn run(bin: &str, args: &[&str]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_config_access_repair_plan_repairs_existing_paths() {
+        let ctx = InstallContext::from_user("rakei", "/home/rakei");
+
+        let plan = user_config_access_repair_plan(&ctx);
+
+        assert_eq!(
+            plan,
+            vec![
+                AccessRepair::GrantUserExecute {
+                    path: PathBuf::from("/home/rakei"),
+                    user: "denia".to_string(),
+                },
+                AccessRepair::GrantUserExecute {
+                    path: PathBuf::from("/home/rakei/.config"),
+                    user: "denia".to_string(),
+                },
+                AccessRepair::EnsureDir {
+                    path: PathBuf::from("/home/rakei/.config/denia"),
+                    mode: 0o750,
+                    owner: "rakei".to_string(),
+                    group: "denia".to_string(),
+                },
+                AccessRepair::EnsureFile {
+                    path: PathBuf::from("/home/rakei/.config/denia/config.toml"),
+                    mode: 0o640,
+                    owner: "rakei".to_string(),
+                    group: "denia".to_string(),
+                },
+                AccessRepair::EnsureFile {
+                    path: PathBuf::from("/home/rakei/.config/denia/admin.token"),
+                    mode: 0o640,
+                    owner: "rakei".to_string(),
+                    group: "denia".to_string(),
+                },
+                AccessRepair::EnsureFile {
+                    path: PathBuf::from("/home/rakei/.config/denia/age.key"),
+                    mode: 0o640,
+                    owner: "rakei".to_string(),
+                    group: "denia".to_string(),
+                },
+            ]
+        );
+    }
 
     #[cfg(unix)]
     #[test]
