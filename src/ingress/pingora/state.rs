@@ -128,11 +128,18 @@ impl RouteTable {
     ///
     /// Each domain is validated and lowercased via [`validate_domain`] before
     /// insertion, so the table never holds an unvalidated or mixed-case host
-    /// (audit A1/A2). Any domain that fails validation is skipped; callers that
-    /// need to surface rejection should use [`RouteTable::try_upsert`].
+    /// (audit A1/A2). Any domain that fails validation is **silently skipped**;
+    /// callers that need to surface rejection must use [`RouteTable::try_upsert`].
     ///
     /// If a domain previously pointed at a different `route_key`, the most
     /// recent `upsert` wins for that host.
+    ///
+    /// Gated to `cfg(test)`: the control plane always goes through
+    /// [`RouteTable::try_upsert`] (via `route_table_from_snapshot`) so an invalid
+    /// domain surfaces as a typed error instead of being dropped (review LOW /
+    /// audit A1). Keeping the lossy variant out of non-test builds prevents a
+    /// future caller from reintroducing the silent-drop path.
+    #[cfg(test)]
     pub fn upsert(&mut self, spec: RouteSpec) {
         for domain in &spec.domains {
             if let Ok(host) = validate_domain(domain) {
