@@ -10,6 +10,9 @@ use super::common::paths::InstallContext;
 use super::common::platform;
 use super::common::systemd;
 
+const CGROUP_CONTROLLERS: &[&str] = &["cpu", "memory", "pids", "io"];
+const REQUIRED_CGROUP_CONTROLLERS: &[&str] = &["cpu", "memory", "pids"];
+
 pub enum CheckResult {
     Pass(String),
     Fail(String),
@@ -46,6 +49,7 @@ pub fn run() -> anyhow::Result<()> {
     let checks: Vec<CheckResult> = vec![
         check_glibc_baseline(),
         check_cgroup_v2(),
+        check_denia_cgroup_delegation(),
         check_userns_enabled(),
         check_ports_free(),
         check_deps_in_path(),
@@ -103,6 +107,86 @@ fn check_cgroup_v2() -> CheckResult {
             "cgroup v2 unified mount missing; boot with systemd.unified_cgroup_hierarchy=1".into(),
         )
     }
+}
+
+fn check_denia_cgroup_delegation() -> CheckResult {
+    let cgroup_root = std::path::Path::new("/sys/fs/cgroup/denia");
+    if !cgroup_root.exists() {
+        return CheckResult::Fail(
+            "denia cgroup root missing at /sys/fs/cgroup/denia; run `sudo denia setup`".into(),
+        );
+    }
+
+    let controllers_path = cgroup_root.join("cgroup.controllers");
+    let subtree_control_path = cgroup_root.join("cgroup.subtree_control");
+    let available = match std::fs::read_to_string(&controllers_path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return CheckResult::Fail(format!(
+                "denia cgroup delegation: cannot read {} ({error})",
+                controllers_path.display()
+            ));
+        }
+    };
+    let enabled = match std::fs::read_to_string(&subtree_control_path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return CheckResult::Fail(format!(
+                "denia cgroup delegation: cannot read {} ({error})",
+                subtree_control_path.display()
+            ));
+        }
+    };
+
+    let unavailable_required =
+        unavailable_cgroup_controllers(&available, REQUIRED_CGROUP_CONTROLLERS);
+    if !unavailable_required.is_empty() {
+        return CheckResult::Fail(format!(
+            "denia cgroup delegation: required controller(s) unavailable at {}: {}",
+            controllers_path.display(),
+            unavailable_required.join(", ")
+        ));
+    }
+
+    let missing_enabled = missing_cgroup_controllers(&available, &enabled, CGROUP_CONTROLLERS);
+    if missing_enabled.is_empty() {
+        CheckResult::Pass(format!(
+            "denia cgroup delegation enabled for {}",
+            enabled.split_whitespace().collect::<Vec<_>>().join(", ")
+        ))
+    } else {
+        CheckResult::Fail(format!(
+            "denia cgroup delegation: controller(s) available but not enabled under /sys/fs/cgroup/denia: {}. Re-run `sudo denia setup`, then `sudo systemctl restart denia`.",
+            missing_enabled.join(", ")
+        ))
+    }
+}
+
+fn missing_cgroup_controllers(available: &str, enabled: &str, controllers: &[&str]) -> Vec<String> {
+    controllers
+        .iter()
+        .filter(|controller| {
+            available
+                .split_whitespace()
+                .any(|available| available == **controller)
+                && !enabled
+                    .split_whitespace()
+                    .any(|enabled| enabled == **controller)
+        })
+        .map(|controller| (*controller).to_string())
+        .collect()
+}
+
+fn unavailable_cgroup_controllers(available: &str, controllers: &[&str]) -> Vec<String> {
+    controllers
+        .iter()
+        .filter(|controller| {
+            !available
+                .split_whitespace()
+                .any(|available| available == **controller)
+        })
+        .map(|controller| (*controller).to_string())
+        .collect()
 }
 
 fn check_userns_enabled() -> CheckResult {
@@ -325,5 +409,38 @@ fn check_healthz() -> CheckResult {
         Err(e) => CheckResult::Fail(format!(
             "/healthz unreachable at http://{bind_addr}/healthz ({e})"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_cgroup_controllers_reports_available_but_disabled() {
+        assert_eq!(
+            missing_cgroup_controllers("cpu memory pids io\n", "cpu pids\n", CGROUP_CONTROLLERS),
+            vec!["memory".to_string(), "io".to_string()]
+        );
+    }
+
+    #[test]
+    fn missing_cgroup_controllers_ignores_unavailable_optional_controller() {
+        assert_eq!(
+            missing_cgroup_controllers(
+                "cpu memory pids\n",
+                "cpu memory pids\n",
+                CGROUP_CONTROLLERS
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn unavailable_cgroup_controllers_reports_required_absent_from_available_set() {
+        assert_eq!(
+            unavailable_cgroup_controllers("cpu pids io\n", REQUIRED_CGROUP_CONTROLLERS),
+            vec!["memory".to_string()]
+        );
     }
 }

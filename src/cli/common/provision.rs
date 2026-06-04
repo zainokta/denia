@@ -77,7 +77,53 @@ pub fn ensure_data_dirs() -> anyhow::Result<()> {
 /// Ensure `/sys/fs/cgroup/denia` exists mode `0755 denia:denia`. Required
 /// for systemd cgroup v2 delegation to the unit.
 pub fn ensure_cgroup_root() -> anyhow::Result<()> {
-    ensure_dir(Path::new("/sys/fs/cgroup/denia"), 0o755, "denia", "denia")
+    let cgroup_root = Path::new("/sys/fs/cgroup/denia");
+    ensure_dir(cgroup_root, 0o755, "denia", "denia")?;
+    ensure_cgroup_controllers(cgroup_root, &["cpu", "memory", "pids", "io"])?;
+    Ok(())
+}
+
+fn ensure_cgroup_controllers(path: &Path, controllers: &[&str]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        enable_available_cgroup_controllers(parent, controllers)?;
+    }
+    enable_available_cgroup_controllers(path, controllers)
+}
+
+fn enable_available_cgroup_controllers(path: &Path, controllers: &[&str]) -> anyhow::Result<()> {
+    let controllers_path = path.join("cgroup.controllers");
+    let subtree_control_path = path.join("cgroup.subtree_control");
+    if !controllers_path.exists() || !subtree_control_path.exists() {
+        return Ok(());
+    }
+
+    let available = std::fs::read_to_string(&controllers_path)?;
+    let enabled = std::fs::read_to_string(&subtree_control_path)?;
+    let missing = controllers
+        .iter()
+        .filter(|controller| {
+            available
+                .split_whitespace()
+                .any(|available| available == **controller)
+        })
+        .filter(|controller| {
+            !enabled
+                .split_whitespace()
+                .any(|enabled| enabled == **controller)
+        })
+        .map(|controller| format!("+{controller}"))
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    std::fs::write(&subtree_control_path, format!("{}\n", missing.join(" "))).map_err(|error| {
+        anyhow::anyhow!(
+            "enable cgroup controllers at {} failed: {error}",
+            subtree_control_path.display()
+        )
+    })
 }
 
 /// Ensure the operator's `~/.config/denia` directory exists with the
@@ -295,6 +341,41 @@ mod tests {
                     group: "denia".to_string(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn enable_available_cgroup_controllers_skips_already_enabled_readonly_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cgroup");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("cgroup.controllers"), "cpu memory pids io\n").unwrap();
+        let subtree_control = root.join("cgroup.subtree_control");
+        std::fs::write(&subtree_control, "cpu memory pids io\n").unwrap();
+        std::fs::set_permissions(&subtree_control, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        enable_available_cgroup_controllers(&root, &["cpu", "memory", "pids", "io"]).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&subtree_control).unwrap(),
+            "cpu memory pids io\n"
+        );
+    }
+
+    #[test]
+    fn enable_available_cgroup_controllers_writes_only_available_missing_controllers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cgroup");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("cgroup.controllers"), "cpu memory\n").unwrap();
+        let subtree_control = root.join("cgroup.subtree_control");
+        std::fs::write(&subtree_control, "cpu\n").unwrap();
+
+        enable_available_cgroup_controllers(&root, &["cpu", "memory", "pids", "io"]).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&subtree_control).unwrap(),
+            "+memory\n"
         );
     }
 
