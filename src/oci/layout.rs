@@ -32,6 +32,12 @@ pub fn read_oci_layout(layout_dir: &Path) -> Result<PulledImage, OciError> {
     let manifest_bytes = std::fs::read(&manifest_path)
         .map_err(|e| OciError::Layout(format!("cannot read manifest blob: {e}")))?;
 
+    // Verify the manifest blob's content hashes to the digest index.json
+    // declared, just like the layer blobs below. Without this a tampered
+    // `blobs/sha256/<manifest>` whose filename no longer matches its content
+    // would be trusted (ADR-015: verify before use).
+    verify_bytes_digest(&manifest_bytes, digest)?;
+
     let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| OciError::Layout(format!("invalid manifest: {e}")))?;
 
@@ -46,6 +52,9 @@ pub fn read_oci_layout(layout_dir: &Path) -> Result<PulledImage, OciError> {
     let config_path = layout_dir.join("blobs").join("sha256").join(config_hex);
     let config_bytes = std::fs::read(&config_path)
         .map_err(|e| OciError::Layout(format!("cannot read config blob: {e}")))?;
+
+    // Verify the config blob against the digest the manifest declares.
+    verify_bytes_digest(&config_bytes, config_digest)?;
 
     let config: super::config::OciImageConfig =
         serde_json::from_slice(&config_bytes).map_err(OciError::Json)?;
@@ -85,6 +94,18 @@ pub fn read_oci_layout(layout_dir: &Path) -> Result<PulledImage, OciError> {
         _staging: None,
         _cache_reservations: Vec::new(),
     })
+}
+
+/// Verify that `bytes` hash (SHA-256) to `expected` (a `sha256:<hex>` digest).
+fn verify_bytes_digest(bytes: &[u8], expected: &str) -> Result<(), OciError> {
+    let actual = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+    if actual != expected {
+        return Err(OciError::DigestMismatch {
+            expected: expected.to_string(),
+            actual,
+        });
+    }
+    Ok(())
 }
 
 fn verify_blob_digest(path: &Path, expected: &str) -> Result<(), OciError> {

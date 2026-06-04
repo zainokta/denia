@@ -102,6 +102,19 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
             continue;
         }
 
+        // Count EVERY materialized entry (dir, symlink, hardlink, regular
+        // file) toward the inode-bomb guard. Counting only regular files let
+        // an archive of hundreds of millions of cheap-on-the-wire directories
+        // or symlinks exhaust inodes / fill the parent dir while staying under
+        // the limit. Whiteouts are handled above and `continue` before here.
+        file_count += 1;
+        if file_count > MAX_FILE_COUNT {
+            return Err(OciError::Io(std::io::Error::other(format!(
+                "layer exceeds entry count limit ({} > {})",
+                file_count, MAX_FILE_COUNT
+            ))));
+        }
+
         let is_symlink = entry.header().entry_type().is_symlink();
         if entry.header().entry_type().is_dir() {
             create_dir_all_no_symlink(rootfs_dir, &safe_path)?;
@@ -123,13 +136,6 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
                     entry_size,
                     MAX_SINGLE_FILE_BYTES,
                     entry_path.display()
-                ))));
-            }
-            file_count += 1;
-            if file_count > MAX_FILE_COUNT {
-                return Err(OciError::Io(std::io::Error::other(format!(
-                    "layer exceeds file count limit ({} > {})",
-                    file_count, MAX_FILE_COUNT
                 ))));
             }
             if let Some(parent) = safe_path.parent() {

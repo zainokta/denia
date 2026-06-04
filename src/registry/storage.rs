@@ -64,9 +64,32 @@ impl RegistryStorage {
         Ok(len)
     }
 
+    /// Current on-disk size of an in-progress upload's data file, or 0 if it
+    /// does not exist yet. Used to enforce a cumulative size cap across PATCH
+    /// chunks while streaming so a single upload cannot exceed the configured
+    /// maximum blob size.
+    pub fn upload_size(&self, upload_id: Uuid) -> Result<u64, RegistryStorageError> {
+        let path = self.upload_data_path(upload_id);
+        match std::fs::metadata(&path) {
+            Ok(m) => Ok(m.len()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(RegistryStorageError::Io(e)),
+        }
+    }
+
     pub fn hash_upload(&self, upload_id: Uuid) -> Result<(String, u64), RegistryStorageError> {
         let path = self.upload_data_path(upload_id);
-        let mut file = std::fs::File::open(&path)?;
+        // A monolithic commit (start → empty PATCH → PUT?digest=) or an empty
+        // blob may never have created a data file. Treat a missing file as a
+        // zero-byte upload so the empty-blob digest is computed correctly.
+        let mut file = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let digest = format!("sha256:{}", hex::encode(Sha256::digest(b"")));
+                return Ok((digest, 0));
+            }
+            Err(e) => return Err(RegistryStorageError::Io(e)),
+        };
         let mut hasher = Sha256::new();
         let mut buf = [0u8; 8192];
         let mut total = 0u64;
@@ -88,8 +111,31 @@ impl RegistryStorage {
             std::fs::create_dir_all(parent)?;
         }
         let src = self.upload_data_path(upload_id);
-        let size = std::fs::metadata(&src)?.len();
-        std::fs::rename(&src, &dst)?;
+        let size = match std::fs::metadata(&src) {
+            Ok(m) => {
+                // fsync the data file before rename so a post-crash blob is
+                // either absent or fully durable under its content-addressed
+                // name. Without this a crash can leave a half-written or
+                // zero-length file filed under a digest the metadata claims is
+                // verified (matches the OCI cache durability in
+                // `oci/cache/store.rs::finalize_temp`).
+                {
+                    let f = std::fs::File::open(&src)?;
+                    f.sync_all()?;
+                }
+                std::fs::rename(&src, &dst)?;
+                m.len()
+            }
+            // A zero-byte / monolithic-empty upload may never have created a
+            // data file. Materialise an empty blob durably under its digest.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let f = std::fs::File::create(&dst)?;
+                f.sync_all()?;
+                0
+            }
+            Err(e) => return Err(RegistryStorageError::Io(e)),
+        };
+        sync_parent_dir(&dst);
         // Clean up the upload directory; ignore errors (best effort)
         let _ = std::fs::remove_dir_all(self.upload_dir(upload_id));
         Ok(size)
@@ -109,14 +155,24 @@ impl RegistryStorage {
         }
     }
 
-    /// Write `bytes` to the content-addressed path for `digest` (atomic).
-    /// Returns the number of bytes written.
+    /// Write `bytes` to the content-addressed path for `digest`, atomically
+    /// and durably: stage into a sibling `.tmp` file, fsync it, rename into
+    /// place, then fsync the parent directory. A crash therefore leaves the
+    /// blob either absent or fully written — never a half-written file under
+    /// a verified digest. Returns the number of bytes written.
     pub fn put_content(&self, digest: &str, bytes: &[u8]) -> Result<u64, RegistryStorageError> {
         let path = self.blob_path(digest)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, bytes)?;
+        let tmp = path.with_extension("tmp");
+        {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, &path)?;
+        sync_parent_dir(&path);
         Ok(bytes.len() as u64)
     }
 
@@ -192,5 +248,70 @@ impl RegistryStorage {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(RegistryStorageError::Io(e)),
         }
+    }
+}
+
+/// Best-effort fsync of the directory holding `path` so a freshly created or
+/// renamed entry is durable across a crash. Directory fsync is advisory on
+/// some filesystems; failures are ignored because the data file itself was
+/// already fsynced before the rename.
+fn sync_parent_dir(path: &std::path::Path) {
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn fresh() -> (tempfile::TempDir, RegistryStorage) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RegistryStorage::new(dir.path().to_path_buf());
+        (dir, storage)
+    }
+
+    #[test]
+    fn upload_size_tracks_appends() {
+        let (_g, storage) = fresh();
+        let upload = Uuid::now_v7();
+        assert_eq!(storage.upload_size(upload).unwrap(), 0);
+        storage.create_upload(upload).unwrap();
+        storage.append_upload(upload, b"abc").unwrap();
+        assert_eq!(storage.upload_size(upload).unwrap(), 3);
+        storage.append_upload(upload, b"defg").unwrap();
+        assert_eq!(storage.upload_size(upload).unwrap(), 7);
+    }
+
+    #[test]
+    fn commit_blob_is_durable_and_content_addressed() {
+        let (_g, storage) = fresh();
+        let upload = Uuid::now_v7();
+        let bytes = b"layer-payload";
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+        storage.create_upload(upload).unwrap();
+        storage.append_upload(upload, bytes).unwrap();
+        let size = storage.commit_blob(upload, &digest).unwrap();
+        assert_eq!(size, bytes.len() as u64);
+        // The upload dir is cleaned up; the blob is readable under its digest.
+        assert!(!storage.upload_dir(upload).exists());
+        assert_eq!(storage.read_blob(&digest).unwrap(), bytes);
+    }
+
+    #[test]
+    fn put_content_leaves_no_tmp_and_is_atomic() {
+        let (_g, storage) = fresh();
+        let bytes = b"{\"manifest\":true}";
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+        let written = storage.put_content(&digest, bytes).unwrap();
+        assert_eq!(written, bytes.len() as u64);
+        let final_path = storage.blob_path(&digest).unwrap();
+        assert!(final_path.exists());
+        // The staging `.tmp` sibling must have been renamed away.
+        assert!(!final_path.with_extension("tmp").exists());
+        assert_eq!(storage.read_blob(&digest).unwrap(), bytes);
     }
 }
