@@ -48,12 +48,17 @@ pub struct LinuxRuntime {
     userns_base: u32,
     userns_size: u32,
     children: Arc<Mutex<HashMap<RuntimeInstanceId, TrackedChild>>>,
-    /// Backstop set of live console-shell pids. The console bridge reaps its
-    /// child explicitly on session end (SIGTERM->grace->SIGKILL->waitpid), but
-    /// if that task is dropped/panics the pid would otherwise leak as a zombie.
-    /// `reap_exited_children` sweeps this set on every runtime mutation so a
-    /// console child is always collected. See ADR-033 / review 07 (HIGH).
-    console_children: Arc<Mutex<Vec<u32>>>,
+    /// Backstop set of live console process pairs. The console bridge signals
+    /// the shell and reaps its supervisor explicitly on session end, but if
+    /// that task is dropped/panics the supervisor would otherwise leak as a
+    /// zombie. `reap_exited_children` sweeps this set on every runtime mutation.
+    console_children: Arc<Mutex<Vec<ConsoleChild>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConsoleChild {
+    supervisor_pid: u32,
+    shell_pid: u32,
 }
 
 pub(crate) const SOCKET_PROXY_TARGET: &str = "/.denia/socket-proxy";
@@ -950,24 +955,30 @@ impl Runtime for LinuxRuntime {
             drop_bounding_caps: true,
             seccomp: true,
         };
-        let child_pid = tokio::task::spawn_blocking(move || spawn_console_process(&config, slave))
+        let process = tokio::task::spawn_blocking(move || spawn_console_process(&config, slave))
             .await?
             .map_err(RuntimeError::Syscall)?;
 
-        // Register the live console pid as a reaper backstop before handing the
-        // session out, so a dropped bridge task never leaks a zombie.
+        // Register the live console supervisor as a reaper backstop before
+        // handing the session out, so a dropped bridge task never leaks a
+        // zombie. The supervisor owns waitpid(shell).
         if let Ok(mut consoles) = self.console_children.lock() {
-            consoles.push(child_pid);
+            consoles.push(ConsoleChild {
+                supervisor_pid: process.supervisor_pid,
+                shell_pid: process.shell_pid,
+            });
         }
 
         Ok(RuntimeConsoleSession {
             session_id: request.session_id,
             replica_index: request.replica_index,
-            child_pid,
+            supervisor_pid: process.supervisor_pid,
+            child_pid: process.shell_pid,
             cgroup_path: tracked.plan.cgroup_path,
             pty: Box::new(pty),
             reaper: Some(Box::new(LinuxConsoleReaper {
-                child_pid,
+                supervisor_pid: process.supervisor_pid,
+                shell_pid: process.shell_pid,
                 console_children: self.console_children.clone(),
             })),
         })
@@ -979,8 +990,9 @@ impl Runtime for LinuxRuntime {
 /// shell ignored SIGTERM, then `waitpid`s to collect the child and report how it
 /// ended. Deregisters the pid from the runtime backstop once reaped.
 struct LinuxConsoleReaper {
-    child_pid: u32,
-    console_children: Arc<Mutex<Vec<u32>>>,
+    supervisor_pid: u32,
+    shell_pid: u32,
+    console_children: Arc<Mutex<Vec<ConsoleChild>>>,
 }
 
 impl LinuxConsoleReaper {
@@ -991,7 +1003,7 @@ impl LinuxConsoleReaper {
 
     fn deregister(&self) {
         if let Ok(mut consoles) = self.console_children.lock() {
-            consoles.retain(|pid| *pid != self.child_pid);
+            consoles.retain(|child| child.supervisor_pid != self.supervisor_pid);
         }
     }
 }
@@ -1003,14 +1015,15 @@ impl crate::runtime::console::ConsoleReaper for LinuxConsoleReaper {
         use crate::syscall::signal::{self, ProcessStatus};
         use rustix::process::Signal;
 
-        let pid = self.child_pid;
+        let shell_pid = self.shell_pid;
+        let supervisor_pid = self.supervisor_pid;
         // Ask the shell to exit.
-        let _ = signal::kill(pid, Signal::TERM);
+        let _ = signal::kill(shell_pid, Signal::TERM);
 
         // Poll for exit within the grace window; reap as soon as it is gone.
         let deadline = tokio::time::Instant::now() + Self::GRACE;
         let exit = loop {
-            match signal::try_wait(pid) {
+            match signal::try_wait(supervisor_pid) {
                 Ok(ProcessStatus::Exited(code)) => break ConsoleExit::Code(code),
                 Ok(ProcessStatus::Signaled(sig)) => break ConsoleExit::Signal(sig),
                 // Still running, or wait failed (already reaped/ECHILD): decide
@@ -1021,8 +1034,8 @@ impl crate::runtime::console::ConsoleReaper for LinuxConsoleReaper {
             if tokio::time::Instant::now() >= deadline {
                 // Wedged or SIGTERM-ignoring shell: escalate and blocking-wait so
                 // the zombie is collected and the namespaces are released.
-                let _ = signal::kill(pid, Signal::KILL);
-                break match signal::wait(pid) {
+                let _ = signal::kill(shell_pid, Signal::KILL);
+                break match signal::wait(supervisor_pid) {
                     Ok(ProcessStatus::Exited(code)) => ConsoleExit::Code(code),
                     Ok(ProcessStatus::Signaled(sig)) => ConsoleExit::Signal(sig),
                     _ => ConsoleExit::Unknown,
@@ -1151,18 +1164,19 @@ impl LinuxRuntime {
         Ok(())
     }
 
-    /// Backstop reaper for console-shell pids: non-blocking `try_wait` on each
-    /// registered console child, dropping any that have exited (collecting the
-    /// zombie). The bridge normally reaps its own child via [`LinuxConsoleReaper`];
-    /// this only catches children whose bridge task was dropped/panicked. A pid
-    /// the bridge already reaped reports `Err` (ECHILD) here and is also dropped.
+    /// Backstop reaper for console supervisors: non-blocking `try_wait` on each
+    /// registered supervisor, dropping any that have exited (collecting the
+    /// zombie). The supervisor owns the shell wait. The bridge normally reaps
+    /// its own supervisor via [`LinuxConsoleReaper`]; this only catches
+    /// sessions whose bridge task was dropped/panicked. A supervisor the bridge
+    /// already reaped reports `Err` (ECHILD) here and is also dropped.
     fn reap_console_children(&self) {
         let Ok(mut consoles) = self.console_children.lock() else {
             return;
         };
-        consoles.retain(|pid| {
+        consoles.retain(|child| {
             matches!(
-                crate::syscall::signal::try_wait(*pid),
+                crate::syscall::signal::try_wait(child.supervisor_pid),
                 Ok(crate::syscall::signal::ProcessStatus::Running)
             )
         });

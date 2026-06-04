@@ -70,6 +70,7 @@ pub trait ConsoleReaper: Send + Sync {
 pub struct RuntimeConsoleSession {
     pub session_id: Uuid,
     pub replica_index: u32,
+    pub supervisor_pid: u32,
     pub child_pid: u32,
     pub cgroup_path: PathBuf,
     pub pty: Box<dyn ConsolePty>,
@@ -95,6 +96,7 @@ impl std::fmt::Debug for RuntimeConsoleSession {
         f.debug_struct("RuntimeConsoleSession")
             .field("session_id", &self.session_id)
             .field("replica_index", &self.replica_index)
+            .field("supervisor_pid", &self.supervisor_pid)
             .field("child_pid", &self.child_pid)
             .field("cgroup_path", &self.cgroup_path)
             .field("pty", &"<console pty>")

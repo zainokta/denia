@@ -56,19 +56,29 @@ pub struct ConsoleLaunchConfig {
     pub seccomp: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsoleProcess {
+    pub supervisor_pid: u32,
+    pub shell_pid: u32,
+}
+
 /// One stage byte per child setup step, written to the status pipe on failure.
 const STAGE_NS_USER: u8 = 1;
 const STAGE_NS_MNT: u8 = 2;
 const STAGE_NS_NET: u8 = 3;
 const STAGE_NS_UTS: u8 = 4;
 const STAGE_NS_IPC: u8 = 5;
-const STAGE_ROOT: u8 = 6;
-const STAGE_CTTY: u8 = 7;
-const STAGE_EXEC: u8 = 8;
-const STAGE_PID_REUSE: u8 = 9;
-const STAGE_NO_NEW_PRIVS: u8 = 10;
-const STAGE_DROP_CAPS: u8 = 11;
-const STAGE_SECCOMP: u8 = 12;
+const STAGE_NS_PID: u8 = 6;
+const STAGE_ROOT: u8 = 7;
+const STAGE_CTTY: u8 = 8;
+const STAGE_EXEC: u8 = 9;
+const STAGE_PID_REUSE: u8 = 10;
+const STAGE_NO_NEW_PRIVS: u8 = 11;
+const STAGE_DROP_CAPS: u8 = 12;
+const STAGE_SECCOMP: u8 = 13;
+const STAGE_SHELL_FORK: u8 = 14;
+const STAGE_SETGID: u8 = 15;
+const STAGE_SETUID: u8 = 16;
 
 fn stage_label(stage: u8) -> &'static str {
     match stage {
@@ -77,6 +87,7 @@ fn stage_label(stage: u8) -> &'static str {
         STAGE_NS_NET => "join net namespace",
         STAGE_NS_UTS => "join uts namespace",
         STAGE_NS_IPC => "join ipc namespace",
+        STAGE_NS_PID => "join pid namespace",
         STAGE_ROOT => "root into replica filesystem",
         STAGE_CTTY => "set controlling terminal",
         STAGE_EXEC => "exec console shell",
@@ -84,6 +95,9 @@ fn stage_label(stage: u8) -> &'static str {
         STAGE_NO_NEW_PRIVS => "set no_new_privs",
         STAGE_DROP_CAPS => "drop capability bounding set",
         STAGE_SECCOMP => "install seccomp filter",
+        STAGE_SHELL_FORK => "fork console shell in pid namespace",
+        STAGE_SETGID => "set mapped root gid",
+        STAGE_SETUID => "set mapped root uid",
         _ => "unknown console launch stage",
     }
 }
@@ -107,7 +121,7 @@ pub fn read_process_start_time(pid: u32) -> Option<u64> {
 pub fn spawn_console_process(
     config: &ConsoleLaunchConfig,
     slave: OwnedFd,
-) -> Result<u32, SyscallError> {
+) -> Result<ConsoleProcess, SyscallError> {
     validate_console_config(config)?;
 
     // --- Parent-side allocation (before fork; child must not allocate) ------
@@ -150,11 +164,18 @@ pub fn spawn_console_process(
     }
     let read_fd = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
     let write_fd = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
+    let mut shell_pid_pipe = [0_i32; 2];
+    if unsafe { libc::pipe2(shell_pid_pipe.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
+        return Err(SyscallError::Io(std::io::Error::last_os_error()));
+    }
+    let shell_pid_read = unsafe { OwnedFd::from_raw_fd(shell_pid_pipe[0]) };
+    let shell_pid_write = unsafe { OwnedFd::from_raw_fd(shell_pid_pipe[1]) };
 
     let ns_raw: Vec<(u8, RawFd)> = ns_fds.iter().map(|(s, fd)| (*s, fd.as_raw_fd())).collect();
     let root_raw = root_fd.as_raw_fd();
     let slave_raw = slave.as_raw_fd();
     let write_raw = write_fd.as_raw_fd();
+    let shell_pid_write_raw = shell_pid_write.as_raw_fd();
 
     let pid = unsafe { libc::fork() };
     if pid < 0 {
@@ -168,6 +189,7 @@ pub fn spawn_console_process(
                 root_raw,
                 slave_raw,
                 write_raw,
+                shell_pid_write_raw,
                 config.target_pid,
                 target_start_time,
                 &hardening,
@@ -182,32 +204,45 @@ pub fn spawn_console_process(
     // Parent: drop everything the child owns now, then wait for its outcome.
     drop(slave);
     drop(write_fd);
+    drop(shell_pid_write);
     drop(ns_fds);
     drop(root_fd);
-    let child_pid = pid as u32;
+    let supervisor_pid = pid as u32;
+    let shell_pid = read_shell_pid(shell_pid_read).unwrap_or(0);
 
     match read_child_outcome(read_fd) {
         ChildOutcome::Exec => {
+            if shell_pid == 0 {
+                let _ = crate::syscall::signal::wait(supervisor_pid);
+                return Err(SyscallError::ChildSetup {
+                    stage: "console shell pid was not reported",
+                });
+            }
             // The shell is running; place it in the replica's cgroup from the
             // host mount namespace (best-effort — accounting, not correctness).
-            if let Err(error) = attach_pid_to_cgroup(child_pid, &config.cgroup_path) {
-                tracing::warn!(
-                    pid = child_pid,
-                    cgroup = %config.cgroup_path.display(),
-                    ?error,
-                    "console: failed to attach shell to replica cgroup"
-                );
+            for pid in [supervisor_pid, shell_pid] {
+                if let Err(error) = attach_pid_to_cgroup(pid, &config.cgroup_path) {
+                    tracing::warn!(
+                        pid,
+                        cgroup = %config.cgroup_path.display(),
+                        ?error,
+                        "console: failed to attach process to replica cgroup"
+                    );
+                }
             }
-            Ok(child_pid)
+            Ok(ConsoleProcess {
+                supervisor_pid,
+                shell_pid,
+            })
         }
         ChildOutcome::Failed(stage) => {
-            let _ = crate::syscall::signal::wait(child_pid);
+            let _ = crate::syscall::signal::wait(supervisor_pid);
             Err(SyscallError::ChildSetup {
                 stage: stage_label(stage),
             })
         }
         ChildOutcome::Unknown => {
-            let _ = crate::syscall::signal::wait(child_pid);
+            let _ = crate::syscall::signal::wait(supervisor_pid);
             Err(SyscallError::ChildSetup {
                 stage: "console child failed before exec",
             })
@@ -229,6 +264,14 @@ fn read_child_outcome(read_fd: OwnedFd) -> ChildOutcome {
         Ok(_) => ChildOutcome::Failed(buf[0]),
         Err(_) => ChildOutcome::Unknown,
     }
+}
+
+fn read_shell_pid(read_fd: OwnedFd) -> Option<u32> {
+    let mut file = std::fs::File::from(read_fd);
+    let mut buf = [0_u8; std::mem::size_of::<u32>()];
+    file.read_exact(&mut buf).ok()?;
+    let pid = u32::from_ne_bytes(buf);
+    (pid != 0).then_some(pid)
 }
 
 fn validate_console_config(config: &ConsoleLaunchConfig) -> Result<(), SyscallError> {
@@ -253,19 +296,23 @@ fn validate_console_config(config: &ConsoleLaunchConfig) -> Result<(), SyscallEr
 /// Open `/proc/<pid>/ns/<name>` for each namespace the console joins, paired
 /// with the stage byte to report if its `setns` fails. User namespace first so
 /// the child gains the capabilities needed to join the rest.
-fn open_namespace_fds(pid: u32) -> Result<Vec<(u8, OwnedFd)>, SyscallError> {
-    let names = [
+fn console_namespace_specs() -> &'static [(u8, &'static str)] {
+    &[
         (STAGE_NS_USER, "user"),
         (STAGE_NS_MNT, "mnt"),
         (STAGE_NS_NET, "net"),
         (STAGE_NS_UTS, "uts"),
         (STAGE_NS_IPC, "ipc"),
-    ];
-    let mut fds = Vec::with_capacity(names.len());
-    for (stage, name) in names {
+        (STAGE_NS_PID, "pid"),
+    ]
+}
+
+fn open_namespace_fds(pid: u32) -> Result<Vec<(u8, OwnedFd)>, SyscallError> {
+    let mut fds = Vec::with_capacity(console_namespace_specs().len());
+    for (stage, name) in console_namespace_specs() {
         let file =
             std::fs::File::open(format!("/proc/{pid}/ns/{name}")).map_err(SyscallError::Io)?;
-        fds.push((stage, OwnedFd::from(file)));
+        fds.push((*stage, OwnedFd::from(file)));
     }
     Ok(fds)
 }
@@ -293,6 +340,7 @@ unsafe fn child_exec_console(
     root_fd: RawFd,
     slave_fd: RawFd,
     status_fd: RawFd,
+    shell_pid_fd: RawFd,
     target_pid: u32,
     target_start_time: u64,
     hardening: &Hardening<'_>,
@@ -317,6 +365,33 @@ unsafe fn child_exec_console(
             Some(now) if now == target_start_time => {}
             _ => fail(status_fd, STAGE_PID_REUSE),
         }
+
+        let shell_pid = libc::fork();
+        if shell_pid < 0 {
+            fail(status_fd, STAGE_SHELL_FORK);
+        }
+        if shell_pid > 0 {
+            let bytes = (shell_pid as u32).to_ne_bytes();
+            let _ = libc::write(shell_pid_fd, bytes.as_ptr().cast(), bytes.len());
+            libc::close(shell_pid_fd);
+            libc::close(status_fd);
+            let mut status = 0_i32;
+            loop {
+                if libc::waitpid(shell_pid, &mut status, 0) == shell_pid {
+                    if libc::WIFEXITED(status) {
+                        libc::_exit(libc::WEXITSTATUS(status));
+                    }
+                    if libc::WIFSIGNALED(status) {
+                        libc::_exit(128 + libc::WTERMSIG(status));
+                    }
+                    libc::_exit(127);
+                }
+                if errno() != libc::EINTR {
+                    libc::_exit(127);
+                }
+            }
+        }
+        libc::close(shell_pid_fd);
 
         // Re-root into the replica filesystem (nsenter -r equivalent): fchdir to
         // the pre-opened target root dir fd, then chroot to it.
@@ -356,10 +431,35 @@ unsafe fn child_exec_console(
             fail(status_fd, STAGE_SECCOMP);
         }
 
+        close_inherited_fds(status_fd);
+        if libc::setresgid(0, 0, 0) < 0 {
+            fail(status_fd, STAGE_SETGID);
+        }
+        if libc::setresuid(0, 0, 0) < 0 {
+            fail(status_fd, STAGE_SETUID);
+        }
+
         libc::execve(shell, argv, envp);
         // execve only returns on failure.
         fail(status_fd, STAGE_EXEC);
     }
+}
+
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+}
+
+/// Best-effort fd sweep before exec. Matches the workload launcher policy:
+/// keep stdio and the setup status pipe, close anything else inherited from
+/// the privileged daemon if the kernel supports close_range(2).
+unsafe fn close_inherited_fds(keep: RawFd) {
+    const FIRST: libc::c_uint = 3;
+    let keep = keep as libc::c_uint;
+    if keep > FIRST {
+        let _ = unsafe { libc::syscall(libc::SYS_close_range, FIRST, keep - 1, 0) };
+    }
+    let lo = std::cmp::max(FIRST, keep.saturating_add(1));
+    let _ = unsafe { libc::syscall(libc::SYS_close_range, lo, libc::c_uint::MAX, 0) };
 }
 
 /// Report the failing stage to the parent and terminate the child. Uses only
@@ -437,6 +537,7 @@ mod tests {
             STAGE_NS_NET,
             STAGE_NS_UTS,
             STAGE_NS_IPC,
+            STAGE_NS_PID,
             STAGE_ROOT,
             STAGE_CTTY,
             STAGE_EXEC,
@@ -444,9 +545,34 @@ mod tests {
             STAGE_NO_NEW_PRIVS,
             STAGE_DROP_CAPS,
             STAGE_SECCOMP,
+            STAGE_SHELL_FORK,
+            STAGE_SETGID,
+            STAGE_SETUID,
         ] {
             assert_ne!(stage_label(stage), "unknown console launch stage");
         }
+    }
+
+    #[test]
+    fn console_process_carries_supervisor_and_shell_pids() {
+        let process = ConsoleProcess {
+            supervisor_pid: 10,
+            shell_pid: 11,
+        };
+        assert_eq!(process.supervisor_pid, 10);
+        assert_eq!(process.shell_pid, 11);
+    }
+
+    #[test]
+    fn console_namespace_list_includes_pid_namespace() {
+        let names = console_namespace_specs()
+            .iter()
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>();
+        assert!(
+            names.contains(&"pid"),
+            "console must join pid namespace before forking shell"
+        );
     }
 
     #[test]
