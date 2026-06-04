@@ -47,6 +47,7 @@ impl UsageSource for ScriptedUsage {
             avg_mem_pct: self.mem_pct,
             max_mem_pct: self.mem_pct,
             replica_count: replicas.len() as u32,
+            live_readings: replicas.len() as u32,
         }
     }
 }

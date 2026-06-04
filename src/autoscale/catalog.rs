@@ -34,18 +34,44 @@ impl RepoServiceCatalog {
     /// deployment, that deployment is linked to an artifact, and its project
     /// resolves.
     fn build(&self, svc: &ServiceConfig) -> Option<ManagedService> {
+        // No autoscale policy: this is a plain service, correctly excluded
+        // without comment (the deploy coordinator owns its single replica).
         let policy = svc.autoscale.clone()?;
-        let deployment_id = self
-            .deployments
-            .promoted_deployment(svc.id)
-            .ok()
-            .flatten()?;
-        let artifact = self
+        // Past this point the service IS autoscaled, so any exclusion is a
+        // misconfiguration the operator should be able to see: an autoscaled
+        // service that silently vanishes from the controller reports
+        // replica_count=0 with no explanation.
+        let Some(deployment_id) = self.deployments.promoted_deployment(svc.id).ok().flatten() else {
+            tracing::warn!(
+                service_id = %svc.id,
+                service = %svc.name,
+                "autoscaled service excluded from controller: no promoted deployment"
+            );
+            return None;
+        };
+        let Some(artifact) = self
             .deployments
             .get_deployment_artifact(deployment_id)
             .ok()
-            .flatten()?;
-        let project = self.projects.get_project(svc.project_id).ok().flatten()?;
+            .flatten()
+        else {
+            tracing::warn!(
+                service_id = %svc.id,
+                service = %svc.name,
+                deployment_id = %deployment_id,
+                "autoscaled service excluded from controller: promoted deployment has no linked artifact"
+            );
+            return None;
+        };
+        let Some(project) = self.projects.get_project(svc.project_id).ok().flatten() else {
+            tracing::warn!(
+                service_id = %svc.id,
+                service = %svc.name,
+                project_id = %svc.project_id,
+                "autoscaled service excluded from controller: project not found"
+            );
+            return None;
+        };
         let limits = svc.effective_limits(&project);
         let env = svc.effective_env(&project).into_iter().collect();
         Some(ManagedService {

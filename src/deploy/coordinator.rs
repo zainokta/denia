@@ -690,7 +690,10 @@ where
 /// Resolve `(full_image_ref, auth)` for an external-image deploy. Authenticated
 /// images must reference a registry row, which carries `auth_kind` plus an
 /// optional encrypted credential ref; legacy inline credentials fail closed.
-async fn resolve_external_auth(
+///
+/// Shared with the job executor (ADR-010), which runs the same external-image
+/// sources one-shot and needs identical auth resolution.
+pub(crate) async fn resolve_external_auth(
     repos: &DeploymentRepos,
     source: &crate::domain::ExternalImageSource,
     _project_id: Uuid,
