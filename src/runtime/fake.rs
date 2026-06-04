@@ -110,6 +110,7 @@ impl Runtime for FakeRuntime {
             child_pid: 4321,
             cgroup_path: "/sys/fs/cgroup/denia/fake".into(),
             pty: Box::new(server),
+            reaper: None,
         })
     }
 }

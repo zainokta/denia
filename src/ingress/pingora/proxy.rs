@@ -108,6 +108,9 @@ pub struct RequestCtx {
     pub service_name: Option<String>,
     /// When set, `upstream_peer` proxies to the control backend (challenge).
     pub to_control_backend: bool,
+    /// Wall-clock start of the request, set at the first proxy phase, used to
+    /// populate `AccessEntry.duration_ms` in `logging()` (review 07 LOW).
+    pub started_at: Option<std::time::Instant>,
 }
 
 /// The Denia L7 proxy. Shares `Arc<IngressState>` with the control plane.
@@ -236,6 +239,9 @@ impl ProxyHttp for DeniaProxy {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<bool> {
+        // First phase for every request (both :80 and :443) — stamp the start so
+        // `logging()` can compute the served duration.
+        ctx.started_at = Some(std::time::Instant::now());
         if !self.is_http {
             // :443 — TLS terminated by the listener; route in upstream_peer.
             return Ok(false);
@@ -361,6 +367,9 @@ impl ProxyHttp for DeniaProxy {
         let Some(service_name) = ctx.service_name.clone() else {
             return;
         };
+        let duration_ms = ctx
+            .started_at
+            .map(|start| start.elapsed().as_millis() as u64);
         let entry = build_access_entry(
             service_name,
             session.req_header().method.as_str(),
@@ -370,6 +379,7 @@ impl ProxyHttp for DeniaProxy {
                 .map(|r| r.status.as_u16())
                 .unwrap_or(0),
             Some(session.body_bytes_sent() as u64),
+            duration_ms,
         );
         self.state.access_log().append(entry);
     }
@@ -380,13 +390,15 @@ impl ProxyHttp for DeniaProxy {
 /// Extracted as a free function so access-log fidelity (ADR-009: status, bytes,
 /// host/path, method) is unit-tested without a live `Session`. The path is run
 /// through [`sanitize_path`] so UUIDs / tokens are redacted (no secret-bearing
-/// path segments are stored), and no request headers are recorded.
+/// path segments are stored), and no request headers are recorded. `duration_ms`
+/// is the served latency (review 07 LOW: the field was previously always `None`).
 pub fn build_access_entry(
     service_name: String,
     method: &str,
     path: &str,
     status: u16,
     bytes: Option<u64>,
+    duration_ms: Option<u64>,
 ) -> AccessEntry {
     AccessEntry {
         service_name,
@@ -394,7 +406,7 @@ pub fn build_access_entry(
         path: sanitize_path(path),
         status,
         bytes,
-        duration_ms: None,
+        duration_ms,
         recorded_at: chrono::Utc::now().to_rfc3339(),
     }
 }
@@ -498,12 +510,14 @@ mod classify_tests {
             "/users/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
             200,
             Some(1234),
+            Some(42),
         );
         assert_eq!(entry.service_name, "api");
         assert_eq!(entry.method, "GET");
         assert_eq!(entry.path, "/users/{id}");
         assert_eq!(entry.status, 200);
         assert_eq!(entry.bytes, Some(1234));
+        assert_eq!(entry.duration_ms, Some(42));
         assert!(!entry.recorded_at.is_empty());
     }
 

@@ -29,15 +29,31 @@ use std::io::Read as _;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 
-use crate::syscall::SyscallError;
+use crate::syscall::seccomp::SockFilter;
+use crate::syscall::{SyscallError, caps, seccomp};
 
 #[derive(Debug, Clone)]
 pub struct ConsoleLaunchConfig {
     pub target_pid: u32,
+    /// Field 22 (`starttime`, clock ticks since boot) from `/proc/<pid>/stat`,
+    /// captured when the console request resolved the live replica. Re-checked
+    /// inside the child after the namespace fds are opened to defeat the
+    /// pid-reuse TOCTOU window: a recycled pid will have a different starttime,
+    /// so the console aborts rather than joining an unrelated process. See
+    /// ADR-033 / review 07 (PID-reuse TOCTOU on setns).
+    pub target_start_time: u64,
     pub cgroup_path: PathBuf,
     pub workdir: String,
     pub env: Vec<(String, String)>,
     pub shell: String,
+    /// Re-apply the workload's privilege floor to the interactive shell before
+    /// `execve` (ADR-005 / ADR-033). The shell already inherits the replica's
+    /// user namespace (capless vs. host); these add the per-launch
+    /// `no_new_privs`, capability-bounding-set drop, and seccomp denylist the
+    /// workload itself runs under so the console is not a softer surface.
+    pub no_new_privs: bool,
+    pub drop_bounding_caps: bool,
+    pub seccomp: bool,
 }
 
 /// One stage byte per child setup step, written to the status pipe on failure.
@@ -49,6 +65,10 @@ const STAGE_NS_IPC: u8 = 5;
 const STAGE_ROOT: u8 = 6;
 const STAGE_CTTY: u8 = 7;
 const STAGE_EXEC: u8 = 8;
+const STAGE_PID_REUSE: u8 = 9;
+const STAGE_NO_NEW_PRIVS: u8 = 10;
+const STAGE_DROP_CAPS: u8 = 11;
+const STAGE_SECCOMP: u8 = 12;
 
 fn stage_label(stage: u8) -> &'static str {
     match stage {
@@ -60,8 +80,25 @@ fn stage_label(stage: u8) -> &'static str {
         STAGE_ROOT => "root into replica filesystem",
         STAGE_CTTY => "set controlling terminal",
         STAGE_EXEC => "exec console shell",
+        STAGE_PID_REUSE => "verify target replica identity (pid reuse)",
+        STAGE_NO_NEW_PRIVS => "set no_new_privs",
+        STAGE_DROP_CAPS => "drop capability bounding set",
+        STAGE_SECCOMP => "install seccomp filter",
         _ => "unknown console launch stage",
     }
+}
+
+/// Read field 22 (`starttime`) from `/proc/<pid>/stat`. Used both when the
+/// console request resolves the replica and again (under the namespace fds)
+/// inside the child to confirm the pid was not recycled. Returns `None` if the
+/// process is gone or the field is unparseable.
+pub fn read_process_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The comm field (2nd) may contain spaces/parens, so split after the last
+    // ')' before counting the space-separated fields. starttime is field 22,
+    // i.e. index 19 in the post-comm remainder (fields 3.. = pid is 1, comm 2).
+    let after_comm = stat.rsplit_once(')')?.1;
+    after_comm.split_whitespace().nth(19)?.parse::<u64>().ok()
 }
 
 /// Fork a console child against `config`, handing it the PTY `slave` fd. Returns
@@ -91,6 +128,19 @@ pub fn spawn_console_process(
         .collect::<Result<Vec<_>, _>>()?;
     let mut env_ptrs = env.iter().map(|value| value.as_ptr()).collect::<Vec<_>>();
     env_ptrs.push(std::ptr::null());
+    // Compile the seccomp denylist BEFORE fork so the child only issues the two
+    // `prctl` syscalls (no allocation post-fork). Empty when seccomp is off.
+    let seccomp_program: Vec<SockFilter> = if config.seccomp {
+        seccomp::build_filter_program()
+    } else {
+        Vec::new()
+    };
+    let hardening = Hardening {
+        no_new_privs: config.no_new_privs,
+        drop_bounding_caps: config.drop_bounding_caps,
+        seccomp_program: &seccomp_program,
+    };
+    let target_start_time = config.target_start_time;
 
     // Close-on-exec status pipe: child writes a stage byte on failure; on a
     // successful execve the write end closes and the parent reads EOF.
@@ -118,6 +168,9 @@ pub fn spawn_console_process(
                 root_raw,
                 slave_raw,
                 write_raw,
+                config.target_pid,
+                target_start_time,
+                &hardening,
                 workdir.as_ptr(),
                 shell.as_ptr(),
                 argv.as_ptr(),
@@ -224,12 +277,25 @@ fn open_target_root(pid: u32) -> Result<OwnedFd, SyscallError> {
     Ok(OwnedFd::from(file))
 }
 
+/// Privilege-floor steps the console child applies right before `execve` so the
+/// interactive shell matches the workload's posture (ADR-005 / ADR-033). The
+/// seccomp program is compiled in the parent (`build_filter_program`); the child
+/// only issues `prctl`.
+struct Hardening<'a> {
+    no_new_privs: bool,
+    drop_bounding_caps: bool,
+    seccomp_program: &'a [SockFilter],
+}
+
 #[expect(clippy::too_many_arguments)]
 unsafe fn child_exec_console(
     ns_fds: &[(u8, RawFd)],
     root_fd: RawFd,
     slave_fd: RawFd,
     status_fd: RawFd,
+    target_pid: u32,
+    target_start_time: u64,
+    hardening: &Hardening<'_>,
     workdir: *const libc::c_char,
     shell: *const libc::c_char,
     argv: *const *const libc::c_char,
@@ -240,6 +306,16 @@ unsafe fn child_exec_console(
             if libc::setns(*fd, 0) == -1 {
                 fail(status_fd, *stage);
             }
+        }
+
+        // PID-reuse guard: the ns fds above were opened by the parent against
+        // `target_pid` at request time. We are now joined to whatever process
+        // currently holds that pid. Re-read its starttime and bail if the pid
+        // was recycled onto a different process between resolve and fork. The
+        // read goes through the host /proc (we have not chrooted yet).
+        match read_process_start_time(target_pid) {
+            Some(now) if now == target_start_time => {}
+            _ => fail(status_fd, STAGE_PID_REUSE),
         }
 
         // Re-root into the replica filesystem (nsenter -r equivalent): fchdir to
@@ -262,6 +338,22 @@ unsafe fn child_exec_console(
             if libc::dup2(slave_fd, fd) == -1 {
                 fail(status_fd, STAGE_CTTY);
             }
+        }
+
+        // Re-apply the workload's per-launch privilege floor before execve, in
+        // the same order the service launcher uses (no_new_privs -> bounding-set
+        // drop -> seccomp). caps::* mirror the workload child path in ns.rs;
+        // seccomp uses the parent-compiled program so the child only prctls.
+        if hardening.no_new_privs && !caps::try_set_no_new_privs() {
+            fail(status_fd, STAGE_NO_NEW_PRIVS);
+        }
+        if hardening.drop_bounding_caps && !caps::try_drop_bounding_caps() {
+            fail(status_fd, STAGE_DROP_CAPS);
+        }
+        if !hardening.seccomp_program.is_empty()
+            && seccomp::apply_program(hardening.seccomp_program).is_err()
+        {
+            fail(status_fd, STAGE_SECCOMP);
         }
 
         libc::execve(shell, argv, envp);
@@ -300,10 +392,14 @@ mod tests {
     fn base_config() -> ConsoleLaunchConfig {
         ConsoleLaunchConfig {
             target_pid: 42,
+            target_start_time: 123456,
             cgroup_path: PathBuf::from("/sys/fs/cgroup/denia/x"),
             workdir: "/".to_string(),
             env: Vec::new(),
             shell: "/bin/sh".to_string(),
+            no_new_privs: true,
+            drop_bounding_caps: true,
+            seccomp: true,
         }
     }
 
@@ -344,8 +440,44 @@ mod tests {
             STAGE_ROOT,
             STAGE_CTTY,
             STAGE_EXEC,
+            STAGE_PID_REUSE,
+            STAGE_NO_NEW_PRIVS,
+            STAGE_DROP_CAPS,
+            STAGE_SECCOMP,
         ] {
             assert_ne!(stage_label(stage), "unknown console launch stage");
         }
+    }
+
+    #[test]
+    fn read_process_start_time_returns_value_for_self() {
+        // The current process always has a parseable starttime; the value is
+        // opaque but must be present and stable across two reads.
+        let pid = std::process::id();
+        let first = read_process_start_time(pid).expect("self starttime");
+        let second = read_process_start_time(pid).expect("self starttime again");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn read_process_start_time_handles_comm_with_spaces_and_parens() {
+        // The 2nd field (comm) can contain spaces and parens; the parser must
+        // split after the LAST ')' so field 22 (starttime) is read correctly.
+        // Synthetic stat line: pid=7 comm="(weird ) name)" then fields 3..
+        // arranged so the 22nd field (starttime) is 998877.
+        let mut fields = String::from("7 (weird ) name) ");
+        // fields 3..=21 (19 values) are placeholders, field 22 = starttime.
+        for i in 3..=21 {
+            fields.push_str(&format!("{i} "));
+        }
+        fields.push_str("998877 0 0\n");
+        let after_comm = fields.rsplit_once(')').unwrap().1;
+        let starttime: u64 = after_comm
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(starttime, 998877);
     }
 }
