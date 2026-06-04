@@ -68,6 +68,11 @@ pub struct AppState {
     /// Garbage collector handle used by both the background loop and the
     /// `POST /v1/oci/cache/gc` endpoint. Cloneable: shared status state.
     pub oci_cache_gc: Option<LayerCacheGc>,
+    /// Sender onto the job executor's run channel. The daemon injects this after
+    /// building the scheduler so `POST /v1/jobs/{id}/run` can enqueue a manual
+    /// run for execution (ADR-010). `None` in tests / contexts without a running
+    /// executor — the API still persists a Pending run and returns 202.
+    pub job_enqueue: Option<tokio::sync::mpsc::UnboundedSender<crate::domain::JobRun>>,
 }
 
 impl AppState {
@@ -254,7 +259,18 @@ impl AppState {
             autoscaler: None,
             oci_cache: None,
             oci_cache_gc: None,
+            job_enqueue: None,
         }
+    }
+
+    /// Inject the job-executor run-channel sender (daemon boot). Lets
+    /// `POST /v1/jobs/{id}/run` hand a manually-triggered run to the executor.
+    pub fn with_job_enqueue(
+        mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<crate::domain::JobRun>,
+    ) -> Self {
+        self.job_enqueue = Some(sender);
+        self
     }
 
     pub fn with_domain_verifier(
@@ -358,6 +374,7 @@ impl AppStateBuilder {
             autoscaler: None,
             oci_cache: None,
             oci_cache_gc: None,
+            job_enqueue: None,
         }
     }
 }

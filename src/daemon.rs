@@ -15,7 +15,9 @@ use crate::{
         load_certs_from_disk, persist_cert, run_server, select_renewals,
     },
     runtime::Runtime,
-    scheduler::{Scheduler, run_until_shutdown},
+    scheduler::{
+        JobExecutor, RuntimeJobRunRequestResolver, Scheduler, run_executor, run_until_shutdown,
+    },
     state::SqliteStore,
 };
 
@@ -98,10 +100,37 @@ pub async fn run() -> anyhow::Result<()> {
         Err(error) => tracing::warn!(?error, "orphan sweep failed; continuing boot"),
     }
 
-    let (scheduler, _enqueue_rx) = Scheduler::new(store.clone());
+    // --- Scheduler + job executor (ADR-010) --------------------------------
+    //
+    // The scheduler ticks the cron cursor and emits Pending runs onto a channel;
+    // the executor drains that channel and drives each run through
+    // `Runtime::run_to_completion` with retry. The same channel sender is also
+    // handed to the API so `POST /v1/jobs/{id}/run` enqueues manual runs.
+    let (scheduler, enqueue_rx) = Scheduler::new(store.clone());
     let scheduler = Arc::new(scheduler);
+    let enqueue_tx = scheduler.manual_sender();
+    let state = state.with_job_enqueue(enqueue_tx.clone());
+
+    let job_resolver = Arc::new(RuntimeJobRunRequestResolver::new(
+        config.clone(),
+        state.deployment_repos(),
+        state.projects.clone(),
+        state.command_runner.clone(),
+        state.oci_cache.clone(),
+    ));
+    let job_executor = Arc::new(JobExecutor::new(
+        store.clone(),
+        state.runtime.clone(),
+        job_resolver,
+    ));
+    let executor_task = tokio::spawn(run_executor(job_executor, enqueue_rx));
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let scheduler_task = tokio::spawn(run_until_shutdown(scheduler.clone(), shutdown_rx));
+    let scheduler_task = tokio::spawn(run_until_shutdown(
+        scheduler.clone(),
+        enqueue_tx,
+        shutdown_rx,
+    ));
 
     // --- In-process ACME (instant-acme, HTTP-01) ---------------------------
     //
@@ -313,6 +342,12 @@ pub async fn run() -> anyhow::Result<()> {
 
     let _ = shutdown_tx.send(());
     let _ = scheduler_task.await;
+    // Drop the last scheduler handle so its `manual_tx` (and thus the executor's
+    // run channel) closes; the router already dropped its sender clone when
+    // `axum::serve` returned. With every sender gone, `run_executor` finishes
+    // draining any in-flight run and returns.
+    drop(scheduler);
+    let _ = executor_task.await;
     // Tell the Pingora server to stop and join its thread (mirrors the old
     // traefik_shutdown send point).
     let _ = pingora_shutdown_tx.send(true);
