@@ -171,6 +171,11 @@ pub async fn run() -> anyhow::Result<()> {
     // an interval. Both run on Denia's runtime (issuance is async/out-of-band;
     // selection is the sync TlsAccept callback). Secrets discipline: never log
     // key authorizations, private keys, or the ACME account key.
+    // On-demand issuance channel (review HIGH): the verify + deploy-completion
+    // paths push validated hostnames here so the ACME task issues within seconds
+    // instead of waiting for the next 12h renewal scan. Taken out of `AppState`
+    // exactly once (single-consumer); only used when an ACME driver exists.
+    let cert_issue_rx = state.take_cert_issue_rx();
     let acme_task = acme_driver.as_ref().map(|driver| {
         let driver = driver.clone();
         let ingress = state.ingress.clone();
@@ -179,6 +184,11 @@ pub async fn run() -> anyhow::Result<()> {
         let domains = state.domains.clone();
         let control_domain = config.control_domain.clone();
         let control_tls = config.control_tls;
+        // The receiver is single-consumer and only drained here. If it was
+        // already taken (it never is in the daemon path) fall back to a dead
+        // channel so the select! arm simply never fires.
+        let mut issue_rx = cert_issue_rx
+            .unwrap_or_else(|| crate::ingress::pingora::cert_issue::channel().1);
         let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
         let handle = tokio::spawn(async move {
             // Initial issuance pass for verified TLS hostnames lacking a cert.
@@ -189,10 +199,28 @@ pub async fn run() -> anyhow::Result<()> {
                     reissue(&driver, &ingress, &tls_dir, cd).await;
                 }
             }
+            // Once every sender drops, `recv()` returns `None` forever; gate the
+            // on-demand arm off so it cannot busy-loop the select! after that.
+            let mut on_demand_open = true;
             let mut ticker = tokio::time::interval(Duration::from_secs(12 * 60 * 60));
             loop {
                 tokio::select! {
                     _ = &mut rx => break,
+                    // On-demand request: issue the hostname now if it does not
+                    // already have a cert in the live store. `reissue` validates
+                    // the domain again before it becomes an ACME identifier.
+                    maybe_host = issue_rx.recv(), if on_demand_open => {
+                        let Some(hostname) = maybe_host else {
+                            // All senders dropped (shutdown in progress); disable
+                            // this arm and keep serving renewals until told to exit.
+                            on_demand_open = false;
+                            continue;
+                        };
+                        if ingress.certs().get(&hostname).is_some() {
+                            continue;
+                        }
+                        reissue(&driver, &ingress, &tls_dir, &hostname).await;
+                    }
                     _ = ticker.tick() => {
                         let due = select_renewals(&ingress.certs(), RENEWAL_WINDOW_DAYS);
                         for domain in due {

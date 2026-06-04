@@ -210,6 +210,14 @@ async fn verify_service_domain(
                 None,
             )?;
             crate::deploy::apply_routes(&state)?;
+            // On-demand TLS issuance (review HIGH): a freshly verified domain on
+            // a tls_enabled service must get a cert immediately so `:443` can
+            // serve it within seconds, not after the next 12h renewal scan. The
+            // hostname is already validated/lowercased by `validate_hostname`;
+            // the ACME task re-validates before issuing.
+            if svc.tls_enabled {
+                crate::ingress::pingora::request_issue(&state.cert_issue_tx, d.hostname.clone());
+            }
             state.domains.get_service_domain(d.id)?.unwrap()
         }
         Err(e) => {

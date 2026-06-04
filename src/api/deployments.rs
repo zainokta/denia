@@ -127,6 +127,13 @@ async fn create_deployment(
         }
         _ => None,
     };
+    // On-demand TLS issuance (review HIGH): first deploy of a tls_enabled
+    // service with already-verified domains must trigger cert issuance so
+    // `:443` serves immediately, not after the next 12h renewal scan. Capture
+    // the request channel + domains repo for the spawned task.
+    let cert_issue_tx = state.cert_issue_tx.clone();
+    let domains_repo = state.domains.clone();
+    let tls_enabled = service.tls_enabled;
 
     tokio::spawn(async move {
         let deps = crate::deploy::coordinator::RunDeps {
@@ -141,6 +148,25 @@ async fn create_deployment(
         let run = coordinator_for_task
             .run_with_deps(deployment_id, svc, req, &log, deps)
             .await;
+        // On-demand TLS issuance for a successful deploy of a tls_enabled
+        // service: request a cert for each already-verified hostname that the
+        // deploy just made routable. The ACME task skips any hostname that
+        // already has a cert, so this is idempotent across redeploys.
+        if run.is_ok() && tls_enabled {
+            match domains_repo.list_verified_hostnames(service_id) {
+                Ok(hostnames) => {
+                    for hostname in hostnames {
+                        crate::ingress::pingora::request_issue(&cert_issue_tx, hostname);
+                    }
+                }
+                Err(error) => {
+                    let _ = log.write(
+                        "TLS",
+                        &format!("could not list verified hostnames for issuance: {error}"),
+                    );
+                }
+            }
+        }
         // Autoscaled service: hand replica ownership to the controller so it
         // launches `min` replicas (each health-gated) or none for min==0 (woken
         // by the activator). Without this, the deploy promotes a routable
@@ -158,8 +184,10 @@ async fn create_deployment(
         // Best-effort remove the staged upload directory after the deploy
         // pipeline finishes (success OR failure). The directory is no longer
         // needed once the build context has been consumed by `run_with_deps`.
+        // Use `tokio::fs` so this end-of-task cleanup never blocks a runtime
+        // worker (review LOW — sync I/O on the async deploy task).
         if let Some(dir) = upload_cleanup {
-            let _ = std::fs::remove_dir_all(&dir);
+            let _ = tokio::fs::remove_dir_all(&dir).await;
         }
     });
 
