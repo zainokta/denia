@@ -20,7 +20,7 @@ use super::common::{platform, privilege, systemd};
 /// Pinned production minisign public key (base64 — the second line of the `.pub` file).
 /// The matching secret key signs each release's `SHA256SUMS` in CI and never
 /// leaves CI.
-const MINISIGN_PUBKEY: &str = "RWTqDcuXpreRKf4ZLYnrRCCZuqECWc3J8+kYC2QIZmmubcLthW4uyMxa";
+const MINISIGN_PUBKEY: &str = "RWTjef0vJl3g2lcJz4JSOlDB64pmYBRYNHxmShlHtCbbjcm4aMIj+vkP";
 
 const REPO: &str = "zainokta/denia";
 const TARGET_BIN: &str = "/usr/local/bin/denia";
