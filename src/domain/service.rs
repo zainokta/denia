@@ -214,6 +214,65 @@ pub struct ServiceConfig {
     pub tls_enabled: bool,
     #[serde(default)]
     pub autoscale: Option<AutoscalePolicy>,
+    #[serde(default)]
+    pub endpoints: Vec<ServiceEndpoint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceEndpointProtocol {
+    Http,
+    Tcp,
+    Udp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceEndpoint {
+    pub name: String,
+    pub protocol: ServiceEndpointProtocol,
+    pub internal_port: u16,
+    #[serde(default)]
+    pub public_port: Option<u16>,
+}
+
+impl ServiceEndpoint {
+    pub fn http(name: impl Into<String>, internal_port: u16) -> Self {
+        Self {
+            name: name.into(),
+            protocol: ServiceEndpointProtocol::Http,
+            internal_port,
+            public_port: None,
+        }
+    }
+
+    pub fn tcp(name: impl Into<String>, internal_port: u16) -> Self {
+        Self {
+            name: name.into(),
+            protocol: ServiceEndpointProtocol::Tcp,
+            internal_port,
+            public_port: None,
+        }
+    }
+
+    pub fn udp(name: impl Into<String>, internal_port: u16) -> Self {
+        Self {
+            name: name.into(),
+            protocol: ServiceEndpointProtocol::Udp,
+            internal_port,
+            public_port: None,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        validate_endpoint_name(&self.name)?;
+        if self.internal_port == 0 || self.public_port == Some(0) {
+            return Err(DomainError::InvalidEndpointPort);
+        }
+        if self.protocol == ServiceEndpointProtocol::Http && self.public_port.is_some() {
+            return Err(DomainError::HttpEndpointPublicPort);
+        }
+        Ok(())
+    }
 }
 
 impl ServiceConfig {
@@ -241,6 +300,7 @@ impl ServiceConfig {
             env,
             tls_enabled: false,
             autoscale: None,
+            endpoints: Vec::new(),
         };
         config.validate()?;
         Ok(config)
@@ -268,7 +328,17 @@ impl ServiceConfig {
         if let Some(policy) = &self.autoscale {
             policy.validate()?;
         }
+        for endpoint in &self.endpoints {
+            endpoint.validate()?;
+        }
         Ok(())
+    }
+
+    pub fn effective_endpoints(&self) -> Vec<ServiceEndpoint> {
+        if self.endpoints.is_empty() {
+            return vec![ServiceEndpoint::http("http", self.internal_port)];
+        }
+        self.endpoints.clone()
     }
 
     /// Replace every env *value* with a redaction marker, keeping keys so the
@@ -292,6 +362,19 @@ impl ServiceConfig {
             .or_else(|| project.default_resource_limits.clone())
             .unwrap_or_default()
     }
+}
+
+fn validate_endpoint_name(name: &str) -> Result<(), DomainError> {
+    if name.trim().is_empty() {
+        return Err(DomainError::EmptyEndpointName);
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(DomainError::InvalidEndpointName(name.to_string()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -349,6 +432,79 @@ mod tests {
     }
 
     #[test]
+    fn effective_endpoints_maps_legacy_port_to_default_http_endpoint() {
+        let cfg = ServiceConfig::new(
+            Uuid::now_v7(),
+            "web",
+            vec![],
+            ServiceSource::ExternalImage(ExternalImageSource {
+                image: "ghcr.io/acme/web:latest".to_string(),
+                credential: None,
+                registry_id: None,
+                image_ref: None,
+            }),
+            8080,
+            HealthCheck::new("/health", 5),
+            None,
+            vec![],
+        )
+        .expect("service");
+
+        assert_eq!(
+            cfg.effective_endpoints(),
+            vec![ServiceEndpoint::http("http", 8080)]
+        );
+    }
+
+    #[test]
+    fn validate_accepts_tcp_and_udp_endpoints_without_public_ports() {
+        let mut cfg = ServiceConfig::new(
+            Uuid::now_v7(),
+            "game",
+            vec![],
+            ServiceSource::ExternalImage(ExternalImageSource {
+                image: "ghcr.io/acme/game:latest".to_string(),
+                credential: None,
+                registry_id: None,
+                image_ref: None,
+            }),
+            7777,
+            HealthCheck::new("/health", 5),
+            None,
+            vec![],
+        )
+        .expect("service");
+        cfg.endpoints = vec![
+            ServiceEndpoint::tcp("query", 27015),
+            ServiceEndpoint::udp("gameplay", 7777),
+        ];
+
+        cfg.validate().expect("tcp/udp endpoints are valid");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_endpoint_shape() {
+        let mut endpoint = ServiceEndpoint::tcp("bad name", 7777);
+        assert!(matches!(
+            endpoint.validate(),
+            Err(DomainError::InvalidEndpointName(_))
+        ));
+
+        endpoint = ServiceEndpoint::udp("gameplay", 0);
+        assert!(matches!(
+            endpoint.validate(),
+            Err(DomainError::InvalidEndpointPort)
+        ));
+
+        endpoint = ServiceEndpoint::http("http", 8080);
+        endpoint.public_port = Some(8080);
+        assert!(matches!(
+            endpoint.validate(),
+            Err(DomainError::HttpEndpointPublicPort)
+        ));
+    }
+
+    #[test]
     fn validate_rejects_absolute_and_parent_git_build_paths() {
         let mk = |ctx: &str, dockerfile: &str| ServiceConfig {
             id: Uuid::now_v7(),
@@ -368,6 +524,7 @@ mod tests {
             env: Vec::new(),
             tls_enabled: false,
             autoscale: None,
+            endpoints: Vec::new(),
         };
         assert!(matches!(
             mk("/var/lib/denia", "Dockerfile").validate().unwrap_err(),
