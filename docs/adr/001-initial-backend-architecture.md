@@ -58,6 +58,10 @@ Deployments are health-gated. Denia starts the new deployment, waits for the exp
 
 The first implementation branch establishes the deploy orchestration, state, artifact, secret, ingress, log, metric, and runtime interfaces. The dangerous Linux runtime internals are gated behind ignored privileged tests and must be implemented in a dedicated follow-up branch with root/cgroup verification.
 
+### Synchronous SQLite On The Async Runtime
+
+The control-plane state lives behind a single `Arc<Mutex<rusqlite::Connection>>`, and the repo trait methods are synchronous. They are called directly from `axum` async handlers without `tokio::task::spawn_blocking`. This is a deliberate single-node tradeoff: query volume is light, the work is local-disk SQLite with `busy_timeout = 5000`, and the one shared connection already serializes all access, so there is no concurrency to recover by offloading. Genuinely long-running or externally contended work that touches the store — registry/OCI garbage-collection sweeps, upload staging sweeps, namespaced process spawns — already runs under `spawn_blocking` (see `src/registry/gc.rs`, `src/oci/cache/gc.rs`, `src/api/uploads.rs`, `src/runtime/linux.rs`). Boot-time `run_migrations` runs before the runtime serves requests. If the control plane ever serves concurrent write-heavy load, the migration path is to move the repo trait to async (or an interact-style pool) and wrap the hot reads/writes in `spawn_blocking`; until then the simplicity is preferred. The reasoning is mirrored in the module docs of `src/repo/sqlite/pool.rs`.
+
 ## Alternatives Considered
 
 - **Docker runtime**: Rejected because Denia's core requirement is to avoid Docker for running workloads.
