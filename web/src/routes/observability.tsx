@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Activity, Boxes } from 'lucide-react'
 import { ApiClient } from '#/effect/api-client'
 import { runQuery } from '#/effect/runtime'
-import type { NodeSnapshot } from '#/effect/schema'
+import type { NodeSnapshot, WorkloadView } from '#/effect/schema'
 import { BarMeter, RadialGauge, Sparkline } from '#/components/Charts'
 import { StatusBadge } from '#/components/StatusBadge'
 import { EmptyState } from '#/components/EmptyState'
@@ -13,6 +13,7 @@ import { SkeletonRows } from '#/components/Skeleton'
 import { ErrorPanel, errorMessage } from '#/components/ErrorPanel'
 import { Num } from '#/components/Num'
 import type { SemState } from '#/lib/status'
+import { cpuBusyTotal, cpuPercentDelta } from '#/lib/metrics'
 import { formatBytes, formatClock, formatPercent } from '#/lib/format'
 
 const getNodeMetrics = Effect.gen(function* () {
@@ -37,21 +38,10 @@ function usageState(pct: number): SemState {
   return 'steady'
 }
 
-function cpuBusyTotal(cpu: NodeSnapshot['cpu']): { busy: number; total: number } {
-  const total =
-    cpu.user_jiffies +
-    cpu.nice_jiffies +
-    cpu.system_jiffies +
-    cpu.idle_jiffies +
-    cpu.iowait_jiffies
-  const busy =
-    cpu.user_jiffies + cpu.nice_jiffies + cpu.system_jiffies + cpu.iowait_jiffies
-  return { busy, total }
-}
-
 // Instantaneous node CPU% from deltas between successive snapshots (the raw
 // counters are cumulative since boot). Keeps a short client-side history so the
-// gauge reads "now" and the sparkline shows the recent trend.
+// gauge reads "now" and the sparkline shows the recent trend. Delta math lives
+// in lib/metrics so the dashboard and observability route share one source.
 function useNodeHistory(snapshot: NodeSnapshot | undefined) {
   const [series, setSeries] = useState<ReadonlyArray<number>>([])
   const prev = useRef<{ busy: number; total: number; at: string } | null>(null)
@@ -61,9 +51,7 @@ function useNodeHistory(snapshot: NodeSnapshot | undefined) {
     const { busy, total } = cpuBusyTotal(snapshot.cpu)
     const last = prev.current
     if (last && snapshot.recorded_at !== last.at) {
-      const dBusy = busy - last.busy
-      const dTotal = total - last.total
-      const pct = dTotal > 0 ? Math.max(0, Math.min(100, (dBusy / dTotal) * 100)) : 0
+      const pct = cpuPercentDelta(last, { busy, total })
       setSeries((s) => [...s, pct].slice(-40))
     }
     prev.current = { busy, total, at: snapshot.recorded_at }
@@ -71,6 +59,48 @@ function useNodeHistory(snapshot: NodeSnapshot | undefined) {
 
   const cpuPct = series.length > 0 ? series[series.length - 1] : 0
   return { cpuPct, cpuSeries: series }
+}
+
+// Per-workload CPU% derived from the delta in each service's cumulative
+// `cpu_usage_usec` over the wall-clock elapsed between two `/workloads` polls
+// (the backend exposes the raw counter, not a percentage). Returns a map keyed
+// by service_id; a service reads `null` until two samples exist.
+function useWorkloadCpu(
+  workloads: ReadonlyArray<WorkloadView>,
+): Map<string, number | null> {
+  const [pct, setPct] = useState<Map<string, number | null>>(new Map())
+  const prev = useRef<Map<string, { usec: number; at: number }>>(new Map())
+
+  useEffect(() => {
+    const now = Date.now()
+    const next = new Map<string, number | null>()
+    const nextPrev = new Map<string, { usec: number; at: number }>()
+    for (const w of workloads) {
+      if (w.cpu_usage_usec === null) {
+        next.set(w.service_id, null)
+        continue
+      }
+      const last = prev.current.get(w.service_id)
+      if (last && now > last.at) {
+        const dUsec = Math.max(0, w.cpu_usage_usec - last.usec)
+        const elapsedUsec = (now - last.at) * 1000
+        next.set(
+          w.service_id,
+          elapsedUsec > 0
+            ? Math.max(0, Math.min(100, (dUsec / elapsedUsec) * 100))
+            : null,
+        )
+      } else {
+        next.set(w.service_id, null)
+      }
+      nextPrev.set(w.service_id, { usec: w.cpu_usage_usec, at: now })
+    }
+    prev.current = nextPrev
+    setPct(next)
+    // Re-derive whenever the workload counters change (each poll).
+  }, [workloads])
+
+  return pct
 }
 
 export function ObservabilityRoute() {
@@ -99,6 +129,7 @@ export function ObservabilityRoute() {
   })
 
   const { cpuPct, cpuSeries } = useNodeHistory(nodeMetrics)
+  const workloadCpu = useWorkloadCpu(workloads)
 
   const running = workloads.filter((w) => w.status && w.status !== 'Stopped')
 
@@ -233,6 +264,8 @@ export function ObservabilityRoute() {
                   <tr>
                     <th>service</th>
                     <th>status</th>
+                    <th className="num">replicas</th>
+                    <th className="num">cpu</th>
                     <th className="num">memory</th>
                     <th>usage</th>
                   </tr>
@@ -243,6 +276,7 @@ export function ObservabilityRoute() {
                     const memOfNode = nodeMetrics
                       ? (mem / Math.max(1, nodeMetrics.memory_total_bytes)) * 100
                       : 0
+                    const cpu = workloadCpu.get(w.service_id)
                     return (
                       <tr key={`${w.service_id}-${w.deployment_id ?? i}`}>
                         <td>
@@ -254,6 +288,20 @@ export function ObservabilityRoute() {
                           </Link>
                         </td>
                         <td>{w.status ? <StatusBadge status={w.status} /> : '—'}</td>
+                        <td className="num">
+                          <Num
+                            title={`${w.healthy_replicas} healthy of ${w.replica_count}`}
+                          >
+                            {w.healthy_replicas}/{w.replica_count}
+                          </Num>
+                        </td>
+                        <td className="num">
+                          <Num>
+                            {cpu === null || cpu === undefined
+                              ? '—'
+                              : formatPercent(cpu, 1)}
+                          </Num>
+                        </td>
                         <td className="num">
                           <Num>
                             {w.memory_current_bytes !== null ? formatBytes(mem) : '—'}

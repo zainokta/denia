@@ -12,6 +12,7 @@ import { ErrorPanel, errorMessage } from '#/components/ErrorPanel'
 import { SkeletonRows } from '#/components/Skeleton'
 import { Num } from '#/components/Num'
 import { formatRelative } from '#/lib/format'
+import type { JobInput, ServiceSource } from '#/effect/schema'
 
 const listJobs = (projectId: string) =>
   Effect.gen(function* () {
@@ -19,21 +20,7 @@ const listJobs = (projectId: string) =>
     return yield* api.listJobs(projectId)
   })
 
-const createJob = (input: {
-  project_id: string
-  name: string
-  source: {
-    type: 'external_image'
-    image: string
-    credential: null
-    registry_id: string | null
-    image_ref: string | null
-  }
-  command: string[] | null
-  env: Array<[string, string]>
-  schedule: string | null
-  max_retries: number
-}) =>
+const createJob = (input: JobInput) =>
   Effect.gen(function* () {
     const api = yield* ApiClient
     return yield* api.createJob(input)
@@ -61,11 +48,10 @@ function cronHint(cron: string): string | null {
   return null
 }
 
-function sourceDisplay(source: unknown): string {
-  const s = source as Record<string, unknown>
-  if (s.type === 'external_image') return String(s.image)
-  if (s.type === 'git') return String(s.repo_url)
-  return JSON.stringify(source)
+function sourceDisplay(source: ServiceSource): string {
+  return source.type === 'external_image'
+    ? source.image_ref ?? source.image
+    : source.repo_url
 }
 
 export const Route = createFileRoute('/jobs/')({

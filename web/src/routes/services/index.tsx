@@ -17,6 +17,7 @@ import { SkeletonRows } from '#/components/Skeleton'
 import { InlineError, errorMessage } from '#/components/ErrorPanel'
 import { useActionToasts } from '#/components/Toast'
 import { useAuth, can } from '#/hooks/useAuth'
+import { useActiveProject } from '#/hooks/useActiveProject'
 import type {
   Service,
   ServiceInput,
@@ -78,6 +79,7 @@ export function ServicesIndex() {
   const queryClient = useQueryClient()
   const { isSuperAdmin, roleForActiveProject } = useAuth()
   const toast = useActionToasts()
+  const [activeProject] = useActiveProject()
 
   const [createOpen, setCreateOpen] = useState(false)
   const [createError, setCreateError] = useState('')
@@ -85,7 +87,7 @@ export function ServicesIndex() {
   const [deleteError, setDeleteError] = useState('')
 
   const {
-    data: services = [],
+    data: allServices = [],
     isLoading,
     isError,
     error,
@@ -94,6 +96,11 @@ export function ServicesIndex() {
     queryKey: ['services'],
     queryFn: () => runQuery(listServices),
   })
+
+  // Scope the list to the active project from the switcher; empty = all.
+  const services = activeProject
+    ? allServices.filter((s) => s.project_id === activeProject)
+    : allServices
 
   const { data: workloads = [] } = useQuery({
     queryKey: ['workloads'],
@@ -188,6 +195,7 @@ export function ServicesIndex() {
   })
 
   const hasServices = services.length > 0
+  const projectFiltered = activeProject.length > 0 && allServices.length > 0
 
   return (
     <main className="page-wrap px-4 pb-16 pt-10">
@@ -271,16 +279,24 @@ export function ServicesIndex() {
             </div>
           ) : !hasServices ? (
             <div className="panel">
-              <EmptyState
-                icon={<Rocket size={22} />}
-                title="No services yet"
-                hint="Create a project and deploy your first service. Routes, TLS, and runtime metrics follow automatically."
-                action={
-                  <Link to="/projects" className="btn btn-primary">
-                    Create a project
-                  </Link>
-                }
-              />
+              {projectFiltered ? (
+                <EmptyState
+                  icon={<Boxes size={22} />}
+                  title="No services in this project"
+                  hint="The selected project has no services. Switch projects, or clear the filter to see all services."
+                />
+              ) : (
+                <EmptyState
+                  icon={<Rocket size={22} />}
+                  title="No services yet"
+                  hint="Create a project and deploy your first service. Routes, TLS, and runtime metrics follow automatically."
+                  action={
+                    <Link to="/projects" className="btn btn-primary">
+                      Create a project
+                    </Link>
+                  }
+                />
+              )}
             </div>
           ) : (
             <div className="panel overflow-hidden">

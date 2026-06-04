@@ -66,6 +66,7 @@ export function CommandPalette() {
       { id: 'tokens', label: 'API tokens', group: 'Settings', icon: KeyRound, run: go('/settings/tokens') },
       { id: 'sessions', label: 'Sessions', group: 'Settings', icon: Terminal, run: go('/settings/sessions') },
       { id: 'oci', label: 'OCI layer cache', group: 'Settings', icon: Boxes, keywords: 'gc garbage', run: go('/settings/oci-cache') },
+      { id: 'hosted-registry', label: 'Hosted registry', group: 'Settings', icon: Container, keywords: 'oci push image repository', run: go('/settings/hosted-registry') },
       {
         id: 'theme',
         label: 'Toggle light / dark theme',

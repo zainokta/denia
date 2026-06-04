@@ -103,9 +103,10 @@ const fixLogs = [
   '2026-05-25T00:00:01Z [http] listening on :3000',
 ]
 
+// The backend returns at most ONE current snapshot (src/observability/metrics.rs):
+// cumulative cpu_usage_usec + instantaneous memory_current_bytes, no time series.
 const fixMetrics = [
-  { service_id: 1, cpu_percent: 0.45, memory_bytes: 268435456, recorded_at: '2026-05-25T00:00:00Z' },
-  { service_id: 1, cpu_percent: 0.12, memory_bytes: 134217728, recorded_at: '2026-05-25T00:01:00Z' },
+  { service_name: 'web', cpu_usage_usec: 1_500_000, memory_current_bytes: 268435456 },
 ]
 
 function makeWrapper() {
@@ -238,8 +239,10 @@ describe('ServiceDetail', () => {
     await screen.findByRole('heading', { name: 'web' })
 
     fireEvent.click(screen.getByRole('tab', { name: 'metrics' }))
-    expect(await screen.findByText('45.0%')).toBeTruthy()
-    expect(screen.getByText('256.0 MiB')).toBeTruthy()
+    // The current memory snapshot renders directly. The CPU trend needs two
+    // successive polls (it is derived from a cpu_usage_usec delta), so it reads
+    // "—" / "Sampling…" on the first snapshot — assert the memory headline.
+    expect(await screen.findByText('256.0 MiB')).toBeTruthy()
   })
 
   it('shows deployments when the Deployments tab is selected', async () => {
