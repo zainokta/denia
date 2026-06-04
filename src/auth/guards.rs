@@ -20,6 +20,24 @@ pub(crate) fn ensure_role(
     require_project_role(principal, role, min).map_err(Into::into)
 }
 
+/// Like [`ensure_role`] but rewrites a `Forbidden` into `NotFound(not_found_msg)`
+/// so a non-member cannot distinguish "exists but I can't see it" from "doesn't
+/// exist" (existence-leak avoidance). Replaces the per-handler
+/// `ensure_service_role` / `ensure_job_role` / `ensure_deployment_role`
+/// wrappers that were byte-identical except for the message.
+pub(crate) fn ensure_role_or_not_found(
+    state: &AppState,
+    principal: &Principal,
+    project_id: uuid::Uuid,
+    min: Role,
+    not_found_msg: &str,
+) -> Result<(), ApiError> {
+    ensure_role(state, principal, project_id, min).map_err(|error| match error {
+        ApiError::Forbidden(_) => ApiError::NotFound(not_found_msg.to_string()),
+        other => other,
+    })
+}
+
 pub(crate) fn ensure_super_admin(principal: &Principal) -> Result<(), ApiError> {
     if principal.is_super_admin {
         Ok(())
