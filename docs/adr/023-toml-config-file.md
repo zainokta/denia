@@ -56,11 +56,13 @@ variables layered on top.
 7. **Operator-home deployment layout.** `install.sh` writes the config under
    the installing operator's `$HOME/.config/denia/config.toml` (mode `0640`
    owned `<operator>:denia`) rather than `/etc/denia/`. The daemon runs as the
-   unprivileged `denia` system user and reads the file through a systemd
-   `BindReadOnlyPaths=` bind mount that punches `~/.config/denia` into the
-   daemon's mount namespace despite `ProtectHome=true`. The admin token and
-   age key live in the same directory under identical perms. Operators edit
-   `config.toml` without sudo; `systemctl restart denia` applies changes.
+   unprivileged `denia` system user and reads the file through execute-only
+   ACLs on the operator home/config parents plus a systemd read-only bind of
+   `~/.config/denia`. The unit uses `ProtectHome=read-only` so home trees stay
+   immutable to the daemon while Debian/systemd can still resolve the config
+   path. The admin token and age key live in the same directory under identical
+   perms. Operators edit `config.toml` without sudo; `systemctl restart denia`
+   applies changes.
 
 ## Consequences
 

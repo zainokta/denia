@@ -46,11 +46,10 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID C
 # applying it post-fork.
 NoNewPrivileges=false
 ProtectSystem=strict
-# ProtectHome=true would hide /home entirely; we keep it true and punch a
-# narrow read-only bind mount through to the operator's denia config dir so
-# the daemon can read config.toml + admin.token + age.key without seeing the
-# rest of the user's home.
-ProtectHome=true
+# The config lives under the installing operator's home. `read-only` keeps home
+# trees immutable to the daemon while still allowing the execute-only ACLs from
+# `denia setup` to expose the exact config path on Debian/systemd hosts.
+ProtectHome=read-only
 BindReadOnlyPaths={{user_config_dir}}
 PrivateTmp=true
 ProtectKernelLogs=true
