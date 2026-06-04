@@ -57,7 +57,7 @@ retained unchanged.
   `--create` creates the project/service from `[create]` defaults.
 - **Builds are Dockerfile-only** in this version; buildpacks/Nixpacks are out of
   scope. The cross-platform client/server command split from ADR-030 is not
-  adopted here and remains future work.
+  adopted here and is resolved later in ADR-037 (cfg-gated single crate).
 
 ## Consequences
 
@@ -69,8 +69,9 @@ retained unchanged.
   must be hardened (path traversal, symlink escape, zip-bomb) and tested.
 - Harder: each push uploads a full context (no incremental upload in v1).
 - Constraint: the new client commands ship in the existing unified `denia`
-  binary; building a Linux-runtime-free client for macOS/Windows still needs the
-  ADR-030 command split, deferred to its own ADR.
+  binary; building a Linux-runtime-free client for macOS/Windows is resolved in
+  ADR-037 by cfg-gating the server modules/deps so the one crate also builds a
+  client-only `denia` off Linux.
 
 ## Alternatives Considered
 

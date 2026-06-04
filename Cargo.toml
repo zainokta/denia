@@ -4,59 +4,81 @@ version = "1.0.0"
 edition = "2024"
 description = "Docker-free single-node PaaS with Denia-owned Linux runtime isolation"
 license = "Apache-2.0"
+repository = "https://github.com/zainokta/denia"
+readme = "README.md"
+keywords = ["paas", "deploy", "self-hosted", "cli"]
+categories = ["command-line-utilities", "web-programming::http-server"]
+# `cargo install denia` builds the full Linux server, or the auth/push/console
+# client on macOS/Windows where the runtime/ingress modules are gated out
+# (ADR-036). Force-include the prebuilt SPA (gitignored build output) so the
+# embedded web console ships in the published crate; CI runs `pnpm build`
+# before `cargo publish`.
+include = [
+    "src/**/*",
+    "web/dist/client/**/*",
+    "README.md",
+    "LICENSE*",
+]
 
+# Portable dependencies — used by the client subcommands (auth/push/console)
+# and their shared types, and compile on every target. Server-only crates that
+# link Linux APIs live under [target.'cfg(target_os = "linux")'.dependencies].
 [dependencies]
-age = { version = "0.10", default-features = false }
 anyhow = "1"
-arc-swap = "1"
-# Pinned to match the boringssl backend re-exported by pingora-boringssl 0.8 so
-# `X509`/`Asn1Time` are the same types; used for cert `notAfter` renewal checks.
-boring = "=4.22.0"
-argon2 = "0.5.3"
-async-trait = "0.1"
-axum = { version = "0.8", features = ["ws"] }
-base64 = "0.22"
-chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-cron = "0.16.0"
 crossterm = "0.29"
-flate2 = "1.1.9"
 futures-util = "0.3"
 hex = "0.4.3"
 # gitignore/.dockerignore-aware working-tree walking for `denia push` (ADR-034).
 ignore = "0.4"
+reqwest = { version = "0.13.3", default-features = false, features = ["http2", "json", "rustls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tar = "0.4.46"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time", "test-util"] }
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
+toml = "1.1"
+uuid = { version = "1", features = ["serde", "v7"] }
+zstd = "0.13.3"
+
+# Linux-only server stack: daemon, runtime isolation, ingress, persistence,
+# management API. Absent on macOS/Windows so the client build never links them.
+[target.'cfg(target_os = "linux")'.dependencies]
+age = { version = "0.10", default-features = false }
+arc-swap = "1"
+argon2 = "0.5.3"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+# Pinned to match the boringssl backend re-exported by pingora-boringssl 0.8 so
+# `X509`/`Asn1Time` are the same types; used for cert `notAfter` renewal checks.
+boring = "=4.22.0"
+chrono = { version = "0.4", features = ["serde"] }
+cron = "0.16.0"
+flate2 = "1.1.9"
 instant-acme = { version = "0.8", features = ["rcgen"] }
 libc = "0.2"
+# Pure-Rust, verify-only minisign. Used by `denia update` to authenticate the
+# SHA256SUMS manifest of a GitHub release against a pinned public key (ADR-029).
+minisign-verify = "0.2"
 oci-client = "0.17.0"
 pingora = { version = "0.8", default-features = false, features = ["boringssl"] }
 pingora-proxy = { version = "0.8", default-features = false, features = ["boringssl"] }
 rand = "0.10.1"
 rusqlite = { version = "0.40", features = ["bundled"] }
-rustls-pki-types = "1"
 rust-embed = { version = "8", features = ["mime-guess"] }
 rustix = { version = "1.1.4", features = ["event", "fs", "mount", "net", "pipe", "process", "thread"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+rustls-pki-types = "1"
+semver = "1"
 sha2 = "0.11.0"
-tar = "0.4.46"
-tempfile = "3"
-thiserror = "2"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time", "test-util"] }
+subtle = "2"
 tokio-stream = "0.1"
-tokio-tungstenite = { version = "0.28", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
-toml = "1.1"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["serde", "v7"] }
-zstd = "0.13.3"
-reqwest = { version = "0.13.3", default-features = false, features = ["http2", "json", "rustls"] }
-subtle = "2"
-semver = "1"
-# Pure-Rust, verify-only minisign. Used by `denia update` to authenticate the
-# SHA256SUMS manifest of a GitHub release against a pinned public key (ADR-029).
-minisign-verify = "0.2"
 
 [features]
 default = []
