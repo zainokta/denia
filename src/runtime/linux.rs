@@ -28,6 +28,7 @@ use crate::runtime::validation::{
     validate_environment_keys, validate_process_spec, validate_resource_limits,
     validate_service_name,
 };
+use crate::syscall::SyscallError;
 use crate::syscall::caps;
 use crate::syscall::chown;
 use crate::syscall::console::{ConsoleLaunchConfig, spawn_console_process};
@@ -204,6 +205,11 @@ impl LinuxRuntime {
         // The hashed dir keeps the path under the sockaddr_un 108-byte limit.
         // `socket_path`/`socket_connect_path` are that host path. See ADR-026.
         let socket_dir_host = {
+            // `DefaultHasher` is not collision-resistant, but the input space is a
+            // single node's own (service:deployment:replica) ids — tiny and fully
+            // operator-owned, not attacker-chosen — so a practical collision is
+            // negligible. The hash only needs to keep the socket dir name short
+            // (under the 108-byte sockaddr_un limit), not to be cryptographic (L4).
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             format!(
@@ -229,39 +235,15 @@ impl LinuxRuntime {
             .join(request.service_id.to_string())
             .join(request.deployment_id.to_string())
             .join(request.replica_index.to_string());
-        let socket_proxy_src = resolve_host_binary(&self.socket_proxy_source).ok_or_else(|| {
-            RuntimeError::SocketProxyUnavailable {
-                path: self.socket_proxy_source.clone(),
-            }
-        })?;
         // socket-proxy is the daemon binary, dynamically linked against the host
-        // libc/loader. Bind those host libs (resolved from the daemon's own
-        // /proc/self/maps) into the guest and run socket-proxy through the host
-        // loader with `--library-path`, so it works in ANY workload image
-        // regardless of the image's libc/version. The loader options are
-        // consumed at socket-proxy startup and never reach the workload it
-        // spawns. A static socket-proxy yields no libs and is exec'd directly.
-        // See ADR-026.
-        let host_libs = if std::env::current_exe().ok().as_deref()
-            == Some(self.socket_proxy_source.as_path())
-        {
-            socket_proxy_runtime_libs()
-        } else {
-            Vec::new()
-        };
-        let loader_guest = host_libs
-            .iter()
-            .find(|p| is_dynamic_loader(p))
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .map(|name| format!("{SOCKET_PROXY_LIB_DIR}/{name}"));
+        // libc/loader. It is bound read-only into the guest (with its host libs +
+        // loader under SOCKET_PROXY_LIB_DIR) and run through the host loader with
+        // `--library-path`, so it works in ANY workload image regardless of the
+        // image's libc/version. The loader options are consumed at socket-proxy
+        // startup and never reach the workload it spawns. See ADR-026.
+        let (ro_binds, loader_prefix) = self.runtime_binary_binds(SOCKET_PROXY_TARGET)?;
 
-        let mut child_argv = Vec::new();
-        if let Some(loader) = &loader_guest {
-            child_argv.push(loader.clone());
-            child_argv.push("--library-path".to_string());
-            child_argv.push(SOCKET_PROXY_LIB_DIR.to_string());
-        }
+        let mut child_argv = loader_prefix;
         child_argv.push(SOCKET_PROXY_TARGET.to_string());
         child_argv.push("--listen".to_string());
         child_argv.push(guest_socket.clone());
@@ -277,21 +259,6 @@ impl LinuxRuntime {
             merged: merged.clone(),
         };
 
-        // Read-only binds: the socket-proxy binary, plus its host shared libs +
-        // loader under SOCKET_PROXY_LIB_DIR.
-        let mut ro_binds = vec![RoBind {
-            src: socket_proxy_src,
-            dest: PathBuf::from(SOCKET_PROXY_TARGET),
-        }];
-        for lib in &host_libs {
-            if let Some(name) = lib.file_name().and_then(|n| n.to_str()) {
-                ro_binds.push(RoBind {
-                    src: lib.clone(),
-                    dest: PathBuf::from(format!("{SOCKET_PROXY_LIB_DIR}/{name}")),
-                });
-            }
-        }
-
         // The overlay's `merged` mountpoint becomes the new root (pivots into it
         // when an overlay is set), so the namespace root must be `merged`.
         let mut namespace = NamespaceConfig::new(merged.clone(), child_argv.clone())
@@ -302,6 +269,12 @@ impl LinuxRuntime {
             .with_workdir(process.workdir.clone())
             .with_env(env.clone())
             .with_deferred_hardening();
+        // Mirror the deployment pids cap onto RLIMIT_NPROC as a process-level
+        // backstop to the cgroup `pids.max` (defaults to NamespaceConfig's value
+        // when unset).
+        if let Some(pids) = request.pids_max {
+            namespace = namespace.with_max_pids(Some(pids));
+        }
         for bind in ro_binds {
             namespace = namespace.with_ro_bind(bind);
         }
@@ -437,29 +410,63 @@ impl LinuxRuntime {
         Ok(())
     }
 
-    fn inject_workload_launcher(&self, rootfs: &Path) -> Result<(), RuntimeError> {
-        self.inject_runtime_binary(rootfs, WORKLOAD_LAUNCHER_TARGET)
-    }
-
-    fn inject_runtime_binary(&self, rootfs: &Path, target_path: &str) -> Result<(), RuntimeError> {
-        let proxy_source = resolve_host_binary(&self.socket_proxy_source).ok_or_else(|| {
+    /// Build the read-only bind mounts and (optional) loader-prefixed argv for
+    /// running the daemon binary (socket-proxy / workload-launcher are the same
+    /// multi-call binary) inside an arbitrary workload image.
+    ///
+    /// The daemon binary is bound read-only at `guest_target`; its host shared
+    /// objects + dynamic loader (resolved from the daemon's own
+    /// `/proc/self/maps`) are bound read-only under `SOCKET_PROXY_LIB_DIR`, and
+    /// when dynamically linked the returned `loader_prefix` runs the helper
+    /// through the bound loader with `--library-path` so it works regardless of
+    /// the image's libc. A statically-linked daemon yields no libs and an empty
+    /// prefix (the helper is exec'd directly). This replaces the previous
+    /// `std::fs::copy` of the binary into the artifact rootfs, which mutated the
+    /// shared content-addressed bundle and raced across concurrent same-digest
+    /// runs (ADR-019: "the content-addressed bundle is never mutated"; M4).
+    fn runtime_binary_binds(
+        &self,
+        guest_target: &str,
+    ) -> Result<(Vec<RoBind>, Vec<String>), RuntimeError> {
+        let helper_src = resolve_host_binary(&self.socket_proxy_source).ok_or_else(|| {
             RuntimeError::SocketProxyUnavailable {
                 path: self.socket_proxy_source.clone(),
             }
         })?;
-        let target_dir = rootfs.join(".denia");
-        create_runtime_directory(&target_dir)?;
-        let target = rootfs.join(target_path.trim_start_matches('/'));
-        remove_existing_runtime_file(&target)?;
-        std::fs::copy(&proxy_source, &target)
-            .map_err(path_io("copy runtime helper into rootfs", &target))?;
-        let mut perms = std::fs::metadata(&target)
-            .map_err(path_io("stat injected runtime helper", &target))?
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&target, perms)
-            .map_err(path_io("chmod injected runtime helper", &target))?;
-        Ok(())
+        let host_libs = if std::env::current_exe().ok().as_deref()
+            == Some(self.socket_proxy_source.as_path())
+        {
+            socket_proxy_runtime_libs()
+        } else {
+            Vec::new()
+        };
+        let loader_guest = host_libs
+            .iter()
+            .find(|p| is_dynamic_loader(p))
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|name| format!("{SOCKET_PROXY_LIB_DIR}/{name}"));
+
+        let mut loader_prefix = Vec::new();
+        if let Some(loader) = &loader_guest {
+            loader_prefix.push(loader.clone());
+            loader_prefix.push("--library-path".to_string());
+            loader_prefix.push(SOCKET_PROXY_LIB_DIR.to_string());
+        }
+
+        let mut ro_binds = vec![RoBind {
+            src: helper_src,
+            dest: PathBuf::from(guest_target),
+        }];
+        for lib in &host_libs {
+            if let Some(name) = lib.file_name().and_then(|n| n.to_str()) {
+                ro_binds.push(RoBind {
+                    src: lib.clone(),
+                    dest: PathBuf::from(format!("{SOCKET_PROXY_LIB_DIR}/{name}")),
+                });
+            }
+        }
+        Ok((ro_binds, loader_prefix))
     }
 
     fn prepare_socket_directory(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
@@ -543,7 +550,19 @@ impl Runtime for LinuxRuntime {
             }
         };
         let status_cgroup_path = plan.cgroup_path.clone();
-        let mut process = TrackedProcess::NativePid(pid.expect("native pid"));
+        // `spawn_namespaced_process` returns `Ok` only with a non-zero pid, so
+        // `pid` is always `Some` here; map the impossible `None` to a typed error
+        // rather than panicking on the launch path.
+        let native_pid = match pid {
+            Some(pid) => pid,
+            None => {
+                let _ = self.cleanup(&plan);
+                return Err(RuntimeError::Syscall(SyscallError::ChildSetup {
+                    stage: "spawn returned no pid",
+                }));
+            }
+        };
+        let mut process = TrackedProcess::NativePid(native_pid);
         if let Err(error) = wait_for_service_socket(&status_socket_path, &mut process).await {
             let mut tracked_child = TrackedChild { process, plan };
             let _ = terminate_tracked_child(&mut tracked_child).await;
@@ -644,37 +663,116 @@ impl Runtime for LinuxRuntime {
             .join("jobs")
             .join(request.job_id.to_string())
             .join(request.run_id.to_string());
-        self.inject_workload_launcher(&rootfs_path)?;
+        // Per-run overlay so the job — like a service replica — gets a private
+        // writable layer over the shared, read-only artifact rootfs. The
+        // workload-launcher is bind-mounted read-only into the guest instead of
+        // being copied into the lower (which mutated the shared content-addressed
+        // bundle and raced across concurrent same-digest runs). See ADR-019 /
+        // ADR-026 / M4.
+        let upper = run_dir.join("upper");
+        let work = run_dir.join("work");
+        let merged = run_dir.join("merged");
         std::fs::create_dir_all(&run_dir)?;
+        // overlayfs requires an empty `work/work` for a fresh mount.
+        let overlay_work = work.join("work");
+        if overlay_work.exists() {
+            std::fs::remove_dir_all(&overlay_work)
+                .map_err(path_io("remove stale overlay work directory", &overlay_work))?;
+        }
+        create_dir_all("create job upper directory", &upper)?;
+        create_dir_all("create job work directory", &work)?;
+        create_dir_all("create job merged directory", &merged)?;
+        // Persistent ancestor dirs need the traverse bit so the workload's mapped
+        // userns-root can reach the read-only lower; the ephemeral overlay layers
+        // are chowned to the userns base so guest writes/copy-ups are owned by the
+        // workload. Mirrors the service `prepare` path.
+        self.set_traverse_mode(&run_dir)?;
+        self.chown_overlay_dir(&upper)?;
+        self.chown_overlay_dir(&work)?;
+        self.chown_overlay_dir(&merged)?;
+        if let Some(data_dir) = self.artifact_dir.parent() {
+            self.set_traverse_mode(data_dir)?;
+        }
+        self.set_traverse_mode(&self.runtime_dir)?;
+        self.set_traverse_mode(&self.artifact_dir)?;
+        if let Some(bundle) = rootfs_path.parent() {
+            self.set_traverse_mode(bundle)?;
+            self.set_traverse_mode(&rootfs_path)?;
+        }
+        let denia_dir = upper.join(".denia");
+        create_runtime_directory(&denia_dir)?;
+        self.chown_overlay_dir(&denia_dir)?;
+
         prepare_cgroup_directory(&self.cgroup_root, &cgroup_path, CGROUP_CONTROLLERS)?;
-        std::fs::write(cgroup_path.join("cpu.max"), cpu_max(request.cpu_millis))?;
+        // Resource-limit writes propagate errors (matching the service `prepare`
+        // path): a failed `memory.max`/`pids.max` write would otherwise silently
+        // launch the job unconstrained. Only `io.weight` stays best-effort, since
+        // it is advisory (L3).
+        std::fs::write(cgroup_path.join("cpu.max"), cpu_max(request.cpu_millis))
+            .map_err(path_io("write cgroup cpu.max", cgroup_path.join("cpu.max")))?;
         std::fs::write(
             cgroup_path.join("memory.max"),
             format!("{}\n", request.memory_bytes),
-        )?;
+        )
+        .map_err(path_io(
+            "write cgroup memory.max",
+            cgroup_path.join("memory.max"),
+        ))?;
         if let Some(swap) = request.memory_swap_max {
-            let _ = std::fs::write(cgroup_path.join("memory.swap.max"), format!("{}\n", swap));
+            std::fs::write(cgroup_path.join("memory.swap.max"), format!("{}\n", swap)).map_err(
+                path_io(
+                    "write cgroup memory.swap.max",
+                    cgroup_path.join("memory.swap.max"),
+                ),
+            )?;
         }
         if let Some(pids) = request.pids_max {
-            let _ = std::fs::write(cgroup_path.join("pids.max"), format!("{}\n", pids));
+            std::fs::write(cgroup_path.join("pids.max"), format!("{}\n", pids)).map_err(path_io(
+                "write cgroup pids.max",
+                cgroup_path.join("pids.max"),
+            ))?;
         }
         if let Some(weight) = request.io_weight {
             let _ = std::fs::write(cgroup_path.join("io.weight"), format!("{}\n", weight));
         }
 
+        let cleanup_merged = merged.clone();
         let cleanup = || {
             let _ = std::fs::write(cgroup_path.join("cgroup.kill"), "1\n");
             let _ = remove_cgroup_dir_if_exists(&cgroup_path);
+            let _ = rustix::mount::unmount(&cleanup_merged, rustix::mount::UnmountFlags::DETACH);
             let _ = remove_dir_if_exists(&run_dir);
         };
 
-        let mut child_argv = vec![WORKLOAD_LAUNCHER_TARGET.to_string(), "--".to_string()];
+        let overlay = OverlaySpec {
+            lower: rootfs_path.clone(),
+            upper: upper.clone(),
+            work: work.clone(),
+            merged: merged.clone(),
+        };
+        let (ro_binds, loader_prefix) = match self.runtime_binary_binds(WORKLOAD_LAUNCHER_TARGET) {
+            Ok(binds) => binds,
+            Err(error) => {
+                cleanup();
+                return Err(error);
+            }
+        };
+        let mut child_argv = loader_prefix;
+        child_argv.push(WORKLOAD_LAUNCHER_TARGET.to_string());
+        child_argv.push("--".to_string());
         child_argv.extend(argv);
-        let namespace = NamespaceConfig::new(rootfs_path.clone(), child_argv)
+        let mut namespace = NamespaceConfig::new(merged.clone(), child_argv)
+            .with_overlay(overlay)
             .with_uid_map(self.userns_base, self.userns_size)
             .with_cgroup_path(cgroup_path.clone())
             .with_workdir(process.workdir)
             .with_env(env_map.into_iter().collect());
+        for bind in ro_binds {
+            namespace = namespace.with_ro_bind(bind);
+        }
+        if let Some(pids) = request.pids_max {
+            namespace = namespace.with_max_pids(Some(pids));
+        }
         let started_at = chrono::Utc::now();
         let pid = match tokio::task::spawn_blocking(move || spawn_namespaced_process(&namespace))
             .await?
