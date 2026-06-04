@@ -110,11 +110,12 @@ fn check_cgroup_v2() -> CheckResult {
 }
 
 fn check_denia_cgroup_delegation() -> CheckResult {
-    let cgroup_root = std::path::Path::new("/sys/fs/cgroup/denia");
+    let cgroup_root = denia_cgroup_root_for_doctor();
     if !cgroup_root.exists() {
-        return CheckResult::Fail(
-            "denia cgroup root missing at /sys/fs/cgroup/denia; run `sudo denia setup`".into(),
-        );
+        return CheckResult::Fail(format!(
+            "denia cgroup root missing at {}; run `sudo denia setup`, then `sudo systemctl restart denia`",
+            cgroup_root.display()
+        ));
     }
 
     let controllers_path = cgroup_root.join("cgroup.controllers");
@@ -156,10 +157,38 @@ fn check_denia_cgroup_delegation() -> CheckResult {
         ))
     } else {
         CheckResult::Fail(format!(
-            "denia cgroup delegation: controller(s) available but not enabled under /sys/fs/cgroup/denia: {}. Re-run `sudo denia setup`, then `sudo systemctl restart denia`.",
+            "denia cgroup delegation: controller(s) available but not enabled under {}: {}. Re-run `sudo denia setup`, then `sudo systemctl restart denia`.",
+            cgroup_root.display(),
             missing_enabled.join(", ")
         ))
     }
+}
+
+fn denia_cgroup_root_for_doctor() -> std::path::PathBuf {
+    Command::new("systemctl")
+        .args(["show", "denia.service", "-p", "ControlGroup", "--value"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|raw| systemd_delegated_cgroup_root(raw.trim()))
+        .unwrap_or_else(|| std::path::PathBuf::from("/sys/fs/cgroup/denia"))
+}
+
+fn systemd_delegated_cgroup_root(current: &str) -> Option<std::path::PathBuf> {
+    if current == "/" || !current.starts_with('/') {
+        return None;
+    }
+
+    let mut path = std::path::PathBuf::from("/sys/fs/cgroup");
+    for component in current.trim_start_matches('/').split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return None;
+        }
+        path.push(component);
+    }
+    path.push("denia");
+    Some(path)
 }
 
 fn missing_cgroup_controllers(available: &str, enabled: &str, controllers: &[&str]) -> Vec<String> {
@@ -441,6 +470,14 @@ mod tests {
         assert_eq!(
             unavailable_cgroup_controllers("cpu pids io\n", REQUIRED_CGROUP_CONTROLLERS),
             vec!["memory".to_string()]
+        );
+    }
+
+    #[test]
+    fn systemd_delegated_cgroup_root_uses_service_control_group() {
+        assert_eq!(
+            systemd_delegated_cgroup_root("/system.slice/denia.service").unwrap(),
+            std::path::PathBuf::from("/sys/fs/cgroup/system.slice/denia.service/denia")
         );
     }
 }

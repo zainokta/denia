@@ -46,6 +46,14 @@ The runner must keep host root as the trust boundary, place workloads into Denia
 - Environment keys must be non-empty and must not contain `=` or NUL.
 - Workload process launch clears Denia's host environment before applying the explicit `process.json` environment.
 - Cgroups are created under `<cgroup_root>/<service>/<deployment_id>`.
+- For systemd-managed installs that still use the legacy default
+  `/sys/fs/cgroup/denia`, the daemon resolves the effective runtime cgroup root
+  to `<current systemd service cgroup>/denia` at startup. This keeps Denia's
+  workload cgroups inside the cgroup v2 subtree delegated by systemd, allowing
+  the daemon to relocate itself into `<cgroup_root>/.daemon` and then attach
+  workload children as siblings without crossing into a non-writable ancestor.
+  Explicit `DENIA_CGROUP_ROOT` or config-file overrides continue to be used as
+  provided for tests and non-systemd deployments.
 - Denia enables the configured resource controllers on each cgroup parent it owns before creating child workload cgroups, so `cpu.max`, `memory.max`, and `cgroup.procs` operations happen inside a valid cgroup v2 subtree.
 - CPU and memory limits must be non-zero before cgroup files are written.
 - CPU limits are written to cgroup v2 `cpu.max` with a `100000` microsecond period.
