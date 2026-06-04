@@ -28,9 +28,12 @@ use crate::runtime::validation::{
     validate_environment_keys, validate_process_spec, validate_resource_limits,
     validate_service_name,
 };
+use crate::syscall::SyscallError;
 use crate::syscall::caps;
 use crate::syscall::chown;
-use crate::syscall::console::{ConsoleLaunchConfig, spawn_console_process};
+use crate::syscall::console::{
+    ConsoleLaunchConfig, read_process_start_time, spawn_console_process,
+};
 use crate::syscall::ns::{NamespaceConfig, OverlaySpec, RoBind, spawn_namespaced_process};
 use crate::syscall::pty::open_pty;
 use crate::syscall::signal;
@@ -45,6 +48,12 @@ pub struct LinuxRuntime {
     userns_base: u32,
     userns_size: u32,
     children: Arc<Mutex<HashMap<RuntimeInstanceId, TrackedChild>>>,
+    /// Backstop set of live console-shell pids. The console bridge reaps its
+    /// child explicitly on session end (SIGTERM->grace->SIGKILL->waitpid), but
+    /// if that task is dropped/panics the pid would otherwise leak as a zombie.
+    /// `reap_exited_children` sweeps this set on every runtime mutation so a
+    /// console child is always collected. See ADR-033 / review 07 (HIGH).
+    console_children: Arc<Mutex<Vec<u32>>>,
 }
 
 pub(crate) const SOCKET_PROXY_TARGET: &str = "/.denia/socket-proxy";
@@ -138,6 +147,7 @@ impl LinuxRuntime {
             userns_base: 100000,
             userns_size: 65536,
             children: Arc::new(Mutex::new(HashMap::new())),
+            console_children: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -204,6 +214,11 @@ impl LinuxRuntime {
         // The hashed dir keeps the path under the sockaddr_un 108-byte limit.
         // `socket_path`/`socket_connect_path` are that host path. See ADR-026.
         let socket_dir_host = {
+            // `DefaultHasher` is not collision-resistant, but the input space is a
+            // single node's own (service:deployment:replica) ids — tiny and fully
+            // operator-owned, not attacker-chosen — so a practical collision is
+            // negligible. The hash only needs to keep the socket dir name short
+            // (under the 108-byte sockaddr_un limit), not to be cryptographic (L4).
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             format!(
@@ -229,39 +244,15 @@ impl LinuxRuntime {
             .join(request.service_id.to_string())
             .join(request.deployment_id.to_string())
             .join(request.replica_index.to_string());
-        let socket_proxy_src = resolve_host_binary(&self.socket_proxy_source).ok_or_else(|| {
-            RuntimeError::SocketProxyUnavailable {
-                path: self.socket_proxy_source.clone(),
-            }
-        })?;
         // socket-proxy is the daemon binary, dynamically linked against the host
-        // libc/loader. Bind those host libs (resolved from the daemon's own
-        // /proc/self/maps) into the guest and run socket-proxy through the host
-        // loader with `--library-path`, so it works in ANY workload image
-        // regardless of the image's libc/version. The loader options are
-        // consumed at socket-proxy startup and never reach the workload it
-        // spawns. A static socket-proxy yields no libs and is exec'd directly.
-        // See ADR-026.
-        let host_libs = if std::env::current_exe().ok().as_deref()
-            == Some(self.socket_proxy_source.as_path())
-        {
-            socket_proxy_runtime_libs()
-        } else {
-            Vec::new()
-        };
-        let loader_guest = host_libs
-            .iter()
-            .find(|p| is_dynamic_loader(p))
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .map(|name| format!("{SOCKET_PROXY_LIB_DIR}/{name}"));
+        // libc/loader. It is bound read-only into the guest (with its host libs +
+        // loader under SOCKET_PROXY_LIB_DIR) and run through the host loader with
+        // `--library-path`, so it works in ANY workload image regardless of the
+        // image's libc/version. The loader options are consumed at socket-proxy
+        // startup and never reach the workload it spawns. See ADR-026.
+        let (ro_binds, loader_prefix) = self.runtime_binary_binds(SOCKET_PROXY_TARGET)?;
 
-        let mut child_argv = Vec::new();
-        if let Some(loader) = &loader_guest {
-            child_argv.push(loader.clone());
-            child_argv.push("--library-path".to_string());
-            child_argv.push(SOCKET_PROXY_LIB_DIR.to_string());
-        }
+        let mut child_argv = loader_prefix;
         child_argv.push(SOCKET_PROXY_TARGET.to_string());
         child_argv.push("--listen".to_string());
         child_argv.push(guest_socket.clone());
@@ -277,21 +268,6 @@ impl LinuxRuntime {
             merged: merged.clone(),
         };
 
-        // Read-only binds: the socket-proxy binary, plus its host shared libs +
-        // loader under SOCKET_PROXY_LIB_DIR.
-        let mut ro_binds = vec![RoBind {
-            src: socket_proxy_src,
-            dest: PathBuf::from(SOCKET_PROXY_TARGET),
-        }];
-        for lib in &host_libs {
-            if let Some(name) = lib.file_name().and_then(|n| n.to_str()) {
-                ro_binds.push(RoBind {
-                    src: lib.clone(),
-                    dest: PathBuf::from(format!("{SOCKET_PROXY_LIB_DIR}/{name}")),
-                });
-            }
-        }
-
         // The overlay's `merged` mountpoint becomes the new root (pivots into it
         // when an overlay is set), so the namespace root must be `merged`.
         let mut namespace = NamespaceConfig::new(merged.clone(), child_argv.clone())
@@ -302,6 +278,12 @@ impl LinuxRuntime {
             .with_workdir(process.workdir.clone())
             .with_env(env.clone())
             .with_deferred_hardening();
+        // Mirror the deployment pids cap onto RLIMIT_NPROC as a process-level
+        // backstop to the cgroup `pids.max` (defaults to NamespaceConfig's value
+        // when unset).
+        if let Some(pids) = request.pids_max {
+            namespace = namespace.with_max_pids(Some(pids));
+        }
         for bind in ro_binds {
             namespace = namespace.with_ro_bind(bind);
         }
@@ -437,29 +419,63 @@ impl LinuxRuntime {
         Ok(())
     }
 
-    fn inject_workload_launcher(&self, rootfs: &Path) -> Result<(), RuntimeError> {
-        self.inject_runtime_binary(rootfs, WORKLOAD_LAUNCHER_TARGET)
-    }
-
-    fn inject_runtime_binary(&self, rootfs: &Path, target_path: &str) -> Result<(), RuntimeError> {
-        let proxy_source = resolve_host_binary(&self.socket_proxy_source).ok_or_else(|| {
+    /// Build the read-only bind mounts and (optional) loader-prefixed argv for
+    /// running the daemon binary (socket-proxy / workload-launcher are the same
+    /// multi-call binary) inside an arbitrary workload image.
+    ///
+    /// The daemon binary is bound read-only at `guest_target`; its host shared
+    /// objects + dynamic loader (resolved from the daemon's own
+    /// `/proc/self/maps`) are bound read-only under `SOCKET_PROXY_LIB_DIR`, and
+    /// when dynamically linked the returned `loader_prefix` runs the helper
+    /// through the bound loader with `--library-path` so it works regardless of
+    /// the image's libc. A statically-linked daemon yields no libs and an empty
+    /// prefix (the helper is exec'd directly). This replaces the previous
+    /// `std::fs::copy` of the binary into the artifact rootfs, which mutated the
+    /// shared content-addressed bundle and raced across concurrent same-digest
+    /// runs (ADR-019: "the content-addressed bundle is never mutated"; M4).
+    fn runtime_binary_binds(
+        &self,
+        guest_target: &str,
+    ) -> Result<(Vec<RoBind>, Vec<String>), RuntimeError> {
+        let helper_src = resolve_host_binary(&self.socket_proxy_source).ok_or_else(|| {
             RuntimeError::SocketProxyUnavailable {
                 path: self.socket_proxy_source.clone(),
             }
         })?;
-        let target_dir = rootfs.join(".denia");
-        create_runtime_directory(&target_dir)?;
-        let target = rootfs.join(target_path.trim_start_matches('/'));
-        remove_existing_runtime_file(&target)?;
-        std::fs::copy(&proxy_source, &target)
-            .map_err(path_io("copy runtime helper into rootfs", &target))?;
-        let mut perms = std::fs::metadata(&target)
-            .map_err(path_io("stat injected runtime helper", &target))?
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&target, perms)
-            .map_err(path_io("chmod injected runtime helper", &target))?;
-        Ok(())
+        let host_libs = if std::env::current_exe().ok().as_deref()
+            == Some(self.socket_proxy_source.as_path())
+        {
+            socket_proxy_runtime_libs()
+        } else {
+            Vec::new()
+        };
+        let loader_guest = host_libs
+            .iter()
+            .find(|p| is_dynamic_loader(p))
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|name| format!("{SOCKET_PROXY_LIB_DIR}/{name}"));
+
+        let mut loader_prefix = Vec::new();
+        if let Some(loader) = &loader_guest {
+            loader_prefix.push(loader.clone());
+            loader_prefix.push("--library-path".to_string());
+            loader_prefix.push(SOCKET_PROXY_LIB_DIR.to_string());
+        }
+
+        let mut ro_binds = vec![RoBind {
+            src: helper_src,
+            dest: PathBuf::from(guest_target),
+        }];
+        for lib in &host_libs {
+            if let Some(name) = lib.file_name().and_then(|n| n.to_str()) {
+                ro_binds.push(RoBind {
+                    src: lib.clone(),
+                    dest: PathBuf::from(format!("{SOCKET_PROXY_LIB_DIR}/{name}")),
+                });
+            }
+        }
+        Ok((ro_binds, loader_prefix))
     }
 
     fn prepare_socket_directory(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
@@ -543,7 +559,19 @@ impl Runtime for LinuxRuntime {
             }
         };
         let status_cgroup_path = plan.cgroup_path.clone();
-        let mut process = TrackedProcess::NativePid(pid.expect("native pid"));
+        // `spawn_namespaced_process` returns `Ok` only with a non-zero pid, so
+        // `pid` is always `Some` here; map the impossible `None` to a typed error
+        // rather than panicking on the launch path.
+        let native_pid = match pid {
+            Some(pid) => pid,
+            None => {
+                let _ = self.cleanup(&plan);
+                return Err(RuntimeError::Syscall(SyscallError::ChildSetup {
+                    stage: "spawn returned no pid",
+                }));
+            }
+        };
+        let mut process = TrackedProcess::NativePid(native_pid);
         if let Err(error) = wait_for_service_socket(&status_socket_path, &mut process).await {
             let mut tracked_child = TrackedChild { process, plan };
             let _ = terminate_tracked_child(&mut tracked_child).await;
@@ -644,37 +672,117 @@ impl Runtime for LinuxRuntime {
             .join("jobs")
             .join(request.job_id.to_string())
             .join(request.run_id.to_string());
-        self.inject_workload_launcher(&rootfs_path)?;
+        // Per-run overlay so the job — like a service replica — gets a private
+        // writable layer over the shared, read-only artifact rootfs. The
+        // workload-launcher is bind-mounted read-only into the guest instead of
+        // being copied into the lower (which mutated the shared content-addressed
+        // bundle and raced across concurrent same-digest runs). See ADR-019 /
+        // ADR-026 / M4.
+        let upper = run_dir.join("upper");
+        let work = run_dir.join("work");
+        let merged = run_dir.join("merged");
         std::fs::create_dir_all(&run_dir)?;
+        // overlayfs requires an empty `work/work` for a fresh mount.
+        let overlay_work = work.join("work");
+        if overlay_work.exists() {
+            std::fs::remove_dir_all(&overlay_work).map_err(path_io(
+                "remove stale overlay work directory",
+                &overlay_work,
+            ))?;
+        }
+        create_dir_all("create job upper directory", &upper)?;
+        create_dir_all("create job work directory", &work)?;
+        create_dir_all("create job merged directory", &merged)?;
+        // Persistent ancestor dirs need the traverse bit so the workload's mapped
+        // userns-root can reach the read-only lower; the ephemeral overlay layers
+        // are chowned to the userns base so guest writes/copy-ups are owned by the
+        // workload. Mirrors the service `prepare` path.
+        self.set_traverse_mode(&run_dir)?;
+        self.chown_overlay_dir(&upper)?;
+        self.chown_overlay_dir(&work)?;
+        self.chown_overlay_dir(&merged)?;
+        if let Some(data_dir) = self.artifact_dir.parent() {
+            self.set_traverse_mode(data_dir)?;
+        }
+        self.set_traverse_mode(&self.runtime_dir)?;
+        self.set_traverse_mode(&self.artifact_dir)?;
+        if let Some(bundle) = rootfs_path.parent() {
+            self.set_traverse_mode(bundle)?;
+            self.set_traverse_mode(&rootfs_path)?;
+        }
+        let denia_dir = upper.join(".denia");
+        create_runtime_directory(&denia_dir)?;
+        self.chown_overlay_dir(&denia_dir)?;
+
         prepare_cgroup_directory(&self.cgroup_root, &cgroup_path, CGROUP_CONTROLLERS)?;
-        std::fs::write(cgroup_path.join("cpu.max"), cpu_max(request.cpu_millis))?;
+        // Resource-limit writes propagate errors (matching the service `prepare`
+        // path): a failed `memory.max`/`pids.max` write would otherwise silently
+        // launch the job unconstrained. Only `io.weight` stays best-effort, since
+        // it is advisory (L3).
+        std::fs::write(cgroup_path.join("cpu.max"), cpu_max(request.cpu_millis))
+            .map_err(path_io("write cgroup cpu.max", cgroup_path.join("cpu.max")))?;
         std::fs::write(
             cgroup_path.join("memory.max"),
             format!("{}\n", request.memory_bytes),
-        )?;
+        )
+        .map_err(path_io(
+            "write cgroup memory.max",
+            cgroup_path.join("memory.max"),
+        ))?;
         if let Some(swap) = request.memory_swap_max {
-            let _ = std::fs::write(cgroup_path.join("memory.swap.max"), format!("{}\n", swap));
+            std::fs::write(cgroup_path.join("memory.swap.max"), format!("{}\n", swap)).map_err(
+                path_io(
+                    "write cgroup memory.swap.max",
+                    cgroup_path.join("memory.swap.max"),
+                ),
+            )?;
         }
         if let Some(pids) = request.pids_max {
-            let _ = std::fs::write(cgroup_path.join("pids.max"), format!("{}\n", pids));
+            std::fs::write(cgroup_path.join("pids.max"), format!("{}\n", pids)).map_err(
+                path_io("write cgroup pids.max", cgroup_path.join("pids.max")),
+            )?;
         }
         if let Some(weight) = request.io_weight {
             let _ = std::fs::write(cgroup_path.join("io.weight"), format!("{}\n", weight));
         }
 
+        let cleanup_merged = merged.clone();
         let cleanup = || {
             let _ = std::fs::write(cgroup_path.join("cgroup.kill"), "1\n");
             let _ = remove_cgroup_dir_if_exists(&cgroup_path);
+            let _ = rustix::mount::unmount(&cleanup_merged, rustix::mount::UnmountFlags::DETACH);
             let _ = remove_dir_if_exists(&run_dir);
         };
 
-        let mut child_argv = vec![WORKLOAD_LAUNCHER_TARGET.to_string(), "--".to_string()];
+        let overlay = OverlaySpec {
+            lower: rootfs_path.clone(),
+            upper: upper.clone(),
+            work: work.clone(),
+            merged: merged.clone(),
+        };
+        let (ro_binds, loader_prefix) = match self.runtime_binary_binds(WORKLOAD_LAUNCHER_TARGET) {
+            Ok(binds) => binds,
+            Err(error) => {
+                cleanup();
+                return Err(error);
+            }
+        };
+        let mut child_argv = loader_prefix;
+        child_argv.push(WORKLOAD_LAUNCHER_TARGET.to_string());
+        child_argv.push("--".to_string());
         child_argv.extend(argv);
-        let namespace = NamespaceConfig::new(rootfs_path.clone(), child_argv)
+        let mut namespace = NamespaceConfig::new(merged.clone(), child_argv)
+            .with_overlay(overlay)
             .with_uid_map(self.userns_base, self.userns_size)
             .with_cgroup_path(cgroup_path.clone())
             .with_workdir(process.workdir)
             .with_env(env_map.into_iter().collect());
+        for bind in ro_binds {
+            namespace = namespace.with_ro_bind(bind);
+        }
+        if let Some(pids) = request.pids_max {
+            namespace = namespace.with_max_pids(Some(pids));
+        }
         let started_at = chrono::Utc::now();
         let pid = match tokio::task::spawn_blocking(move || spawn_namespaced_process(&namespace))
             .await?
@@ -817,17 +925,40 @@ impl Runtime for LinuxRuntime {
             });
         }
 
+        // Snapshot the replica's process start-time NOW (while it is confirmed
+        // running under the children lock). The console child re-reads it after
+        // joining the namespace fds and aborts if the pid was recycled onto a
+        // different process — closing the PID-reuse TOCTOU on setns (review 07).
+        let target_start_time = read_process_start_time(target_pid).ok_or_else(|| {
+            RuntimeError::InvalidServiceName {
+                name: "selected replica is no longer running".to_string(),
+            }
+        })?;
+
         let (pty, slave) = open_pty(request.cols, request.rows).map_err(RuntimeError::Io)?;
         let config = ConsoleLaunchConfig {
             target_pid,
+            target_start_time,
             cgroup_path: tracked.plan.cgroup_path.clone(),
             workdir: tracked.plan.namespace.workdir.clone(),
             env: tracked.plan.namespace.env.clone(),
             shell: "/bin/sh".to_string(),
+            // Reproduce the workload's per-launch privilege floor on the
+            // interactive shell (ADR-005 / ADR-033). The service launcher always
+            // runs hardened (NamespaceConfig defaults), so the console matches.
+            no_new_privs: true,
+            drop_bounding_caps: true,
+            seccomp: true,
         };
         let child_pid = tokio::task::spawn_blocking(move || spawn_console_process(&config, slave))
             .await?
             .map_err(RuntimeError::Syscall)?;
+
+        // Register the live console pid as a reaper backstop before handing the
+        // session out, so a dropped bridge task never leaks a zombie.
+        if let Ok(mut consoles) = self.console_children.lock() {
+            consoles.push(child_pid);
+        }
 
         Ok(RuntimeConsoleSession {
             session_id: request.session_id,
@@ -835,7 +966,73 @@ impl Runtime for LinuxRuntime {
             child_pid,
             cgroup_path: tracked.plan.cgroup_path,
             pty: Box::new(pty),
+            reaper: Some(Box::new(LinuxConsoleReaper {
+                child_pid,
+                console_children: self.console_children.clone(),
+            })),
         })
+    }
+}
+
+/// Console teardown handle handed to the API bridge. On `reap` it asks the shell
+/// to exit (SIGTERM), waits a short grace period, escalates to SIGKILL if the
+/// shell ignored SIGTERM, then `waitpid`s to collect the child and report how it
+/// ended. Deregisters the pid from the runtime backstop once reaped.
+struct LinuxConsoleReaper {
+    child_pid: u32,
+    console_children: Arc<Mutex<Vec<u32>>>,
+}
+
+impl LinuxConsoleReaper {
+    /// Grace period between SIGTERM and the SIGKILL escalation for a shell that
+    /// ignores SIGTERM (or is wedged). Bounded so a stuck session cannot hold the
+    /// replica's namespaces open indefinitely after its websocket closes.
+    const GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+    fn deregister(&self) {
+        if let Ok(mut consoles) = self.console_children.lock() {
+            consoles.retain(|pid| *pid != self.child_pid);
+        }
+    }
+}
+
+#[async_trait]
+impl crate::runtime::console::ConsoleReaper for LinuxConsoleReaper {
+    async fn reap(&self) -> crate::runtime::ConsoleExit {
+        use crate::runtime::ConsoleExit;
+        use crate::syscall::signal::{self, ProcessStatus};
+        use rustix::process::Signal;
+
+        let pid = self.child_pid;
+        // Ask the shell to exit.
+        let _ = signal::kill(pid, Signal::TERM);
+
+        // Poll for exit within the grace window; reap as soon as it is gone.
+        let deadline = tokio::time::Instant::now() + Self::GRACE;
+        let exit = loop {
+            match signal::try_wait(pid) {
+                Ok(ProcessStatus::Exited(code)) => break ConsoleExit::Code(code),
+                Ok(ProcessStatus::Signaled(sig)) => break ConsoleExit::Signal(sig),
+                // Still running, or wait failed (already reaped/ECHILD): decide
+                // by the clock below.
+                Ok(ProcessStatus::Running) => {}
+                Err(_) => break ConsoleExit::Unknown,
+            }
+            if tokio::time::Instant::now() >= deadline {
+                // Wedged or SIGTERM-ignoring shell: escalate and blocking-wait so
+                // the zombie is collected and the namespaces are released.
+                let _ = signal::kill(pid, Signal::KILL);
+                break match signal::wait(pid) {
+                    Ok(ProcessStatus::Exited(code)) => ConsoleExit::Code(code),
+                    Ok(ProcessStatus::Signaled(sig)) => ConsoleExit::Signal(sig),
+                    _ => ConsoleExit::Unknown,
+                };
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+
+        self.deregister();
+        exit
     }
 }
 
@@ -931,6 +1128,7 @@ impl LinuxRuntime {
     }
 
     fn reap_exited_children(&self) -> Result<(), RuntimeError> {
+        self.reap_console_children();
         let exited = {
             let mut children = self
                 .children
@@ -951,6 +1149,23 @@ impl LinuxRuntime {
             self.cleanup(&tracked.plan)?;
         }
         Ok(())
+    }
+
+    /// Backstop reaper for console-shell pids: non-blocking `try_wait` on each
+    /// registered console child, dropping any that have exited (collecting the
+    /// zombie). The bridge normally reaps its own child via [`LinuxConsoleReaper`];
+    /// this only catches children whose bridge task was dropped/panicked. A pid
+    /// the bridge already reaped reports `Err` (ECHILD) here and is also dropped.
+    fn reap_console_children(&self) {
+        let Ok(mut consoles) = self.console_children.lock() else {
+            return;
+        };
+        consoles.retain(|pid| {
+            matches!(
+                crate::syscall::signal::try_wait(*pid),
+                Ok(crate::syscall::signal::ProcessStatus::Running)
+            )
+        });
     }
 
     fn service_log_path(&self, service_id: uuid::Uuid) -> std::io::Result<PathBuf> {

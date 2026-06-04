@@ -34,4 +34,13 @@ pub enum RepoError {
     InvalidColumn(String),
     #[error("admin already initialized")]
     AdminAlreadyInitialized,
+    /// Domain/input validation failure that should surface as `400 Bad Request`
+    /// at the API boundary instead of an opaque 500. Wraps `DomainError` and
+    /// other invalid-input conditions detected inside repo writes.
+    #[error("validation error: {0}")]
+    Validation(String),
+    /// A uniqueness/constraint conflict (e.g. duplicate username) that should
+    /// surface as `409 Conflict` at the API boundary.
+    #[error("conflict: {0}")]
+    Conflict(String),
 }

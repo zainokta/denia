@@ -27,7 +27,7 @@ export function ProjectSwitcher() {
     <select
       value={selected}
       onChange={(e) => setActiveProject(e.target.value)}
-      aria-label="Filter dashboard by project"
+      aria-label="Active project (scopes dashboard, services, jobs and registries)"
       className="btn text-xs py-2 px-3 min-w-0 max-w-[40vw] truncate sm:max-w-[14rem]"
     >
       <option value="">all projects</option>

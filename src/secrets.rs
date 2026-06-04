@@ -120,17 +120,47 @@ impl SopsSecretStore {
             .join(format!("{}.sops.yaml", secret_ref.file_stem()))
     }
 
+    /// Reject any resolved secret path that escapes `<data_dir>/secrets`.
+    ///
+    /// This guard is meaningful on the *creation* path, before the file exists:
+    /// it walks the lexical path components and refuses `..` / root-absolute
+    /// segments, then confirms the result is still contained under the secrets
+    /// dir by string prefix. `SecretRef::parse` + `file_stem` already strip any
+    /// `/`, `..`, or NUL, so this is defense-in-depth — but unlike the previous
+    /// canonicalize-or-`Ok` check, it actually enforces containment when the
+    /// target does not yet resolve on disk. When both paths *do* canonicalize
+    /// (a re-encrypt over an existing file, or decrypt), the stronger
+    /// symlink-resolving check is applied as well.
     fn validate_secret_path(&self, path: &std::path::Path) -> Result<(), SecretError> {
+        use std::path::Component;
+
         let secrets_dir = self.data_dir.join("secrets");
-        match (secrets_dir.canonicalize(), path.canonicalize()) {
-            (Ok(canonical_dir), Ok(canonical_path)) => {
-                if !canonical_path.starts_with(&canonical_dir) {
+
+        // Lexical containment: no parent-dir or root escapes, and the path must
+        // start with the secrets dir prefix. Holds before the file exists.
+        let mut normalized = std::path::PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::ParentDir => return Err(SecretError::PathTraversal),
+                Component::Prefix(_) | Component::RootDir if !normalized.as_os_str().is_empty() => {
                     return Err(SecretError::PathTraversal);
                 }
-                Ok(())
+                other => normalized.push(other.as_os_str()),
             }
-            _ => Ok(()),
         }
+        if !normalized.starts_with(&secrets_dir) {
+            return Err(SecretError::PathTraversal);
+        }
+
+        // Strongest check when both ends resolve (existing file / symlinks).
+        if let (Ok(canonical_dir), Ok(canonical_path)) =
+            (secrets_dir.canonicalize(), path.canonicalize())
+            && !canonical_path.starts_with(&canonical_dir)
+        {
+            return Err(SecretError::PathTraversal);
+        }
+
+        Ok(())
     }
 
     pub async fn decrypt(
@@ -174,6 +204,7 @@ impl SopsSecretStore {
         payload: &SecretPayload,
     ) -> Result<(), SecretError> {
         let target = self.secret_path(project_id, secret_ref);
+        self.validate_secret_path(&target)?;
         let parent = target.parent().expect("secret_path always has parent");
         tokio::fs::create_dir_all(parent).await?;
         set_dir_permissions_700(parent)?;
@@ -210,6 +241,31 @@ impl SopsSecretStore {
         // Always remove plaintext, even on failure.
         let _ = tokio::fs::remove_file(&plain_path).await;
         result
+    }
+
+    /// Delete the on-disk SOPS file for a secret reference, if present.
+    ///
+    /// Used when a registry's credentials are cleared (auth → Anonymous) so the
+    /// previously-encrypted material does not linger on disk. A missing file is
+    /// not an error (idempotent). The path is validated against the secrets
+    /// root to refuse traversal, mirroring `decrypt`.
+    pub async fn delete(
+        &self,
+        project_id: uuid::Uuid,
+        secret_ref: &SecretRef,
+    ) -> Result<(), SecretError> {
+        let target = self.secret_path(project_id, secret_ref);
+        // `validate_secret_path` canonicalizes; only enforce when the file
+        // actually exists (canonicalize fails on missing paths).
+        if target.exists() {
+            self.validate_secret_path(&target)?;
+            match tokio::fs::remove_file(&target).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(SecretError::Io(e)),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -331,10 +387,93 @@ mod encrypt_tests {
     }
 
     #[tokio::test]
+    async fn delete_removes_existing_secret_and_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let store = SopsSecretStore::new(dir.path());
+        let pid = Uuid::now_v7();
+        let secret_ref = SecretRef::parse("registry-cred").unwrap();
+
+        let fake_yaml = "data: ENC[AES256_GCM,...]\n";
+        let runner = FakeCommandRunner::new(vec![CommandOutput {
+            status: 0,
+            stdout: fake_yaml.to_string(),
+            stderr: String::new(),
+        }]);
+        store
+            .encrypt(
+                &runner,
+                std::path::Path::new("sops"),
+                "age1qy0testrecipient",
+                pid,
+                &secret_ref,
+                &SecretPayload::new("u:p"),
+            )
+            .await
+            .unwrap();
+        let target = store.secret_path(pid, &secret_ref);
+        assert!(target.exists());
+
+        store.delete(pid, &secret_ref).await.expect("delete ok");
+        assert!(!target.exists(), "secret file should be removed");
+
+        // Idempotent: deleting again is not an error.
+        store
+            .delete(pid, &secret_ref)
+            .await
+            .expect("second delete is a no-op");
+    }
+
+    #[tokio::test]
     async fn secret_ref_generate_produces_parseable_ref() {
         let r = SecretRef::generate("registry");
         assert!(r.as_str().starts_with("registry-"));
         let reparsed = SecretRef::parse(r.as_str().to_string()).expect("parse generated ref");
         assert_eq!(reparsed.as_str(), r.as_str());
+    }
+
+    #[test]
+    fn validate_secret_path_accepts_in_namespace_path_before_file_exists() {
+        let dir = tempdir().unwrap();
+        let store = SopsSecretStore::new(dir.path());
+        let pid = Uuid::now_v7();
+        let secret_ref = SecretRef::parse("ok-ref").unwrap();
+        // The target does not exist yet (creation path); the lexical check must
+        // still accept a properly namespaced path.
+        let target = store.secret_path(pid, &secret_ref);
+        store
+            .validate_secret_path(&target)
+            .expect("in-namespace path accepted before the file exists");
+    }
+
+    #[test]
+    fn validate_secret_path_rejects_parent_dir_escape() {
+        let dir = tempdir().unwrap();
+        let store = SopsSecretStore::new(dir.path());
+        // A hand-built path that climbs out of the secrets dir must be rejected
+        // even though the file does not exist (the canonicalize fallback would
+        // have silently allowed it before).
+        let escape = dir
+            .path()
+            .join("secrets")
+            .join("..")
+            .join("..")
+            .join("etc")
+            .join("passwd.sops.yaml");
+        let err = store
+            .validate_secret_path(&escape)
+            .expect_err("parent-dir traversal must be rejected");
+        assert!(matches!(err, SecretError::PathTraversal));
+    }
+
+    #[test]
+    fn validate_secret_path_rejects_outside_secrets_dir() {
+        let dir = tempdir().unwrap();
+        let store = SopsSecretStore::new(dir.path());
+        // Absolute path that is not under <data_dir>/secrets at all.
+        let outside = std::path::Path::new("/tmp/elsewhere/leak.sops.yaml");
+        let err = store
+            .validate_secret_path(outside)
+            .expect_err("path outside secrets dir must be rejected");
+        assert!(matches!(err, SecretError::PathTraversal));
     }
 }

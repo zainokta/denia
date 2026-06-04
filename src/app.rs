@@ -76,6 +76,11 @@ pub struct AppState {
     /// Garbage collector handle used by both the background loop and the
     /// `POST /v1/oci/cache/gc` endpoint. Cloneable: shared status state.
     pub oci_cache_gc: Option<LayerCacheGc>,
+    /// Sender onto the job executor's run channel. The daemon injects this after
+    /// building the scheduler so `POST /v1/jobs/{id}/run` can enqueue a manual
+    /// run for execution (ADR-010). `None` in tests / contexts without a running
+    /// executor — the API still persists a Pending run and returns 202.
+    pub job_enqueue: Option<tokio::sync::mpsc::UnboundedSender<crate::domain::JobRun>>,
 }
 
 impl AppState {
@@ -265,6 +270,7 @@ impl AppState {
             autoscaler: None,
             oci_cache: None,
             oci_cache_gc: None,
+            job_enqueue: None,
         }
     }
 
@@ -272,6 +278,16 @@ impl AppState {
     /// once (the daemon ACME task at boot); subsequent calls return `None`.
     pub fn take_cert_issue_rx(&self) -> Option<crate::ingress::pingora::CertIssueReceiver> {
         self.cert_issue_rx.lock().ok().and_then(|mut g| g.take())
+    }
+
+    /// Inject the job-executor run-channel sender (daemon boot). Lets
+    /// `POST /v1/jobs/{id}/run` hand a manually-triggered run to the executor.
+    pub fn with_job_enqueue(
+        mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<crate::domain::JobRun>,
+    ) -> Self {
+        self.job_enqueue = Some(sender);
+        self
     }
 
     pub fn with_domain_verifier(
@@ -378,6 +394,7 @@ impl AppStateBuilder {
             autoscaler: None,
             oci_cache: None,
             oci_cache_gc: None,
+            job_enqueue: None,
         }
     }
 }
@@ -480,9 +497,14 @@ pub fn build_router(state: AppState) -> Router {
                     crate::registry::api_v2::registry_auth,
                 ))
                 // Exempt the registry from the global 1 MiB body cap below:
-                // image layer uploads (PATCH/PUT) are far larger. This inner
-                // layer overrides the outer DefaultBodyLimit for `/v2` only;
-                // `/v1` stays capped at 1 MiB.
+                // image layer uploads (PATCH/PUT/POST) are far larger. The
+                // `/v2` write handlers do NOT buffer the body — they stream it
+                // to disk while enforcing their own per-request size cap
+                // (`registry_max_blob_bytes` / `registry_max_manifest_bytes`),
+                // so disabling axum's buffered-extractor limit here is safe and
+                // preserves the ADR-015 bounded-RAM guarantee on the inbound
+                // path. This inner layer overrides the outer DefaultBodyLimit
+                // for `/v2` only; `/v1` stays capped at 1 MiB.
                 .layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))

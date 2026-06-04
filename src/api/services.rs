@@ -30,10 +30,7 @@ fn ensure_service_role(
     project_id: uuid::Uuid,
     role: Role,
 ) -> Result<(), ApiError> {
-    ensure_role(state, principal, project_id, role).map_err(|error| match error {
-        ApiError::Forbidden(_) => ApiError::NotFound("service not found".to_string()),
-        other => other,
-    })
+    crate::auth::ensure_role_or_not_found(state, principal, project_id, role, "service not found")
 }
 
 pub fn router() -> Router<AppState> {
@@ -227,6 +224,13 @@ async fn lifecycle_command(
                 Json(LifecycleResponse { service_id, action }),
             ))
         }
+        // `start`/`restart` are part of the ADR-008 lifecycle surface but their
+        // implementation lives in the deploy pipeline (owned elsewhere) and is
+        // not yet wired here. Distinguish a known-but-unimplemented action from
+        // an outright unknown one so clients get an accurate signal.
+        "start" | "restart" => Err(ApiError::BadRequest(format!(
+            "lifecycle action not yet implemented: {action}"
+        ))),
         _ => Err(ApiError::BadRequest(format!(
             "unsupported lifecycle action: {action}"
         ))),
@@ -323,7 +327,11 @@ async fn service_metrics(
     // A scaled-to-zero service has no live cgroup, so the read hits ENOENT. Treat
     // that as "no metrics yet" (empty, 200) rather than a 500 — matching the
     // sibling `/v1/workloads` endpoint and the no-promoted-deployment branch above.
-    match reader.read_by_id(&service.name, service.id, deployment_id) {
+    // The cgroup read is blocking fs I/O; run it under `block_in_place` so it does
+    // not stall the async executor thread, matching the SSE log path (review 07 LOW).
+    match tokio::task::block_in_place(|| {
+        reader.read_by_id(&service.name, service.id, deployment_id)
+    }) {
         Ok(snapshot) => Ok(Json(vec![snapshot])),
         Err(_) => Ok(Json(Vec::new())),
     }

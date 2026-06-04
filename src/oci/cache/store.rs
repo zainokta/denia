@@ -250,8 +250,16 @@ impl LayerCache {
         f.sync_all()?;
         drop(f);
         let _ = fs::set_permissions(tmp_path, fs::Permissions::from_mode(0o600));
-        fs::rename(tmp_path, &final_path)?;
+        // Write the `.lastref` sidecar BEFORE renaming the blob into place, so
+        // a freshly-installed blob is never observed by the GC without a
+        // sidecar. The GC treats a missing sidecar as "expired" (see
+        // `gc.rs::sweep_once`); renaming first left a window where a concurrent
+        // sweep could see the blob with no sidecar and delete it (only the
+        // pull's reservation saved it). Touch-then-rename closes that window.
+        // An orphan sidecar (if the rename below fails) is harmless: the GC
+        // only lists blob files, never bare sidecars.
         self.touch_lastref(digest)?;
+        fs::rename(tmp_path, &final_path)?;
         Ok(final_path)
     }
 
@@ -263,6 +271,23 @@ impl LayerCache {
             .file_name()
             .map(|s| s.to_os_string())
             .unwrap_or_default();
+        name.push(TEMP_SUFFIX);
+        path.set_file_name(name);
+        Ok(path)
+    }
+
+    /// Allocate a PER-PULL UNIQUE temp path (`<hex>.<uuid>.tmp`) so two
+    /// concurrent pulls of the same digest never share or interleave one tmp
+    /// file. The name still ends in [`TEMP_SUFFIX`], so the GC ignores it.
+    /// Caller opens with `O_EXCL`/`create_new`, streams, then calls
+    /// [`finalize_temp`] with this exact path.
+    pub fn unique_temp_path(&self, digest: &str) -> Result<PathBuf, CacheError> {
+        let mut path = self.blob_path(digest)?;
+        let mut name = path
+            .file_name()
+            .map(|s| s.to_os_string())
+            .unwrap_or_default();
+        name.push(format!(".{}", uuid::Uuid::now_v7()));
         name.push(TEMP_SUFFIX);
         path.set_file_name(name);
         Ok(path)

@@ -44,6 +44,7 @@ vi.mock('#/hooks/useAuth', () => ({
 }))
 
 import { runQuery } from '#/effect/runtime'
+import { setActiveProject } from '#/effect/active-project-store'
 
 const mockRunQuery = runQuery as ReturnType<typeof vi.fn>
 
@@ -148,12 +149,27 @@ function makeWrapper() {
 
 afterEach(() => {
   cleanup()
+  setActiveProject('')
 })
 
 describe('ServicesIndex', () => {
   beforeEach(() => {
     mockRunQuery.mockReset()
     mockRunQuery.mockImplementation((effect: unknown) => dispatch(effect))
+  })
+
+  it('scopes the list to the active project from the switcher', async () => {
+    // Both fixtures belong to PROJECT; selecting it keeps them.
+    setActiveProject(PROJECT)
+    render(<ServicesIndex />, { wrapper: makeWrapper() })
+    expect(await screen.findByText('web')).toBeTruthy()
+    expect(screen.getByText('api')).toBeTruthy()
+  })
+
+  it('shows the project-scoped empty state when the active project has no services', async () => {
+    setActiveProject('0190b8a0-0000-7000-8000-0000000000ff')
+    render(<ServicesIndex />, { wrapper: makeWrapper() })
+    expect(await screen.findByText(/No services in this project/)).toBeTruthy()
   })
 
   it('renders service rows with derived status', async () => {

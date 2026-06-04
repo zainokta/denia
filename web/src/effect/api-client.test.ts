@@ -5,7 +5,7 @@ import { ApiClient, ApiClientLive } from './api-client'
 import { AppConfig } from './config'
 import { ApiError } from './errors'
 import { clearToken, getToken, setToken, subscribe } from './auth-store'
-import { ArtifactRef, Deployment, Job, JobRun, JobRunStatus, LoginResult, Me, RouteView, RouteViews, SecurityPosture, Service } from './schema'
+import { ArtifactRef, Deployment, Job, JobRun, JobRunStatus, LoginResult, Me, RouteView, RouteViews, Service } from './schema'
 
 const TestLayer = ApiClientLive.pipe(
   Layer.provide(
@@ -229,7 +229,6 @@ const emptyApi = () =>
 
 const mockApi = (success = true) =>
   Layer.succeed(ApiClient)({
-    listNodes: emptyApi() as never,
     login: ((_u: string, _p: string) => emptyApi()) as never,
     logout: emptyApi() as never,
     me: emptyApi() as never,
@@ -257,7 +256,6 @@ const mockApi = (success = true) =>
     deleteService: ((_id: string) => Effect.void) as never,
     getServiceDeployments: ((_id: number) => emptyApi()) as never,
     getDeployment: ((_id: string) => emptyApi()) as never,
-    getServiceLogs: ((_id: number) => emptyApi()) as never,
     getServiceMetrics: ((_id: number) => emptyApi()) as never,
     createDeployment: ((_input: { service_id: number }) => emptyApi()) as never,
     stopService: ((_id: number) => emptyApi()) as never,
@@ -397,7 +395,6 @@ describe('Job schemas', () => {
 
 describe('ApiClient jobs', () => {
   const jobsMock = Layer.succeed(ApiClient)({
-    listNodes: emptyApi() as never,
     login: ((_u: string, _p: string) => emptyApi()) as never,
     logout: emptyApi() as never,
     me: emptyApi() as never,
@@ -425,7 +422,6 @@ describe('ApiClient jobs', () => {
     deleteService: ((_id: string) => Effect.void) as never,
     getServiceDeployments: ((_id: number) => emptyApi()) as never,
     getDeployment: ((_id: string) => emptyApi()) as never,
-    getServiceLogs: ((_id: number) => emptyApi()) as never,
     getServiceMetrics: ((_id: number) => emptyApi()) as never,
     createDeployment: ((_input: { service_id: number }) => emptyApi()) as never,
     stopService: ((_id: number) => emptyApi()) as never,
@@ -633,21 +629,6 @@ describe('Service schema', () => {
     ),
   )
 
-  it.effect('SecurityPosture decodes with null mapped_uid', () =>
-    Schema.decodeUnknownEffect(SecurityPosture)({
-      userns: true,
-      mapped_uid: null,
-      no_new_privs: false,
-      caps_dropped: true,
-    }).pipe(
-      Effect.map((p) => {
-        expect(p.userns).toBe(true)
-        expect(p.mapped_uid).toBeNull()
-        expect(p.no_new_privs).toBe(false)
-        expect(p.caps_dropped).toBe(true)
-      }),
-    ),
-  )
 })
 
 describe('ApiClient projects', () => {
@@ -728,7 +709,6 @@ const FIXTURE_ROUTES = [
 
 const mockIngressApi = () =>
   Layer.succeed(ApiClient)({
-    listNodes: emptyApi() as never,
     login: ((_u: string, _p: string) => emptyApi()) as never,
     logout: emptyApi() as never,
     me: emptyApi() as never,
@@ -756,7 +736,6 @@ const mockIngressApi = () =>
     deleteService: ((_id: string) => Effect.void) as never,
     getServiceDeployments: ((_id: number) => emptyApi()) as never,
     getDeployment: ((_id: string) => emptyApi()) as never,
-    getServiceLogs: ((_id: number) => emptyApi()) as never,
     getServiceMetrics: ((_id: number) => emptyApi()) as never,
     createDeployment: ((_input: { service_id: number }) => emptyApi()) as never,
     stopService: ((_id: number) => emptyApi()) as never,
@@ -877,7 +856,6 @@ describe('putService', () => {
     }).pipe(
       Effect.provide(
         Layer.succeed(ApiClient)({
-          listNodes: emptyApi() as never,
           login: ((_u: string, _p: string) => emptyApi()) as never,
           logout: emptyApi() as never,
           me: emptyApi() as never,
@@ -908,7 +886,6 @@ describe('putService', () => {
           deleteService: ((_id: string) => Effect.void) as never,
           getServiceDeployments: ((_id: number) => emptyApi()) as never,
           getDeployment: ((_id: string) => emptyApi()) as never,
-          getServiceLogs: ((_id: number) => emptyApi()) as never,
           getServiceMetrics: ((_id: number) => emptyApi()) as never,
           createDeployment: ((_input: { service_id: number }) => emptyApi()) as never,
           stopService: ((_id: number) => emptyApi()) as never,

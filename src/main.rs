@@ -10,9 +10,17 @@ fn main() -> anyhow::Result<()> {
         .and_then(|path| std::path::Path::new(path).file_name())
         .is_some_and(|name| name == "socket-proxy")
     {
-        // socket_proxy::run_from_args is async; build a small runtime just
-        // for it (mirrors what #[tokio::main] used to do).
-        let rt = tokio::runtime::Runtime::new()?;
+        // socket_proxy::run_from_args is async; build a CURRENT-THREAD runtime so
+        // the whole process is single-threaded. The proxy drops its capability
+        // bounding set and (best-effort) installs seccomp inside `run`; capability
+        // bounding-set drop is inherently per-thread, so a single-threaded runtime
+        // is what makes that drop cover the entire process. A multi-thread runtime
+        // would leave the proxy's other worker threads with their bounding set
+        // intact and unfiltered. The proxy is I/O-bound (bidirectional copy), so a
+        // current-thread runtime is sufficient. See M1 / ADR-005.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         rt.block_on(denia::socket_proxy::run_from_args(args))?;
         return Ok(());
     }
