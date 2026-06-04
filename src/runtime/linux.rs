@@ -345,6 +345,7 @@ impl LinuxRuntime {
         create_dir_all("create replica merged directory", &plan.merged)?;
         let denia_dir = plan.upper.join(".denia");
         create_runtime_directory(&denia_dir)?;
+        self.prepare_socket_directory(plan)?;
 
         // Persistent ancestor dirs: traverse-only (mode 0755), ownership left
         // with the daemon so it can keep creating future deployment/replica
@@ -376,7 +377,6 @@ impl LinuxRuntime {
             self.set_traverse_mode(bundle_dir)?;
             self.set_traverse_mode(&plan.rootfs_path)?;
         }
-        self.prepare_socket_directory(plan)?;
         restore_current_process_owner(&denia_dir)?;
         let helper = self.runtime_helper_staging(SOCKET_PROXY_TARGET)?;
         self.stage_runtime_helper(&plan.upper, &helper)?;
