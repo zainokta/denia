@@ -141,6 +141,13 @@ impl FakeHealthChecker {
     pub fn healthy() -> Self {
         Self { healthy: true }
     }
+
+    /// Always reports `HealthError::Failed`. Used to exercise the
+    /// partial-deploy compensation path (a started replica must be stopped when
+    /// the post-start healthcheck fails).
+    pub fn failing() -> Self {
+        Self { healthy: false }
+    }
 }
 
 #[async_trait]
