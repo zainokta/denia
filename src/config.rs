@@ -702,7 +702,8 @@ impl AppConfig {
     }
 
     pub fn require_acme_email(&self, tls_in_use: bool) -> Result<(), ConfigError> {
-        if tls_in_use && self.acme_email.is_none() {
+        let control_tls_in_use = self.control_tls && self.control_domain.is_some();
+        if (tls_in_use || control_tls_in_use) && self.acme_email.is_none() {
             return Err(ConfigError::AcmeEmailRequired);
         }
         Ok(())
@@ -738,6 +739,17 @@ mod ingress_tls_tests {
     fn require_acme_email_ok_when_no_tls() {
         let c = base();
         assert!(c.require_acme_email(false).is_ok());
+    }
+
+    #[test]
+    fn require_acme_email_errors_when_control_domain_tls_without_email() {
+        let mut c = base();
+        c.control_domain = Some("denia.example.com".into());
+        c.control_tls = true;
+        assert!(matches!(
+            c.require_acme_email(false),
+            Err(ConfigError::AcmeEmailRequired)
+        ));
     }
 
     #[test]
