@@ -1,5 +1,6 @@
 # Builds, checksums, and minisign-signs Denia release binaries, then publishes
-# them as GitHub release assets. Consumed by `denia update` (ADR-029).
+# them as GitHub release assets. Consumed by `denia update` (ADR-029). Also
+# publishes the single `denia` crate to crates.io (ADR-036).
 #
 # Trigger: push a tag `vX.Y.Z` whose X.Y.Z equals the Cargo.toml version.
 #
@@ -8,6 +9,10 @@
 #                          WITHOUT a password: `minisign -W -p key.pub -s key.sec`.
 #                          The matching public key (line 2 of key.pub) must be
 #                          pinned in src/cli/update.rs as MINISIGN_PUBKEY.
+# Optional repo secret:
+#   CARGO_REGISTRY_TOKEN - crates.io API token. When set, the publish-crates
+#                          job runs `cargo publish` for `denia`; when unset, it
+#                          skips (release of binaries is unaffected).
 name: release
 
 on:
@@ -107,8 +112,72 @@ jobs:
           path: dist/denia-${{ matrix.arch }}-linux-gnu
           if-no-files-found: error
 
+  # Cross-platform client binary for non-Linux developers. `denia` is a single
+  # crate: on macOS/Windows the server modules + Linux deps are cfg'd out, so
+  # `cargo build` yields a client-only `denia` with just auth/push/console
+  # (ADR-037). No web console (rust-embed is Linux-gated) and no mold here.
+  client:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-14
+            asset: denia-x86_64-apple-darwin
+            ext: ""
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            asset: denia-aarch64-apple-darwin
+            ext: ""
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            asset: denia-x86_64-pc-windows-msvc.exe
+            ext: ".exe"
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        # bash on every runner (incl. Windows Git Bash) so the staging script
+        # below is identical across macOS and Windows.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}" >&2
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build client binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/denia${{ matrix.ext }}" "dist/${{ matrix.asset }}"
+          chmod +x "dist/${{ matrix.asset }}" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
   release:
-    needs: build
+    needs: [build, client]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -119,7 +188,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          find artifacts -type f -name 'denia-*-linux-gnu' -exec cp {} dist/ \;
+          # Server (linux-gnu) + client (apple-darwin / pc-windows-msvc) assets.
+          find artifacts -type f -name 'denia-*' -exec cp {} dist/ \;
           ls -l dist
 
       - name: Generate SHA256SUMS
@@ -127,7 +197,7 @@ jobs:
         run: |
           set -euo pipefail
           printf '# denia-release: %s\n' "${GITHUB_REF_NAME}" > SHA256SUMS
-          sha256sum denia-*-linux-gnu >> SHA256SUMS
+          sha256sum denia-* >> SHA256SUMS
 
       - name: Install minisign
         run: |
@@ -153,6 +223,72 @@ jobs:
           files: |
             dist/denia-x86_64-linux-gnu
             dist/denia-aarch64-linux-gnu
+            dist/denia-x86_64-apple-darwin
+            dist/denia-aarch64-apple-darwin
+            dist/denia-x86_64-pc-windows-msvc.exe
             dist/SHA256SUMS
             dist/SHA256SUMS.minisig
           fail_on_unmatched_files: true
+
+  # Publish the single `denia` crate to crates.io. Runs only when
+  # CARGO_REGISTRY_TOKEN is configured; otherwise it logs and skips so binary
+  # releases are unaffected. The verify build needs the embedded SPA, so the
+  # web console is built first and force-included via [package].include
+  # (ADR-037). Gated behind the binary builds so a crate that fails to compile
+  # on macOS/Windows is never published.
+  publish-crates:
+    needs: [build, client]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}" >&2
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Enable pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.25.0 --activate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      # rust-embed bakes web/dist/client into the crate; build it so the
+      # published tarball (which force-includes web/dist/client) compiles.
+      - name: Build web console
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Publish denia to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "CARGO_REGISTRY_TOKEN not set; skipping crates.io publish."
+            exit 0
+          fi
+          # --allow-dirty: the force-included web/dist/client is build output and
+          # is gitignored, so cargo would otherwise refuse on untracked files.
+          if cargo publish --allow-dirty 2>&1 | tee /tmp/publish.log; then
+            echo "published."
+          elif grep -qiE 'already (exists|uploaded)' /tmp/publish.log; then
+            echo "version already on crates.io; treating as success."
+          else
+            echo "cargo publish failed" >&2
+            exit 1
+          fi

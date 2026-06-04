@@ -77,7 +77,9 @@ pub fn pack_context(
     Ok(())
 }
 
-#[cfg(test)]
+// The round-trip tests use the server-only `api::uploads` extractor, so they
+// only build on Linux. The packer itself is portable. See ADR-036.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::fs;
