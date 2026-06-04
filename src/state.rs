@@ -80,6 +80,15 @@ pub struct SqliteStore {
 impl SqliteStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, StateError> {
         let path = path.as_ref();
+        // Ensure the parent directory exists. The default layout nests the DB
+        // under `<data_dir>/sqlite/`; a `denia setup` install pre-creates it
+        // `0700 denia:denia`, but an env-only / `cargo run` deploy may not, so
+        // create it here so `Connection::open` does not fail with ENOENT.
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
