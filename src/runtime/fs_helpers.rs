@@ -101,13 +101,29 @@ pub(crate) fn enable_cgroup_controllers(
                 .split_whitespace()
                 .any(|available| available == **controller)
         })
-        .map(|controller| format!("+{controller}"))
+        .copied()
         .collect::<Vec<_>>();
     if requested.is_empty() {
         return Ok(());
     }
+    let enabled = std::fs::read_to_string(&subtree_control_path).map_err(path_io(
+        "read enabled cgroup controllers",
+        &subtree_control_path,
+    ))?;
+    let missing = requested
+        .into_iter()
+        .filter(|controller| {
+            !enabled
+                .split_whitespace()
+                .any(|enabled| enabled == *controller)
+        })
+        .map(|controller| format!("+{controller}"))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
 
-    std::fs::write(&subtree_control_path, format!("{}\n", requested.join(" ")))
+    std::fs::write(&subtree_control_path, format!("{}\n", missing.join(" ")))
         .map_err(path_io("enable cgroup controllers", &subtree_control_path))
 }
 
