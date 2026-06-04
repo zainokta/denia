@@ -38,7 +38,11 @@ async fn get_node_metrics(
 ) -> Result<Json<NodeSnapshot>, ApiError> {
     ensure_super_admin(&principal)?;
     let reader = NodeMetricsReader::new(state.config.node_disk_path.clone());
-    Ok(Json(reader.read()?))
+    // procfs + statvfs reads are blocking; run them under `block_in_place` so
+    // they do not stall the async executor thread, matching the SSE log path.
+    // See review 07 (LOW: blocking fs on async handlers).
+    let snapshot = tokio::task::block_in_place(|| reader.read())?;
+    Ok(Json(snapshot))
 }
 
 async fn list_workloads(
@@ -70,7 +74,11 @@ async fn list_workloads(
         }
         let deployment_id = state.deployments.promoted_deployment(service.id)?;
         let (cpu, mem) = match deployment_id {
-            Some(d) => match reader.read_by_id(&service.name, service.id, d) {
+            // cgroup v2 read is blocking fs I/O; keep it off the async executor
+            // thread via `block_in_place` (review 07 LOW). Shape unchanged.
+            Some(d) => match tokio::task::block_in_place(|| {
+                reader.read_by_id(&service.name, service.id, d)
+            }) {
                 Ok(snap) => (Some(snap.cpu_usage_usec), Some(snap.memory_current_bytes)),
                 Err(_) => (None, None),
             },
