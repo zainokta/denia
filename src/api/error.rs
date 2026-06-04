@@ -80,6 +80,17 @@ impl From<NodeMetricsError> for ApiError {
     }
 }
 
+/// Classify a `rusqlite::Error` as a UNIQUE/constraint violation so the API
+/// layer can map duplicate-key inserts to `409 Conflict` instead of an opaque
+/// 500. Centralizes the match the domains handler previously did inline.
+pub(crate) fn is_constraint_violation(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.code == rusqlite::ErrorCode::ConstraintViolation
+    )
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let detail = format!("{self:?}");
@@ -103,6 +114,16 @@ impl IntoResponse for ApiError {
                 crate::state::StateError::LastSuperAdmin => {
                     (StatusCode::CONFLICT, error.to_string())
                 }
+                crate::state::StateError::AdminAlreadyInitialized => {
+                    (StatusCode::CONFLICT, error.to_string())
+                }
+                crate::state::StateError::Validation(_) => {
+                    (StatusCode::BAD_REQUEST, error.to_string())
+                }
+                crate::state::StateError::Conflict(_) => (StatusCode::CONFLICT, error.to_string()),
+                crate::state::StateError::Sqlite(e) if is_constraint_violation(e) => {
+                    (StatusCode::CONFLICT, "resource already exists".to_string())
+                }
                 _ => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal server error".to_string(),
@@ -116,6 +137,11 @@ impl IntoResponse for ApiError {
                 RepoError::InvalidCredentials => (StatusCode::UNAUTHORIZED, error.to_string()),
                 RepoError::LastSuperAdmin => (StatusCode::CONFLICT, error.to_string()),
                 RepoError::AdminAlreadyInitialized => (StatusCode::CONFLICT, error.to_string()),
+                RepoError::Validation(_) => (StatusCode::BAD_REQUEST, error.to_string()),
+                RepoError::Conflict(_) => (StatusCode::CONFLICT, error.to_string()),
+                RepoError::Sqlite(e) if is_constraint_violation(e) => {
+                    (StatusCode::CONFLICT, "resource already exists".to_string())
+                }
                 _ => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal server error".to_string(),
@@ -170,5 +196,83 @@ impl IntoResponse for ApiError {
             tracing::error!(error = %detail, "ApiError mapped to 500");
         }
         (status, Json(serde_json::json!({ "error": message }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repo::RepoError;
+
+    fn status_of(err: ApiError) -> StatusCode {
+        err.into_response().status()
+    }
+
+    #[test]
+    fn repo_validation_maps_to_400() {
+        assert_eq!(
+            status_of(ApiError::Repo(RepoError::Validation("bad".into()))),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn repo_conflict_maps_to_409() {
+        assert_eq!(
+            status_of(ApiError::Repo(RepoError::Conflict("dup".into()))),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn state_validation_maps_to_400() {
+        assert_eq!(
+            status_of(ApiError::State(crate::state::StateError::Validation(
+                "bad".into()
+            ))),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn state_conflict_maps_to_409() {
+        assert_eq!(
+            status_of(ApiError::State(crate::state::StateError::Conflict(
+                "dup".into()
+            ))),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn sqlite_constraint_violation_maps_to_409() {
+        let err = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::ConstraintViolation,
+                extended_code: 2067,
+            },
+            Some("UNIQUE constraint failed".into()),
+        );
+        assert!(is_constraint_violation(&err));
+        assert_eq!(
+            status_of(ApiError::Repo(RepoError::Sqlite(err))),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn non_constraint_sqlite_error_maps_to_500() {
+        let err = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy,
+                extended_code: 5,
+            },
+            Some("db busy".into()),
+        );
+        assert!(!is_constraint_violation(&err));
+        assert_eq!(
+            status_of(ApiError::Repo(RepoError::Sqlite(err))),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }
