@@ -337,6 +337,8 @@ impl LinuxRuntime {
         create_dir_all("create replica upper directory", &plan.upper)?;
         create_dir_all("create replica work directory", &plan.work)?;
         create_dir_all("create replica merged directory", &plan.merged)?;
+        let denia_dir = plan.upper.join(".denia");
+        create_runtime_directory(&denia_dir)?;
 
         // Persistent ancestor dirs: traverse-only (mode 0755), ownership left
         // with the daemon so it can keep creating future deployment/replica
@@ -369,8 +371,6 @@ impl LinuxRuntime {
             self.set_traverse_mode(&plan.rootfs_path)?;
         }
         self.prepare_socket_directory(plan)?;
-        let denia_dir = plan.upper.join(".denia");
-        create_runtime_directory(&denia_dir)?;
         self.chown_overlay_dir(&denia_dir)?;
         prepare_cgroup_directory(&self.cgroup_root, &plan.cgroup_path, CGROUP_CONTROLLERS)?;
         std::fs::write(
@@ -543,7 +543,10 @@ impl Runtime for LinuxRuntime {
     async fn start(&self, request: RuntimeStartRequest) -> Result<RuntimeStatus, RuntimeError> {
         self.reap_exited_children()?;
         let plan = self.plan(&request)?;
-        self.prepare(&plan, &request)?;
+        if let Err(error) = self.prepare(&plan, &request) {
+            let _ = self.cleanup(&plan);
+            return Err(error);
+        }
         let status_socket_path = plan.socket_path.clone();
         let connect_socket_path = plan.socket_connect_path.clone();
         let log_path = match self.service_log_path(request.service_id) {
@@ -701,6 +704,8 @@ impl Runtime for LinuxRuntime {
         create_dir_all("create job upper directory", &upper)?;
         create_dir_all("create job work directory", &work)?;
         create_dir_all("create job merged directory", &merged)?;
+        let denia_dir = upper.join(".denia");
+        create_runtime_directory(&denia_dir)?;
         // Persistent ancestor dirs need the traverse bit so the workload's mapped
         // userns-root can reach the read-only lower; the ephemeral overlay layers
         // are chowned to the userns base so guest writes/copy-ups are owned by the
@@ -718,8 +723,6 @@ impl Runtime for LinuxRuntime {
             self.set_traverse_mode(bundle)?;
             self.set_traverse_mode(&rootfs_path)?;
         }
-        let denia_dir = upper.join(".denia");
-        create_runtime_directory(&denia_dir)?;
         self.chown_overlay_dir(&denia_dir)?;
 
         prepare_cgroup_directory(&self.cgroup_root, &cgroup_path, CGROUP_CONTROLLERS)?;
@@ -1214,6 +1217,7 @@ mod tests {
         remove_dir_if_exists, safe_artifact_name, terminate_tracked_child,
         terminate_tracked_process, wait_for_service_socket,
     };
+    use crate::runtime::runtime_trait::Runtime;
     use crate::syscall::ns::NamespaceConfig;
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
@@ -1520,6 +1524,40 @@ mod tests {
         assert!(
             !outside_socket.exists(),
             "prepare must not remove or write through a socket symlink"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_cleans_replica_dir_when_prepare_fails() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let runtime_dir = tmp.path().join("runtime");
+        let artifact_dir = tmp.path().join("artifacts");
+        let cgroup_dir = tmp.path().join("cgroup");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+
+        let (artifact, _bundle_dir, _rootfs) =
+            write_process_bundle(&artifact_dir, "sha256:start-cleanup");
+        let outside_socket = tmp.path().join("outside-socket");
+        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir);
+        let request = runtime_request(&runtime_dir, artifact, "test-svc");
+        let plan = runtime.plan(&request).expect("plan");
+        std::fs::create_dir_all(plan.socket_path.parent().unwrap()).expect("socket dir");
+        symlink(&outside_socket, &plan.socket_path).expect("socket symlink");
+        let replica_dir = plan.replica_dir.clone();
+
+        let error = runtime
+            .start(request)
+            .await
+            .expect_err("prepare failure should surface from start");
+
+        assert!(
+            matches!(error, RuntimeError::UnsafeRuntimePath { ref path } if path == &plan.socket_path),
+            "expected unsafe service socket path, got: {error:?}"
+        );
+        assert!(
+            !replica_dir.exists(),
+            "start must clean the replica dir after prepare failure"
         );
     }
 
