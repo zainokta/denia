@@ -18,6 +18,10 @@ pub enum RuntimeError {
     InvalidArgv { argv0: String },
     #[error("runtime process workdir must be absolute: {workdir}")]
     InvalidWorkdir { workdir: String },
+    #[error(
+        "runtime process user uid/gid must fit user namespace size {size}: uid={uid} gid={gid}"
+    )]
+    InvalidProcessUser { uid: u32, gid: u32, size: u32 },
     #[error("runtime process environment key is invalid: {key}")]
     InvalidEnvironmentKey { key: String },
     #[error("rootfs bundle is missing: {path}")]

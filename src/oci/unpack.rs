@@ -6,9 +6,10 @@ use std::{
 };
 
 use flate2::read::GzDecoder;
-use tar::Archive;
+use tar::{Archive, Entry};
 
 use super::{LayerBlob, LayerCompression, OciError};
+use crate::syscall::{caps, chown};
 
 pub struct TarRootfsUnpacker;
 
@@ -53,6 +54,7 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
 
     let mut archive = Archive::new(reader);
     let mut pending_whiteouts: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut pending_dir_owners: Vec<(PathBuf, u32, u32)> = Vec::new();
     let mut total_bytes: u64 = 0;
     let mut file_count: u64 = 0;
 
@@ -115,9 +117,14 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
             ))));
         }
 
-        let is_symlink = entry.header().entry_type().is_symlink();
-        if entry.header().entry_type().is_dir() {
+        let entry_type = entry.header().entry_type();
+        let is_dir = entry_type.is_dir();
+        let is_symlink = entry_type.is_symlink();
+        if is_dir {
             create_dir_all_no_symlink(rootfs_dir, &safe_path)?;
+            if let Some((uid, gid)) = entry_owner(&entry)? {
+                pending_dir_owners.push((safe_path.clone(), uid, gid));
+            }
         } else if is_symlink {
             let target = entry
                 .link_name()?
@@ -140,6 +147,7 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
                 fs::remove_dir_all(&safe_path)?;
             }
             std::os::unix::fs::symlink(&target, &safe_path)?;
+            preserve_path_owner(&safe_path, &entry)?;
         } else {
             let entry_size = entry.header().entry_size()?;
             if entry_size > MAX_SINGLE_FILE_BYTES {
@@ -179,6 +187,15 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
                 let _ = fs::set_permissions(&safe_path, fs::Permissions::from_mode(safe_mode));
             }
         }
+        if !is_dir && !is_symlink {
+            preserve_path_owner(&safe_path, &entry)?;
+        }
+    }
+
+    for (path, uid, gid) in pending_dir_owners.into_iter().rev() {
+        if caps::has_effective_cap_chown() {
+            ignore_chown_eperm(chown::lchown(&path, uid, gid))?;
+        }
     }
 
     for (target, _) in pending_whiteouts {
@@ -194,6 +211,38 @@ fn apply_layer(layer: &LayerBlob, rootfs_dir: &Path) -> Result<(), OciError> {
     }
 
     Ok(())
+}
+
+fn preserve_path_owner<R: Read>(path: &Path, entry: &Entry<'_, R>) -> Result<(), OciError> {
+    if !caps::has_effective_cap_chown() {
+        return Ok(());
+    }
+    let Some((uid, gid)) = entry_owner(entry)? else {
+        return Ok(());
+    };
+    ignore_chown_eperm(chown::lchown(path, uid, gid))
+}
+
+fn ignore_chown_eperm(result: Result<(), crate::syscall::SyscallError>) -> Result<(), OciError> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(crate::syscall::SyscallError::Io(error))
+            if error.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(OciError::Io(std::io::Error::other(error))),
+    }
+}
+
+fn entry_owner<R: Read>(entry: &Entry<'_, R>) -> Result<Option<(u32, u32)>, OciError> {
+    let uid = entry.header().uid().unwrap_or(0);
+    let gid = entry.header().gid().unwrap_or(0);
+    let uid = u32::try_from(uid)
+        .map_err(|_| OciError::Io(std::io::Error::other("tar uid exceeds u32")))?;
+    let gid = u32::try_from(gid)
+        .map_err(|_| OciError::Io(std::io::Error::other("tar gid exceeds u32")))?;
+    Ok(Some((uid, gid)))
 }
 
 fn safe_join(root: &Path, entry: &Path) -> Result<PathBuf, OciError> {

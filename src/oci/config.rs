@@ -21,6 +21,9 @@ pub struct OciImageProcessConfig {
     #[serde(default, rename = "WorkingDir")]
     #[allow(non_snake_case)]
     pub working_dir: Option<String>,
+    #[serde(default, rename = "User")]
+    #[allow(non_snake_case)]
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

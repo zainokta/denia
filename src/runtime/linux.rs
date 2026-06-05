@@ -200,6 +200,7 @@ impl LinuxRuntime {
         let manifest = std::fs::read_to_string(&manifest_path)?;
         let process: LinuxRuntimeProcessSpec = serde_json::from_str(&manifest)?;
         validate_process_spec(&process, &manifest_path)?;
+        validate_process_user(process.user.uid, process.user.gid, self.userns_size)?;
         let mut env_map: std::collections::BTreeMap<String, String> =
             process.env.into_iter().collect();
         for (key, value) in &request.env {
@@ -274,6 +275,10 @@ impl LinuxRuntime {
         child_argv.push(format!("127.0.0.1:{}", request.internal_port));
         child_argv.push("--workdir".to_string());
         child_argv.push(process.workdir.clone());
+        child_argv.push("--uid".to_string());
+        child_argv.push(process.user.uid.to_string());
+        child_argv.push("--gid".to_string());
+        child_argv.push(process.user.gid.to_string());
         child_argv.push("--".to_string());
         child_argv.extend(process.argv);
 
@@ -343,7 +348,10 @@ impl LinuxRuntime {
         if overlay_work.exists() {
             reclaim_runtime_dir_owner(&overlay_work)?;
             std::fs::set_permissions(&overlay_work, std::fs::Permissions::from_mode(0o700))
-                .map_err(path_io("relax stale overlay work permissions", &overlay_work))?;
+                .map_err(path_io(
+                    "relax stale overlay work permissions",
+                    &overlay_work,
+                ))?;
             std::fs::remove_dir_all(&overlay_work).map_err(path_io(
                 "remove stale overlay work directory",
                 &overlay_work,
@@ -605,6 +613,13 @@ fn upper_guest_path(upper: &Path, guest_path: &Path) -> Result<PathBuf, RuntimeE
     Ok(target)
 }
 
+fn validate_process_user(uid: u32, gid: u32, size: u32) -> Result<(), RuntimeError> {
+    if uid >= size || gid >= size {
+        return Err(RuntimeError::InvalidProcessUser { uid, gid, size });
+    }
+    Ok(())
+}
+
 fn copy_runtime_helper_file(src: &Path, dest: &Path) -> Result<(), RuntimeError> {
     if let Some(parent) = dest.parent() {
         create_dir_all("create runtime helper directory", parent)?;
@@ -804,6 +819,7 @@ impl Runtime for LinuxRuntime {
         let manifest = std::fs::read_to_string(&manifest_path)?;
         let process: LinuxRuntimeProcessSpec = serde_json::from_str(&manifest)?;
         validate_process_spec(&process, &manifest_path)?;
+        validate_process_user(process.user.uid, process.user.gid, self.userns_size)?;
 
         let argv = match request.command.clone() {
             Some(cmd) if !cmd.is_empty() => cmd,
@@ -938,6 +954,10 @@ impl Runtime for LinuxRuntime {
         }
         let mut child_argv = helper.loader_prefix.clone();
         child_argv.push(WORKLOAD_LAUNCHER_TARGET.to_string());
+        child_argv.push("--uid".to_string());
+        child_argv.push(process.user.uid.to_string());
+        child_argv.push("--gid".to_string());
+        child_argv.push(process.user.gid.to_string());
         child_argv.push("--".to_string());
         child_argv.extend(argv);
         let mut namespace = NamespaceConfig::new(merged.clone(), child_argv)
@@ -1353,8 +1373,9 @@ impl LinuxRuntime {
         OpenOptions::new()
             .create(true)
             .append(true)
-            .mode(0o600)
+            .mode(0o666)
             .open(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
         Ok(path)
     }
 }
@@ -1399,6 +1420,7 @@ mod tests {
                 argv: vec!["/bin/echo".to_string(), "hello".to_string()],
                 env: Vec::new(),
                 workdir: "/".to_string(),
+                user: Default::default(),
             })
             .expect("manifest json"),
         )
@@ -1550,6 +1572,10 @@ mod tests {
             "127.0.0.1:8080".to_string(),
             "--workdir".to_string(),
             "/".to_string(),
+            "--uid".to_string(),
+            "0".to_string(),
+            "--gid".to_string(),
+            "0".to_string(),
             "--".to_string(),
             "/bin/echo".to_string(),
             "hello".to_string(),
@@ -1695,6 +1721,7 @@ mod tests {
                 argv: vec!["/bin/echo".to_string(), "hello".to_string()],
                 env: Vec::new(),
                 workdir: "/app".to_string(),
+                user: Default::default(),
             })
             .expect("manifest json"),
         )
@@ -1735,6 +1762,7 @@ mod tests {
                 argv: vec!["/bin/echo".to_string(), "hello".to_string()],
                 env: Vec::new(),
                 workdir: "/srv/app".to_string(),
+                user: Default::default(),
             })
             .expect("manifest json"),
         )
