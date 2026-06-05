@@ -84,6 +84,12 @@ impl HealthCheck {
 pub enum ServiceSource {
     Git(GitSource),
     ExternalImage(ExternalImageSource),
+    /// Upload-deployed service: the image is built from a working-tree context
+    /// streamed up by `denia push`/`denia create` (ADR-039). It carries no
+    /// service-level config — every deploy supplies its own build context as a
+    /// `DeploymentRequest::Upload`, and the deploy path ignores `service.source`
+    /// for uploads. Serializes as `{"type":"upload"}`.
+    Upload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,6 +330,9 @@ impl ServiceConfig {
         match &self.source {
             ServiceSource::Git(git) => git.validate()?,
             ServiceSource::ExternalImage(img) => img.validate()?,
+            // Nothing to validate: the build context is supplied per-deploy by
+            // `denia push` (ADR-039), not stored on the service.
+            ServiceSource::Upload => {}
         }
         if let Some(policy) = &self.autoscale {
             policy.validate()?;
@@ -694,5 +703,28 @@ mod tests {
         }
         .validate()
         .expect("default registry shorthand remains valid");
+    }
+
+    #[test]
+    fn upload_source_serde_round_trips_and_validates() {
+        // The unit variant serializes to the tagged form `{"type":"upload"}`.
+        let json = serde_json::to_string(&ServiceSource::Upload).unwrap();
+        assert_eq!(json, r#"{"type":"upload"}"#);
+        let back: ServiceSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ServiceSource::Upload);
+
+        // A service with an upload source validates: the build context is
+        // supplied per-deploy by `denia push` (ADR-039), not on the service.
+        let cfg = ServiceConfig::new(
+            uuid::Uuid::now_v7(),
+            "upload-svc",
+            vec![],
+            ServiceSource::Upload,
+            8080,
+            HealthCheck::new("/", 5),
+            None,
+            vec![],
+        );
+        assert!(cfg.is_ok(), "upload source must validate: {cfg:?}");
     }
 }

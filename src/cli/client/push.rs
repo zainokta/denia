@@ -12,8 +12,9 @@ use super::profile::{ClientConfig, config_path};
 
 #[derive(Args, Debug)]
 pub struct PushArgs {
-    /// Create the service if it does not exist yet (requires `[create]` block in
-    /// `.denia` and a configured `control_domain` on the node).
+    /// Create the service (upload source) if it does not exist yet, then deploy.
+    /// Requires a `[create]` block in `.denia`. Convenience alias for running
+    /// `denia create` before `denia push`.
     #[arg(long)]
     pub create: bool,
 
@@ -126,76 +127,31 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
         svc.id.clone()
     } else if !args.create {
         anyhow::bail!(
-            "service '{project}/{service}' not found; create it in the web console or pass --create"
+            "service '{project}/{service}' not found; run `denia create` \
+             (after `denia init`), or pass --create"
         );
     } else {
-        // --create path.
-        let node = api.node_info(&token).await?;
-        let domain = node
-            .control_domain
-            .as_deref()
-            .filter(|d| !d.trim().is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--create requires a control domain configured on the node \
-                 (hosted registry unavailable); create the service in the web console instead"
-                )
-            })?;
-
-        // Resolve or create project.
-        let project_id = if let Some(p) = projects.iter().find(|p| p.name == project) {
-            p.id.clone()
-        } else {
-            api.create_project(&token, &project).await?.id
-        };
-
-        // Determine port and health_path from the manifest [create] block.
-        let create_defaults = manifest
-            .as_ref()
-            .and_then(|m| m.create.as_ref())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "service not found and --create was given, but the .denia manifest has no \
-                     [create] block; add `[create]\\nport = <port>` to .denia and try again"
-                )
-            })?;
-        let port = create_defaults.port;
-        let health_path = create_defaults
-            .health_path
-            .as_deref()
-            .unwrap_or("/")
-            .to_string();
-
-        // Build the hosted-registry image ref.
-        let image_ref = format!("{}/{}/{}:latest", domain, project, service);
-
-        // Build a full ServiceConfig JSON.
-        // ServiceSource serde: `#[serde(tag = "type", rename_all = "snake_case")]`
-        // → {"type":"external_image","image":"...","credential":null,...}
-        // HealthCheck: {"path":"/","timeout_seconds":30}
-        let service_config_value = serde_json::json!({
-            "project_id": project_id,
-            "name": service,
-            "domains": [],
-            "source": {
-                "type": "external_image",
-                "image": image_ref,
-                "credential": null,
-                "registry_id": null,
-                "image_ref": null
+        // --create path: create the service with an upload source via the
+        // shared helper (ADR-039), then deploy into it below. This is the
+        // convenience alias for running `denia create` first.
+        let manifest_ref = manifest.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--create needs a .denia manifest with a [create] block; \
+                 run `denia init` first"
+            )
+        })?;
+        let svc = super::create::create_service_from_manifest(
+            &api,
+            &token,
+            manifest_ref,
+            super::create::CreateOverrides {
+                project: Some(project.clone()),
+                service: Some(service.clone()),
+                port: None,
+                health_path: None,
             },
-            "internal_port": port,
-            "health_check": {
-                "path": health_path,
-                "timeout_seconds": 30
-            },
-            "resource_limits": null,
-            "env": [],
-            "tls_enabled": false,
-            "autoscale": null
-        });
-
-        let svc = api.create_service(&token, &service_config_value).await?;
+        )
+        .await?;
         println!("Created service '{project}/{service}' (id: {})", svc.id);
         svc.id
     };

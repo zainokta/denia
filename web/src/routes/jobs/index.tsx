@@ -49,9 +49,14 @@ function cronHint(cron: string): string | null {
 }
 
 function sourceDisplay(source: ServiceSource): string {
-  return source.type === 'external_image'
-    ? source.image_ref ?? source.image
-    : source.repo_url
+  switch (source.type) {
+    case 'external_image':
+      return source.image_ref ?? source.image
+    case 'git':
+      return source.repo_url
+    case 'upload':
+      return 'upload (denia push)'
+  }
 }
 
 export const Route = createFileRoute('/jobs/')({

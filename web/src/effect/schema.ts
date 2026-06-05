@@ -246,7 +246,19 @@ export const ExternalImageSource = Schema.Struct({
 })
 export type ExternalImageSource = typeof ExternalImageSource.Type
 
-export const ServiceSource = Schema.Union([GitSource, ExternalImageSource])
+// Upload source (ADR-039): an upload-deployed service carries no source config
+// — the build context is supplied per-deploy by `denia push`. Serializes as
+// `{"type":"upload"}`, matching the backend `ServiceSource::Upload` unit variant.
+export const UploadSource = Schema.Struct({
+  type: Schema.Literal('upload'),
+})
+export type UploadSource = typeof UploadSource.Type
+
+export const ServiceSource = Schema.Union([
+  GitSource,
+  ExternalImageSource,
+  UploadSource,
+])
 export type ServiceSource = typeof ServiceSource.Type
 
 export const HealthCheck = Schema.Struct({
