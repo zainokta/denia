@@ -25,6 +25,13 @@ export function Modal({
   const lastFocused = useRef<HTMLElement | null>(null)
   const titleId = useId()
 
+  // Keep the latest onClose without retriggering the focus/scroll-lock effect.
+  // Parents pass inline arrows (new identity each render); listing onClose as a
+  // dep would re-run initial focus on every keystroke and steal focus to the
+  // first focusable (the close button).
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+
   useEffect(() => {
     if (!open || typeof document === 'undefined') return
     lastFocused.current = document.activeElement as HTMLElement | null
@@ -45,7 +52,7 @@ export function Modal({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
-        onClose()
+        onCloseRef.current()
         return
       }
       if (e.key !== 'Tab') return
@@ -70,7 +77,7 @@ export function Modal({
       document.body.style.overflow = prevOverflow
       lastFocused.current?.focus?.()
     }
-  }, [open, onClose])
+  }, [open])
 
   if (!open) return null
 
