@@ -226,6 +226,38 @@ errors are reported through the child setup pipe instead of being ignored.
   make privileged pre-userns mountpoint creation walk outside the selected new
   root.
 
+## Follow-up (2026-06-05): `CAP_DAC_OVERRIDE` required for a read-write overlay
+
+Relocating the mount out of the workload user namespace had an unhandled
+consequence on non-btrfs hosts (confirmed on an ext4 data dir, kernel 6.12). The
+overlay is now mounted by the **non-root `denia` daemon** (euid != 0, holding
+`CAP_SYS_ADMIN`). Per ADR-019 the `upper`/`work` layers are `chown`-ed to
+`DENIA_USERNS_BASE` so the workload owns its writable layer; the daemon therefore
+does **not** own them. overlayfs DAC-checks its `work/work` creation and copy-up
+against the **mounter's fsuid**, so with only `CAP_SYS_ADMIN` the kernel cannot
+drive those dirs and **silently mounts the merged layer read-only** — the
+`mount()` syscall returns success but every workload write fails `EROFS` (caught
+by the `/.denia-rw-probe` write test in `child_stage2`). Inside the userns (the
+pre-this-ADR layout) the mapped root held this DAC power implicitly; moving the
+mount out of the userns dropped it.
+
+Fix: grant the daemon **`CAP_DAC_OVERRIDE`** (added to both `AmbientCapabilities`
+and `CapabilityBoundingSet` in `src/templates/denia.service.in`).
+
+Empirically verified on the target host (raw `mount(2)` as uid 988 + caps):
+
+| `upper`/`work` owner | caps | result |
+|---|---|---|
+| base uid (`userns_base`) | `SYS_ADMIN` | mount OK, **read-only** (EROFS) |
+| daemon | `SYS_ADMIN` | mount **EACCES** |
+| base uid | `SYS_ADMIN` + `DAC_OVERRIDE` | mount OK, **read-write** ✓ |
+| daemon | `SYS_ADMIN` + `DAC_OVERRIDE` | mount OK, read-write |
+
+Keep base-uid ownership (it maps workload files to root inside the userns; daemon
+ownership would map them to `nobody`) and rely on `CAP_DAC_OVERRIDE` for the
+mount. Do not remove the capability or flip the layers to daemon ownership to
+"fix" a mount error.
+
 ## Risks
 
 - **Mount propagation**: the stage-1 `MS_REC | MS_PRIVATE` on `/` must precede the
