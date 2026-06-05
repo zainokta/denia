@@ -36,8 +36,16 @@ TimeoutStopSec=30s
 # uid_map/gid_map and to drop into the mapped user. CAP_CHOWN lets the daemon
 # chown the per-replica overlay upper layer + guest socket dirs to the userns
 # base uid so the workload owns its writable layer (see src/runtime/linux.rs).
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_CHOWN
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_CHOWN
+# CAP_DAC_OVERRIDE: the overlay is mounted pre-userns by the daemon (euid !=0;
+# ADR-026), and overlayfs DAC-checks its workdir/upperdir setup against the
+# mounter's fsuid. Those dirs are owned by the userns base uid (CAP_CHOWN above),
+# not the daemon, so without DAC override overlayfs cannot create work/work and
+# SILENTLY mounts the merged layer read-only -> every workload write fails EROFS.
+# This is the DAC privilege real-root-in-userns held implicitly before ADR-026
+# moved the mount out of the workload userns. CAP_SYS_ADMIN is already held, so
+# this is a marginal addition to the daemon's existing trust surface.
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE
 
 # --- Filesystem confinement ---
 # Workload launcher and rustix syscall helpers handle the child's
