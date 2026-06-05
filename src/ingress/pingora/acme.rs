@@ -32,6 +32,7 @@ use thiserror::Error;
 
 use pingora::tls::x509::X509;
 
+use super::dns01::{self, Dns01Error, Dns01Provider, PropagationCheck, TxtHandle};
 use super::state::{CertStore, IngressError, ParsedCert, validate_domain};
 
 /// Renewal window: certificates whose `notAfter` is within this many days are
@@ -56,6 +57,10 @@ pub enum AcmeError {
     OrderNotValid(OrderStatus),
     #[error("no http-01 challenge offered for {0}")]
     NoHttp01Challenge(String),
+    #[error("no dns-01 challenge offered for {0}")]
+    NoDns01Challenge(String),
+    #[error("dns-01 provider error: {0}")]
+    Dns(#[from] Dns01Error),
     #[error("certificate persistence failed: {0}")]
     Io(String),
     #[error("failed to parse issued certificate chain")]
@@ -145,6 +150,21 @@ impl Drop for PublishedChallenges {
     }
 }
 
+/// TXT records created for an in-flight DNS-01 order, deleted on completion.
+///
+/// `Drop` cannot run async deletes, so cleanup is the explicit async
+/// How [`AcmeDriver`] answers ACME challenges: in-process HTTP-01 (the token map
+/// shared with the axum acme-challenge handler) or DNS-01 via a pluggable
+/// [`Dns01Provider`] + a shared [`PropagationCheck`] (ADR-038). HTTP-01 is the
+/// default; DNS-01 is opt-in.
+pub enum ChallengeSolver {
+    Http01(ChallengeStore),
+    Dns01 {
+        provider: Arc<dyn Dns01Provider>,
+        propagation: Arc<PropagationCheck>,
+    },
+}
+
 /// A freshly issued certificate: PEM chain (leaf first) + PEM private key.
 ///
 /// Holds private key material in `key_pem`, so it intentionally has no
@@ -157,7 +177,7 @@ pub struct IssuedCert {
 /// Driver for ACME issuance against a configured directory.
 pub struct AcmeDriver {
     account: Account,
-    challenges: ChallengeStore,
+    solver: ChallengeSolver,
 }
 
 impl AcmeDriver {
@@ -167,12 +187,12 @@ impl AcmeDriver {
     ///
     /// `email` is required (HTTP-01 issuance needs a contact); callers gate this
     /// via [`crate::config::AppConfig::require_acme_email`] at startup, but we
-    /// also reject an empty email here.
+    /// also reject an empty email here. `solver` selects the challenge type.
     pub async fn new(
         tls_dir: &Path,
         directory_url: &str,
         email: &str,
-        challenges: ChallengeStore,
+        solver: ChallengeSolver,
     ) -> Result<Self, AcmeError> {
         if email.trim().is_empty() {
             return Err(AcmeError::EmailRequired);
@@ -194,15 +214,16 @@ impl AcmeDriver {
         // issuance if the directory rejects contact updates.
         let _ = account.update_contacts(&[contact.as_str()]).await;
 
-        Ok(Self {
-            account,
-            challenges,
-        })
+        Ok(Self { account, solver })
     }
 
-    /// Clone the shared challenge store (for wiring into the axum handler).
-    pub fn challenges(&self) -> ChallengeStore {
-        self.challenges.clone()
+    /// The HTTP-01 token store, when this driver uses HTTP-01. `None` for DNS-01
+    /// (no axum acme-challenge handler involvement).
+    pub fn challenges(&self) -> Option<ChallengeStore> {
+        match &self.solver {
+            ChallengeSolver::Http01(store) => Some(store.clone()),
+            ChallengeSolver::Dns01 { .. } => None,
+        }
     }
 
     /// Drive an HTTP-01 order for `domain` to completion and return the issued
@@ -217,22 +238,100 @@ impl AcmeDriver {
             .await
             .map_err(AcmeError::from)?;
 
-        // Publish the HTTP-01 key authorization for each authorization, then
-        // mark each challenge ready.
-        let mut published = PublishedChallenges::new(self.challenges.clone());
+        // Order setup and the finalize tail are identical for both challenge
+        // types; only how each authorization is answered differs.
+        match &self.solver {
+            ChallengeSolver::Http01(store) => self.solve_http01(&mut order, &domain, store).await,
+            ChallengeSolver::Dns01 {
+                provider,
+                propagation,
+            } => {
+                self.solve_dns01(&mut order, &domain, provider, propagation)
+                    .await
+            }
+        }
+    }
+
+    /// HTTP-01: publish each authorization's key authorization into the shared
+    /// token map, mark the challenge ready, then finalize.
+    async fn solve_http01(
+        &self,
+        order: &mut instant_acme::Order,
+        domain: &str,
+        store: &ChallengeStore,
+    ) -> Result<IssuedCert, AcmeError> {
+        let mut published = PublishedChallenges::new(store.clone());
         let mut authorizations = order.authorizations();
         while let Some(authz) = authorizations.next().await {
             let mut authz = authz.map_err(AcmeError::from)?;
             let mut challenge = authz
                 .challenge(ChallengeType::Http01)
-                .ok_or_else(|| AcmeError::NoHttp01Challenge(domain.clone()))?;
+                .ok_or_else(|| AcmeError::NoHttp01Challenge(domain.to_string()))?;
             let token = challenge.token.clone();
             let key_auth = challenge.key_authorization();
             published.register(token, key_auth.as_str());
             challenge.set_ready().await.map_err(AcmeError::from)?;
         }
+        // The `authorizations` iterator's `&mut order` borrow ends here (its last
+        // use is the loop), freeing `order` for finalization.
+        self.finalize_order(order, domain).await
+    }
 
-        self.finalize_order(&mut order, &domain).await
+    /// DNS-01: write the `_acme-challenge.<domain>` TXT record(s) via the provider
+    /// (resolving CNAME delegation first), confirm propagation, mark each
+    /// challenge ready, then finalize. Records are always cleaned up afterward
+    /// (success or failure).
+    async fn solve_dns01(
+        &self,
+        order: &mut instant_acme::Order,
+        domain: &str,
+        provider: &Arc<dyn Dns01Provider>,
+        propagation: &PropagationCheck,
+    ) -> Result<IssuedCert, AcmeError> {
+        let mut handles: Vec<TxtHandle> = Vec::new();
+        let outcome = self
+            .present_and_finalize(order, domain, provider, propagation, &mut handles)
+            .await;
+        // Cleanup on every exit path (Drop can't await). Best-effort: a failed
+        // delete is logged (fqdn only, never the value) and does not abort the
+        // others — a stale `_acme-challenge` TXT is harmless and overwritten.
+        for handle in &handles {
+            if let Err(e) = provider.cleanup(handle).await {
+                eprintln!(
+                    "dns-01 cleanup: failed to delete TXT for {}: {e}",
+                    handle.fqdn
+                );
+            }
+        }
+        outcome
+    }
+
+    async fn present_and_finalize(
+        &self,
+        order: &mut instant_acme::Order,
+        domain: &str,
+        provider: &Arc<dyn Dns01Provider>,
+        propagation: &PropagationCheck,
+        handles: &mut Vec<TxtHandle>,
+    ) -> Result<IssuedCert, AcmeError> {
+        let mut authorizations = order.authorizations();
+        while let Some(authz) = authorizations.next().await {
+            let mut authz = authz.map_err(AcmeError::from)?;
+            let mut challenge = authz
+                .challenge(ChallengeType::Dns01)
+                .ok_or_else(|| AcmeError::NoDns01Challenge(domain.to_string()))?;
+            let value = challenge.key_authorization().dns_value();
+            // Resolve CNAME delegation: the record may need to live at a target
+            // zone (e.g. delegated into a Cloudflare zone the token controls).
+            let record_name = dns01::txt_record_name(domain);
+            let effective = propagation.resolve_cname(&record_name).await?;
+            handles.push(provider.present(&effective, &value).await?);
+            propagation.await_txt(&effective, &value).await?;
+            challenge.set_ready().await.map_err(AcmeError::from)?;
+        }
+        // The `authorizations` iterator's `&mut order` borrow ends here, freeing
+        // `order` for finalization.
+        self.finalize_order(order, domain).await
     }
 
     async fn finalize_order(
@@ -663,14 +762,61 @@ mod net_tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let challenges = ChallengeStore::new();
-        let driver = AcmeDriver::new(tmp.path(), &directory_url, &email, challenges)
-            .await
-            .expect("build acme driver");
+        let driver = AcmeDriver::new(
+            tmp.path(),
+            &directory_url,
+            &email,
+            ChallengeSolver::Http01(challenges),
+        )
+        .await
+        .expect("build acme driver");
         let issued = driver.issue(&domain).await.expect("issue cert");
         assert!(issued.fullchain_pem.contains("BEGIN CERTIFICATE"));
         // Persisted material is parseable and selectable by SNI.
         persist_cert(tmp.path(), &domain, &issued).unwrap();
         let store = load_certs_from_disk(tmp.path());
         assert!(store.get(&domain).is_some());
+    }
+
+    /// DNS-01 issuance against LE staging via the Cloudflare provider. Gated like
+    /// the HTTP-01 net test; additionally needs a Cloudflare token + a test domain
+    /// whose zone the token can edit.
+    #[tokio::test]
+    #[ignore = "network: set DENIA_RUN_ACME_NET_TESTS=1 + Cloudflare env to run"]
+    async fn issue_dns01_against_directory() {
+        if std::env::var("DENIA_RUN_ACME_NET_TESTS").as_deref() != Ok("1") {
+            eprintln!("skipping: DENIA_RUN_ACME_NET_TESTS != 1");
+            return;
+        }
+        let directory_url = std::env::var("DENIA_ACME_DIRECTORY_URL")
+            .expect("DENIA_ACME_DIRECTORY_URL must be set for the net test");
+        let domain = std::env::var("DENIA_ACME_DNS_TEST_DOMAIN")
+            .expect("DENIA_ACME_DNS_TEST_DOMAIN must be set for the dns-01 net test");
+        let email = std::env::var("DENIA_ACME_EMAIL")
+            .expect("DENIA_ACME_EMAIL must be set for the net test");
+        let token = std::env::var("DENIA_CF_DNS_API_TOKEN")
+            .expect("DENIA_CF_DNS_API_TOKEN must be set for the dns-01 net test");
+
+        let provider: Arc<dyn Dns01Provider> = Arc::new(dns01::CloudflareDns01::new(token));
+        let propagation = Arc::new(PropagationCheck::new(
+            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(2),
+            vec![],
+        ));
+        let tmp = tempfile::tempdir().unwrap();
+        let driver = AcmeDriver::new(
+            tmp.path(),
+            &directory_url,
+            &email,
+            ChallengeSolver::Dns01 {
+                provider,
+                propagation,
+            },
+        )
+        .await
+        .expect("build acme driver");
+        let issued = driver.issue(&domain).await.expect("issue cert");
+        assert!(issued.fullchain_pem.contains("BEGIN CERTIFICATE"));
     }
 }

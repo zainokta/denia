@@ -43,6 +43,32 @@ acme_directory_url = "https://acme-v02.api.letsencrypt.org/directory"
 # Required if any service has tls_enabled = true:
 # acme_email = "ops@example.com"
 
+# --- ACME challenge (ADR-038) ---
+# "http-01" (default) needs Let's Encrypt to reach :80 directly. Use "dns-01" to
+# issue via a DNS provider instead -- this works when the domain is fronted by a
+# proxy (Cloudflare orange-cloud, a WAF), where HTTP-01 cannot reach :80.
+# acme_challenge = "dns-01"
+#
+# DNS-01 provider: "cloudflare" (default) or "exec".
+# acme_dns_provider = "cloudflare"
+#
+# cloudflare: API token with Zone:Read + DNS:Edit. SECRET: never put the token
+# value in this file. Set DENIA_CF_DNS_API_TOKEN in the systemd unit, or point
+# cf_dns_api_token_file at a 0600 file holding `DENIA_CF_DNS_API_TOKEN=<token>`.
+# cf_dns_api_token_file = "{{user_config_dir}}/cf-dns.token"
+#
+# exec: a script Denia runs as `<script> present|cleanup <fqdn> <value>` to
+# manage the TXT record on ANY DNS host (Akamai, Route53, PowerDNS, BIND, ...).
+# Denia holds no credential -- the script owns its own auth.
+# acme_dns_exec = "/usr/local/bin/denia-dns-hook"
+#
+# Seconds to wait before checking propagation (default 60):
+# acme_dns_propagation_secs = 60
+# DoH endpoints polled to confirm propagation (also used to resolve CNAME
+# delegation). Default (when unset): built-in public resolvers (Cloudflare +
+# Google). Override to pin your own:
+# acme_dns_resolvers = ["https://cloudflare-dns.com/dns-query"]
+
 # --- Control-plane TLS gating ---
 # control_domain = "denia.example.com"
 # control_tls = false
