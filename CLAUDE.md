@@ -6,6 +6,7 @@ Guidelines for AI agents working on Denia, a Rust backend PaaS that runs workloa
 
 - Check `docs/adr/README.md` and existing ADRs before changing architecture.
 - Create or update an ADR for runtime isolation, ingress, secrets, persistence, API, or dependency changes.
+- Update the landing page (<https://github.com/zainokta/denia-landing>) and documentation (<https://github.com/zainokta/denia-documentation>) repos whenever a new feature, behavior change, or ADR addition lands that they should reflect.
 - Follow system and developer instructions over this file.
 - Prefer established local patterns over invention.
 - Keep frontend work out of scope unless the user explicitly asks for it.

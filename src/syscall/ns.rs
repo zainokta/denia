@@ -967,7 +967,9 @@ fn child_setup_stage(stage: u8) -> &'static str {
         b'o' => "chroot: create /.old_root",
         b'v' => "chroot: pivot_root",
         b'u' => "chroot: unmount /.old_root",
-        b'Z' => "workload root is read-only (overlay merged mounted read-only; check host kernel overlayfs support / data-dir filesystem)",
+        b'Z' => {
+            "workload root is read-only (overlay merged mounted read-only; check host kernel overlayfs support / data-dir filesystem)"
+        }
         b'b' => "read-only bind mount",
         b'W' => "chdir workdir",
         b'p' => "mount proc",
@@ -1458,6 +1460,20 @@ unsafe fn child_setup_dev(pipes: &SyncPipes, base: &std::ffi::CStr) {
             )
         } >= 0;
         if !bound && required {
+            unsafe { child_setup_fail(pipes, b'D') };
+        }
+    }
+
+    for (target, suffix) in [
+        (c"/proc/self/fd/0", b"/dev/stdin".as_slice()),
+        (c"/proc/self/fd/1", b"/dev/stdout".as_slice()),
+        (c"/proc/self/fd/2", b"/dev/stderr".as_slice()),
+    ] {
+        let dst_buf = join_nul(base_bytes, suffix);
+        let dst =
+            std::ffi::CStr::from_bytes_with_nul(&dst_buf).expect("dev stdio path has valid NUL");
+        let _ = unsafe { libc::unlink(dst.as_ptr()) };
+        if unsafe { libc::symlink(target.as_ptr(), dst.as_ptr()) } < 0 {
             unsafe { child_setup_fail(pipes, b'D') };
         }
     }

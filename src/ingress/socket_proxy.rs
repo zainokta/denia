@@ -20,6 +20,8 @@ pub struct SocketProxyConfig {
     pub connect_host: String,
     pub connect_port: u16,
     pub workdir: Option<PathBuf>,
+    pub uid: u32,
+    pub gid: u32,
     pub child_argv: Vec<OsString>,
 }
 
@@ -47,6 +49,8 @@ where
     let mut listen_socket = None;
     let mut connect = None;
     let mut workdir = None;
+    let mut uid = 0;
+    let mut gid = 0;
     let mut child_argv = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -75,6 +79,28 @@ where
                     .ok_or(SocketProxyError::MissingArgument { name: "--workdir" })?
                     .into(),
             );
+            continue;
+        }
+        if arg == "--uid" {
+            let value = args
+                .next()
+                .ok_or(SocketProxyError::MissingArgument { name: "--uid" })?;
+            uid = value.to_string_lossy().parse::<u32>().map_err(|_| {
+                SocketProxyError::InvalidArgument {
+                    value: value.to_string_lossy().to_string(),
+                }
+            })?;
+            continue;
+        }
+        if arg == "--gid" {
+            let value = args
+                .next()
+                .ok_or(SocketProxyError::MissingArgument { name: "--gid" })?;
+            gid = value.to_string_lossy().parse::<u32>().map_err(|_| {
+                SocketProxyError::InvalidArgument {
+                    value: value.to_string_lossy().to_string(),
+                }
+            })?;
             continue;
         }
         return Err(SocketProxyError::InvalidArgument {
@@ -107,6 +133,8 @@ where
         connect_host: connect_host.to_string(),
         connect_port,
         workdir,
+        uid,
+        gid,
         child_argv,
     })
 }
@@ -139,17 +167,19 @@ pub async fn run(config: SocketProxyConfig) -> Result<(), SocketProxyError> {
         std::fs::Permissions::from_mode(0o666),
     )?;
     caps::set_no_new_privs()?;
-    caps::drop_bounding_caps()?;
     // Install the seccomp denylist before spawning so the workload child inherits
     // it. Long-running services defer hardening to this proxy, so without this
     // call the workload would run with no syscall filter at all (F-4).
     syscall::seccomp::install_filter()?;
     let mut command = Command::new(&config.child_argv[0]);
     command.args(&config.child_argv[1..]).stdin(Stdio::null());
+    command.gid(config.gid);
+    command.uid(config.uid);
     if let Some(workdir) = &config.workdir {
         command.current_dir(workdir);
     }
     let mut child = command.spawn()?;
+    caps::drop_bounding_caps()?;
 
     loop {
         tokio::select! {
@@ -251,6 +281,10 @@ mod tests {
             OsString::from("127.0.0.1:3000"),
             OsString::from("--workdir"),
             OsString::from("/app"),
+            OsString::from("--uid"),
+            OsString::from("101"),
+            OsString::from("--gid"),
+            OsString::from("101"),
             OsString::from("--"),
             OsString::from("/bin/web"),
         ])
@@ -263,6 +297,8 @@ mod tests {
         assert_eq!(config.connect_host, "127.0.0.1");
         assert_eq!(config.connect_port, 3000);
         assert_eq!(config.workdir, Some(PathBuf::from("/app")));
+        assert_eq!(config.uid, 101);
+        assert_eq!(config.gid, 101);
         assert_eq!(config.child_argv, vec![OsString::from("/bin/web")]);
     }
 

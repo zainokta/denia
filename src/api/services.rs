@@ -1153,8 +1153,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(domains.status(), StatusCode::OK);
-        let rows: Vec<ServiceDomain> =
-            serde_json::from_str(&body_string(domains).await).unwrap();
+        let rows: Vec<ServiceDomain> = serde_json::from_str(&body_string(domains).await).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].hostname, "web.example.com");
         assert_eq!(rows[0].status, DomainStatus::Pending);
@@ -1200,8 +1199,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(domains.status(), StatusCode::OK);
-        let rows: Vec<ServiceDomain> =
-            serde_json::from_str(&body_string(domains).await).unwrap();
+        let rows: Vec<ServiceDomain> = serde_json::from_str(&body_string(domains).await).unwrap();
         assert_eq!(rows.len(), 1, "re-POST must not duplicate the domain row");
     }
 }

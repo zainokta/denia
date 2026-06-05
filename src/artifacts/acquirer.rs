@@ -11,6 +11,7 @@ use crate::{
         OciError, OciImagePuller, OciRootfsUnpacker, RegistryAuth, registry::RegistryImagePuller,
         unpack::TarRootfsUnpacker,
     },
+    runtime::ProcessUser,
     syscall,
 };
 
@@ -29,6 +30,8 @@ pub struct OciImageProcessConfig {
     pub env: Vec<String>,
     #[serde(default = "default_workdir", rename = "WorkingDir")]
     pub workdir: String,
+    #[serde(default, rename = "User")]
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +39,8 @@ pub struct RootfsBundleSpec {
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
     pub workdir: String,
+    #[serde(default)]
+    pub user: ProcessUser,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +75,8 @@ pub enum ArtifactAcquireError {
     MissingProcessArgv,
     #[error("image config environment entry is invalid: {entry}")]
     InvalidEnvironmentEntry { entry: String },
+    #[error("image config user is invalid: {user} ({reason})")]
+    InvalidImageUser { user: String, reason: String },
     #[error("oci error: {0}")]
     Oci(#[from] OciError),
     #[error("invalid upload id")]
@@ -310,7 +317,11 @@ impl ArtifactAcquirer {
         let image_artifact = ArtifactRecord::new(digest, ArtifactKind::OciImage, source)?;
         let pulled = self.puller.read_layout(output_dir).await?;
         let bundle_dir = self.write_bundle(&image_artifact.digest, &pulled.layers)?;
-        let process = rootfs_bundle_from_oci_config(&pulled.config, &bundle_dir.join("rootfs"))?;
+        let process = rootfs_bundle_from_oci_config(
+            &pulled.config,
+            &bundle_dir.join("rootfs"),
+            self.config.userns_size,
+        )?;
         std::fs::write(
             bundle_dir.join("process.json"),
             serde_json::to_vec_pretty(&process)?,
@@ -338,7 +349,11 @@ impl ArtifactAcquirer {
             pulled.digest.clone()
         };
         let bundle_dir = self.write_bundle(&digest, &pulled.layers)?;
-        let process = rootfs_bundle_from_oci_config(&pulled.config, &bundle_dir.join("rootfs"))?;
+        let process = rootfs_bundle_from_oci_config(
+            &pulled.config,
+            &bundle_dir.join("rootfs"),
+            self.config.userns_size,
+        )?;
         std::fs::write(
             bundle_dir.join("process.json"),
             serde_json::to_vec_pretty(&process)?,
@@ -355,6 +370,7 @@ impl ArtifactAcquirer {
         let bundle_dir = self.config.artifact_dir.join(safe_artifact_name(digest));
         std::fs::create_dir_all(&bundle_dir)?;
         let rootfs = bundle_dir.join("rootfs");
+        let sidecar = bundle_dir.join(ROOTFS_OWNERSHIP_SIDECAR);
         let rootfs_exists = match std::fs::symlink_metadata(&rootfs) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
                 return Err(ArtifactAcquireError::Io(std::io::Error::new(
@@ -366,7 +382,17 @@ impl ArtifactAcquirer {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(ArtifactAcquireError::Io(error)),
         };
-        if !rootfs_exists {
+        let sidecar_valid = rootfs_exists
+            && rootfs_ownership_sidecar_matches(
+                &sidecar,
+                self.config.userns_base,
+                self.config.userns_size,
+            );
+        if rootfs_exists && !sidecar_valid {
+            reclaim_current_process_owner_if_possible(&rootfs)?;
+            std::fs::remove_dir_all(&rootfs)?;
+        }
+        if !rootfs_exists || !sidecar_valid {
             let staged_rootfs = bundle_dir.join(format!("rootfs.{}.tmp", uuid::Uuid::now_v7()));
             if let Err(error) = self.unpacker.unpack(layers, &staged_rootfs) {
                 let _ = std::fs::remove_dir_all(&staged_rootfs);
@@ -374,12 +400,18 @@ impl ArtifactAcquirer {
             }
             if let Err(error) =
                 std::fs::set_permissions(&staged_rootfs, std::fs::Permissions::from_mode(0o755))
+                && error.kind() != std::io::ErrorKind::PermissionDenied
             {
                 let _ = std::fs::remove_dir_all(&staged_rootfs);
                 return Err(ArtifactAcquireError::Io(error));
             }
-            let base = self.config.userns_base;
-            if let Err(error) = syscall::chown::recursive_lchown(&staged_rootfs, base, base) {
+            if crate::syscall::caps::has_effective_cap_chown()
+                && let Err(error) = syscall::chown::recursive_lchown_shifted(
+                    &staged_rootfs,
+                    self.config.userns_base,
+                    self.config.userns_size,
+                )
+            {
                 let io_err = error.to_string();
                 if !io_err.contains("Operation not permitted") {
                     let _ = std::fs::remove_dir_all(&staged_rootfs);
@@ -398,6 +430,11 @@ impl ArtifactAcquirer {
                     return Err(ArtifactAcquireError::Io(error));
                 }
             }
+            write_rootfs_ownership_sidecar(
+                &sidecar,
+                self.config.userns_base,
+                self.config.userns_size,
+            )?;
         }
         // Persist the layer-digest list as a sidecar so the OCI cache GC can
         // tell which cached blobs are still referenced by promoted deployments
@@ -585,9 +622,22 @@ impl ArtifactAcquirer {
     }
 }
 
+fn reclaim_current_process_owner_if_possible(
+    path: &std::path::Path,
+) -> Result<(), ArtifactAcquireError> {
+    if !crate::syscall::caps::has_effective_cap_chown() {
+        return Ok(());
+    }
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+    syscall::chown::recursive_lchown(path, uid, gid)
+        .map_err(|error| ArtifactAcquireError::Io(std::io::Error::other(error.to_string())))
+}
+
 fn rootfs_bundle_from_oci_config(
     cfg: &crate::oci::config::OciImageConfig,
     rootfs: &std::path::Path,
+    userns_size: u32,
 ) -> Result<RootfsBundleSpec, ArtifactAcquireError> {
     let oci_spec = crate::oci::config::RootfsBundleSpec::try_from(cfg).map_err(|e| match e {
         crate::oci::config::ConfigError::MissingProcessConfig
@@ -602,9 +652,176 @@ fn rootfs_bundle_from_oci_config(
         argv: oci_spec.argv,
         env: oci_spec.env,
         workdir: oci_spec.workdir,
+        user: resolve_process_user(
+            cfg.config
+                .as_ref()
+                .and_then(|process| process.user.as_deref())
+                .unwrap_or(""),
+            rootfs,
+            userns_size,
+        )?,
     };
     resolve_relative_argv0_from_path(&mut process, rootfs);
     Ok(process)
+}
+
+const ROOTFS_OWNERSHIP_SIDECAR: &str = "rootfs.ownership.json";
+const ROOTFS_OWNERSHIP_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RootfsOwnershipSidecar {
+    version: u32,
+    userns_base: u32,
+    userns_size: u32,
+}
+
+fn rootfs_ownership_sidecar_matches(path: &std::path::Path, base: u32, size: u32) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let Ok(sidecar) = serde_json::from_slice::<RootfsOwnershipSidecar>(&bytes) else {
+        return false;
+    };
+    sidecar
+        == RootfsOwnershipSidecar {
+            version: ROOTFS_OWNERSHIP_VERSION,
+            userns_base: base,
+            userns_size: size,
+        }
+}
+
+fn write_rootfs_ownership_sidecar(
+    path: &std::path::Path,
+    base: u32,
+    size: u32,
+) -> Result<(), ArtifactAcquireError> {
+    let sidecar = RootfsOwnershipSidecar {
+        version: ROOTFS_OWNERSHIP_VERSION,
+        userns_base: base,
+        userns_size: size,
+    };
+    std::fs::write(path, serde_json::to_vec_pretty(&sidecar)?)?;
+    Ok(())
+}
+
+fn resolve_process_user(
+    raw_user: &str,
+    rootfs: &std::path::Path,
+    userns_size: u32,
+) -> Result<ProcessUser, ArtifactAcquireError> {
+    let raw_user = raw_user.trim();
+    if raw_user.is_empty() {
+        return Ok(ProcessUser::default());
+    }
+    let (user_part, group_part) = raw_user.split_once(':').unwrap_or((raw_user, ""));
+    if user_part.is_empty() {
+        return Err(invalid_image_user(raw_user, "user component is empty"));
+    }
+
+    let passwd = read_passwd(rootfs)?;
+    let groups = read_group(rootfs)?;
+    let (uid, default_gid) = match user_part.parse::<u32>() {
+        Ok(uid) => {
+            let gid = passwd
+                .iter()
+                .find(|entry| entry.uid == uid)
+                .map(|entry| entry.gid)
+                .unwrap_or(0);
+            (uid, gid)
+        }
+        Err(_) => {
+            let Some(entry) = passwd.iter().find(|entry| entry.name == user_part) else {
+                return Err(invalid_image_user(raw_user, "unknown user name"));
+            };
+            (entry.uid, entry.gid)
+        }
+    };
+
+    let gid = if group_part.is_empty() {
+        default_gid
+    } else {
+        match group_part.parse::<u32>() {
+            Ok(gid) => gid,
+            Err(_) => {
+                let Some(entry) = groups.iter().find(|entry| entry.name == group_part) else {
+                    return Err(invalid_image_user(raw_user, "unknown group name"));
+                };
+                entry.gid
+            }
+        }
+    };
+    if uid >= userns_size || gid >= userns_size {
+        return Err(invalid_image_user(
+            raw_user,
+            "uid/gid is outside the configured user namespace size",
+        ));
+    }
+    Ok(ProcessUser { uid, gid })
+}
+
+fn invalid_image_user(user: &str, reason: &str) -> ArtifactAcquireError {
+    ArtifactAcquireError::InvalidImageUser {
+        user: user.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PasswdEntry {
+    name: String,
+    uid: u32,
+    gid: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GroupEntry {
+    name: String,
+    gid: u32,
+}
+
+fn read_passwd(rootfs: &std::path::Path) -> Result<Vec<PasswdEntry>, ArtifactAcquireError> {
+    let path = rootfs.join("etc/passwd");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(ArtifactAcquireError::Io(error)),
+    };
+    Ok(content
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(':').collect();
+            if fields.len() < 4 {
+                return None;
+            }
+            Some(PasswdEntry {
+                name: fields[0].to_string(),
+                uid: fields[2].parse().ok()?,
+                gid: fields[3].parse().ok()?,
+            })
+        })
+        .collect())
+}
+
+fn read_group(rootfs: &std::path::Path) -> Result<Vec<GroupEntry>, ArtifactAcquireError> {
+    let path = rootfs.join("etc/group");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(ArtifactAcquireError::Io(error)),
+    };
+    Ok(content
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(':').collect();
+            if fields.len() < 3 {
+                return None;
+            }
+            Some(GroupEntry {
+                name: fields[0].to_string(),
+                gid: fields[2].parse().ok()?,
+            })
+        })
+        .collect())
 }
 
 fn resolve_relative_argv0_from_path(process: &mut RootfsBundleSpec, rootfs: &std::path::Path) {
@@ -847,6 +1064,7 @@ mod tests {
                                     .to_string()),
                             ]),
                             working_dir: Some("/app".to_string()),
+                            user: None,
                         }),
                         rootfs: None,
                     },
@@ -931,6 +1149,7 @@ mod tests {
                             cmd: None,
                             env_vars: None,
                             working_dir: None,
+                            user: None,
                         }),
                         rootfs: None,
                     },
@@ -995,6 +1214,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn external_image_acquire_reunpacks_bundle_without_ownership_sidecar() {
+        struct StaticPuller;
+        #[async_trait]
+        impl OciImagePuller for StaticPuller {
+            async fn pull(
+                &self,
+                _image: &str,
+                _auth: RegistryAuth,
+            ) -> Result<PulledImage, OciError> {
+                Ok(PulledImage {
+                    digest: "sha256:ownership-sidecar".to_string(),
+                    config: crate::oci::config::OciImageConfig {
+                        config: Some(crate::oci::config::OciImageProcessConfig {
+                            entrypoint: Some(vec!["/app".to_string()]),
+                            cmd: None,
+                            env_vars: None,
+                            working_dir: None,
+                            user: Some("101:101".to_string()),
+                        }),
+                        rootfs: None,
+                    },
+                    layers: Vec::new(),
+                    _staging: None,
+                    _cache_reservations: Vec::new(),
+                })
+            }
+
+            async fn read_layout(&self, _d: &Path) -> Result<PulledImage, OciError> {
+                unreachable!("StaticPuller::read_layout not expected")
+            }
+        }
+
+        #[derive(Default)]
+        struct CountingUnpacker {
+            calls: Mutex<usize>,
+        }
+
+        impl OciRootfsUnpacker for CountingUnpacker {
+            fn unpack(&self, _layers: &[LayerBlob], rootfs_dir: &Path) -> Result<(), OciError> {
+                *self.calls.lock().unwrap() += 1;
+                std::fs::create_dir_all(rootfs_dir).map_err(OciError::Io)?;
+                std::fs::write(rootfs_dir.join("app"), b"ok").map_err(OciError::Io)
+            }
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = AppConfig::for_test("test-token");
+        config.artifact_dir = tmp.path().to_path_buf();
+        config.userns_base = std::fs::metadata(tmp.path()).unwrap().uid();
+        let unpacker = Arc::new(CountingUnpacker::default());
+        let acquirer =
+            ArtifactAcquirer::with_traits(config.clone(), Arc::new(StaticPuller), unpacker.clone());
+        let runner = FakeCommandRunner::new(vec![]);
+        let request = || ArtifactAcquireRequest::ExternalImage {
+            image: "ghcr.io/acme/web:latest".to_string(),
+        };
+
+        acquirer
+            .acquire_rootfs_bundle_from_image_config(&runner, request(), RegistryAuth::Anonymous)
+            .await
+            .expect("first acquire materializes rootfs");
+        std::fs::remove_file(
+            config
+                .artifact_dir
+                .join("sha256-ownership-sidecar")
+                .join("rootfs.ownership.json"),
+        )
+        .expect("remove sidecar");
+        acquirer
+            .acquire_rootfs_bundle_from_image_config(&runner, request(), RegistryAuth::Anonymous)
+            .await
+            .expect("second acquire repairs missing sidecar");
+
+        assert_eq!(
+            *unpacker.calls.lock().unwrap(),
+            2,
+            "missing ownership sidecar means the rootfs must be republished"
+        );
+    }
+
+    #[test]
+    fn rootfs_bundle_from_oci_config_resolves_named_user() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rootfs = tmp.path();
+        std::fs::create_dir_all(rootfs.join("etc")).unwrap();
+        std::fs::write(
+            rootfs.join("etc/passwd"),
+            "root:x:0:0:root:/root:/bin/sh\nnginx:x:101:101:nginx:/nonexistent:/bin/false\n",
+        )
+        .unwrap();
+        std::fs::write(rootfs.join("etc/group"), "root:x:0:\nnginx:x:101:\n").unwrap();
+        let cfg = crate::oci::config::OciImageConfig {
+            config: Some(crate::oci::config::OciImageProcessConfig {
+                entrypoint: Some(vec!["/app".to_string()]),
+                cmd: None,
+                env_vars: None,
+                working_dir: None,
+                user: Some("nginx".to_string()),
+            }),
+            rootfs: None,
+        };
+
+        let process = rootfs_bundle_from_oci_config(&cfg, rootfs, 65_536).expect("process");
+
+        assert_eq!(process.user.uid, 101);
+        assert_eq!(process.user.gid, 101);
+    }
+
+    #[test]
+    fn rootfs_bundle_from_oci_config_rejects_unknown_user() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rootfs = tmp.path();
+        std::fs::create_dir_all(rootfs.join("etc")).unwrap();
+        std::fs::write(rootfs.join("etc/passwd"), "root:x:0:0:root:/root:/bin/sh\n").unwrap();
+        let cfg = crate::oci::config::OciImageConfig {
+            config: Some(crate::oci::config::OciImageProcessConfig {
+                entrypoint: Some(vec!["/app".to_string()]),
+                cmd: None,
+                env_vars: None,
+                working_dir: None,
+                user: Some("nginx".to_string()),
+            }),
+            rootfs: None,
+        };
+
+        let error = rootfs_bundle_from_oci_config(&cfg, rootfs, 65_536).expect_err("unknown user");
+
+        assert!(matches!(
+            error,
+            ArtifactAcquireError::InvalidImageUser { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn external_image_acquire_publishes_rootfs_with_traverse_mode() {
         struct StaticPuller;
         #[async_trait]
@@ -1012,6 +1365,7 @@ mod tests {
                             cmd: None,
                             env_vars: None,
                             working_dir: None,
+                            user: None,
                         }),
                         rootfs: None,
                     },
