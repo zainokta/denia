@@ -1131,7 +1131,12 @@ function SourceSummary({
           ['dockerfile', source.dockerfile_path],
           ['context', source.context_path],
         ]
-      : [
+      : source.type === 'upload'
+        ? [
+            ['type', 'upload'],
+            ['source', 'deployed from a working tree via `denia push`'],
+          ]
+        : [
           ['type', 'external image'],
           ...(source.image
             ? ([['image', source.image]] as Array<[string, React.ReactNode]>)

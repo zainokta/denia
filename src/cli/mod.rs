@@ -69,6 +69,10 @@ pub enum Commands {
     Console(client::console::ConsoleArgs),
     /// Authenticate to a remote Denia instance and save credentials locally.
     Auth(client::auth::AuthArgs),
+    /// Scaffold a `.denia` manifest in the current directory.
+    Init(client::init::InitArgs),
+    /// Create a remote service (upload source) from a `.denia` manifest.
+    Create(client::create::CreateArgs),
     /// Pack the local working tree and deploy it to a remote service.
     Push(client::push::PushArgs),
 }
@@ -105,6 +109,11 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Auth(args)) => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(crate::cli::client::auth::run(args))
+        }
+        Some(Commands::Init(args)) => crate::cli::client::init::run(args),
+        Some(Commands::Create(args)) => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(crate::cli::client::create::run(args))
         }
         Some(Commands::Push(args)) => {
             let rt = tokio::runtime::Runtime::new()?;
