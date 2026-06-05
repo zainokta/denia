@@ -8,12 +8,13 @@ use std::time::Duration;
 
 use crate::{
     app::{AppState, build_router},
-    config::AppConfig,
+    config::{AcmeChallengeType, AppConfig},
     deploy::coordinator::DeploymentCoordinator,
     domain::RuntimeInstanceId,
     ingress::pingora::{
-        AcmeDriver, ChallengeStore, IngressServerConfig, RENEWAL_WINDOW_DAYS, build_server,
-        load_certs_from_disk, persist_cert, run_server, select_renewals,
+        AcmeDriver, ChallengeSolver, ChallengeStore, IngressServerConfig, PropagationCheck,
+        RENEWAL_WINDOW_DAYS, build_provider, build_server, load_certs_from_disk, persist_cert,
+        run_server, select_renewals,
     },
     runtime::Runtime,
     scheduler::{
@@ -99,6 +100,7 @@ pub async fn run() -> anyhow::Result<()> {
         config.control_tls,
     );
     state.config.require_acme_email(tls_in_use)?;
+    state.config.require_dns01_provider()?;
 
     // Reap workloads left behind by a previous unclean session (SIGKILL, crash,
     // power loss). `list_running` is empty on a fresh process, so neither the
@@ -145,31 +147,30 @@ pub async fn run() -> anyhow::Result<()> {
         shutdown_rx,
     ));
 
-    // --- In-process ACME (instant-acme, HTTP-01) ---------------------------
+    // --- In-process ACME (instant-acme) ------------------------------------
     //
-    // Build ONE shared `ChallengeStore` and clone it into both the axum
-    // acme-challenge handler (`AppState.acme_challenges`) and the issuer so the
-    // `:80` challenge proxy and the order driver observe the same token map
-    // (Chunk B carry-forward). The driver is built only when an email is set;
-    // `require_acme_email` above guarantees one exists if any service uses TLS.
+    // The HTTP-01 solver shares ONE `ChallengeStore` with the axum
+    // acme-challenge handler (`AppState.acme_challenges`) so the `:80` challenge
+    // proxy and the order driver observe the same token map. The DNS-01 solver
+    // (ADR-038) instead writes Cloudflare TXT records and needs no axum handler.
+    // The driver is built only when an email is set; `require_acme_email` above
+    // guarantees one exists if any service uses TLS.
     let challenges: ChallengeStore = state.acme_challenges.clone();
     let acme_driver = match &config.acme_email {
-        Some(email) => {
-            match AcmeDriver::new(
-                &config.tls_dir,
-                &config.acme_directory_url,
-                email,
-                challenges.clone(),
-            )
-            .await
-            {
-                Ok(driver) => Some(Arc::new(driver)),
-                Err(e) => {
-                    eprintln!("acme driver init failed (cert issuance disabled): {e}");
-                    None
+        Some(email) => match build_challenge_solver(&config, &challenges) {
+            Some(solver) => {
+                match AcmeDriver::new(&config.tls_dir, &config.acme_directory_url, email, solver)
+                    .await
+                {
+                    Ok(driver) => Some(Arc::new(driver)),
+                    Err(e) => {
+                        eprintln!("acme driver init failed (cert issuance disabled): {e}");
+                        None
+                    }
                 }
             }
-        }
+            None => None,
+        },
         None => None,
     };
 
@@ -642,6 +643,48 @@ fn acme_tls_in_use(
     service_tls_in_use || control_domain_to_issue(control_domain, control_tls).is_some()
 }
 
+/// Build the ACME [`ChallengeSolver`] from config (ADR-038). HTTP-01 (default)
+/// shares the axum challenge token map; DNS-01 builds the configured provider
+/// (Cloudflare or exec) via `dns01::build_provider` plus a shared
+/// `PropagationCheck`. Returns `None` when the DNS-01 provider is misconfigured —
+/// issuance is then disabled (logged), never a panic.
+fn build_challenge_solver(
+    config: &AppConfig,
+    challenges: &ChallengeStore,
+) -> Option<ChallengeSolver> {
+    match config.acme_challenge {
+        AcmeChallengeType::Http01 => {
+            // A DNS token configured under HTTP-01 is inert — flag the likely misconfig.
+            if config.cf_dns_api_token.is_some() {
+                eprintln!(
+                    "acme: a Cloudflare DNS token is configured but acme_challenge is http-01; \
+                     the token is ignored (set acme_challenge = dns-01 to use it)"
+                );
+            }
+            Some(ChallengeSolver::Http01(challenges.clone()))
+        }
+        AcmeChallengeType::Dns01 => match build_provider(config) {
+            Ok(provider) => {
+                let (timeout, interval) = provider.timeout();
+                let propagation = Arc::new(PropagationCheck::new(
+                    Duration::from_secs(config.acme_dns_propagation_secs),
+                    timeout,
+                    interval,
+                    config.acme_dns_resolvers.clone(),
+                ));
+                Some(ChallengeSolver::Dns01 {
+                    provider,
+                    propagation,
+                })
+            }
+            Err(e) => {
+                eprintln!("acme: dns-01 provider unavailable: {e}; cert issuance disabled");
+                None
+            }
+        },
+    }
+}
+
 /// Issue certs for every verified hostname of a TLS-enabled service that does
 /// not yet have one in the cert store. Persists atomically and swaps into the
 /// live store. Never logs secret material.
@@ -685,6 +728,15 @@ async fn reissue(
             // Reload the whole store from disk so the swap stays single-writer
             // and observes all persisted certs (A8).
             ingress.swap_certs(load_certs_from_disk(tls_dir));
+        }
+        // A permanent DNS-01 provider error (bad/again-missing token, unknown
+        // zone) will keep failing until the operator fixes config — surface that
+        // explicitly rather than as a generic transient failure.
+        Err(crate::ingress::pingora::AcmeError::Dns(d)) if !d.is_retryable() => {
+            eprintln!(
+                "acme issuance failed for {domain}: permanent dns-01 provider error ({d}); \
+                 check DENIA_CF_DNS_API_TOKEN scope and the zone — not retrying until fixed"
+            )
         }
         Err(e) => eprintln!("acme issuance failed for {domain}: {e}"),
     }

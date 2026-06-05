@@ -64,6 +64,26 @@ pub struct AppConfig {
     pub control_tls: bool,
     pub node_disk_path: PathBuf,
     pub acme_email: Option<String>,
+    /// Which ACME challenge type to use for issuance (ADR-038). Default HTTP-01.
+    pub acme_challenge: AcmeChallengeType,
+    /// Which DNS-01 provider to use when `acme_challenge == Dns01`. Default
+    /// Cloudflare. `DENIA_ACME_DNS_PROVIDER`.
+    pub acme_dns_provider: DnsProviderKind,
+    /// Cloudflare API token (secret) for the `cloudflare` DNS-01 provider.
+    /// Required only when `acme_challenge == Dns01` and provider is Cloudflare.
+    /// Sourced from `DENIA_CF_DNS_API_TOKEN` or a `cf_dns_api_token_file`; never
+    /// stored raw in `config.toml`, never logged.
+    pub cf_dns_api_token: Option<Secret>,
+    /// Path to the script for the `exec` DNS-01 provider. Required only when
+    /// `acme_challenge == Dns01` and provider is Exec. Not a secret (the script
+    /// owns its own credentials). `DENIA_ACME_DNS_EXEC`.
+    pub acme_dns_exec: Option<PathBuf>,
+    /// Seconds to wait for a DNS-01 TXT record to propagate before validation.
+    pub acme_dns_propagation_secs: u64,
+    /// DNS-over-HTTPS endpoints polled to confirm DNS-01 propagation (empty →
+    /// built-in public resolvers; propagation is always confirmed before
+    /// validation).
+    pub acme_dns_resolvers: Vec<String>,
     pub http_port: u16,
     pub https_port: u16,
     pub tcp_port_range: PortRange,
@@ -152,6 +172,70 @@ impl OciCacheVerifyMode {
             "full" => Some(Self::Full),
             _ => None,
         }
+    }
+}
+
+/// ACME challenge type used for certificate issuance (ADR-038).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AcmeChallengeType {
+    /// In-process HTTP-01 over `:80` (default; requires direct inbound reach).
+    #[default]
+    Http01,
+    /// DNS-01 via the Cloudflare provider (works behind a Cloudflare proxy).
+    Dns01,
+}
+
+impl AcmeChallengeType {
+    /// Parse a config/env value. Accepts `http-01`/`http01`/`http` and
+    /// `dns-01`/`dns01`/`dns` (case-insensitive).
+    pub fn parse_env(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "http-01" | "http01" | "http" => Some(Self::Http01),
+            "dns-01" | "dns01" | "dns" => Some(Self::Dns01),
+            _ => None,
+        }
+    }
+}
+
+/// Which DNS-01 provider answers the challenge (ADR-038). Selected by
+/// `DENIA_ACME_DNS_PROVIDER`; only relevant when `acme_challenge == Dns01`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DnsProviderKind {
+    /// Cloudflare API token provider (default).
+    #[default]
+    Cloudflare,
+    /// External script provider (`<script> present|cleanup <fqdn> <value>`).
+    Exec,
+}
+
+impl DnsProviderKind {
+    pub fn parse_env(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "cloudflare" | "cf" => Some(Self::Cloudflare),
+            "exec" | "script" | "external" => Some(Self::Exec),
+            _ => None,
+        }
+    }
+}
+
+/// A secret string whose `Debug` never reveals the value, so it cannot leak
+/// through `AppConfig`'s derived `Debug`. Used for the Cloudflare DNS API token.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+    /// Expose the secret value (call sites must not log it).
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(***)")
     }
 }
 
@@ -245,6 +329,15 @@ pub struct FileConfig {
     pub userns_size: Option<u32>,
     pub control_domain: Option<String>,
     pub control_tls: Option<bool>,
+    pub acme_challenge: Option<String>,
+    pub acme_dns_provider: Option<String>,
+    /// Path to a file holding the Cloudflare DNS API token (env-file line
+    /// `DENIA_CF_DNS_API_TOKEN=...` or a bare token). The token itself is never a
+    /// raw field in this file.
+    pub cf_dns_api_token_file: Option<PathBuf>,
+    pub acme_dns_exec: Option<PathBuf>,
+    pub acme_dns_propagation_secs: Option<u64>,
+    pub acme_dns_resolvers: Option<Vec<String>>,
     pub node_disk_path: Option<PathBuf>,
     pub autoscale_interval_s: Option<u64>,
     pub autoscale_headroom_cpu_millis: Option<u32>,
@@ -302,6 +395,40 @@ fn read_admin_token_file() -> Option<String> {
     None
 }
 
+/// Read the Cloudflare DNS API token from a file (env-file line
+/// `DENIA_CF_DNS_API_TOKEN=<value>` or a bare token). Mirrors
+/// [`read_admin_token_file`]. The token is never logged.
+fn read_cf_token_file(path: Option<&Path>) -> Option<String> {
+    let contents = std::fs::read_to_string(path?).ok()?;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("DENIA_CF_DNS_API_TOKEN=") {
+            let value = value.trim().trim_matches('"');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        } else if !line.contains('=') {
+            let value = line.trim_matches('"');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Split a comma-separated resolver list, trimming blanks.
+fn split_resolvers(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// Build a fully-populated default `FileConfig` template. Used when the
 /// config file is missing so the operator sees every tunable on first run.
 /// `admin_token` is freshly generated (32 random bytes -> 64 hex chars).
@@ -327,6 +454,12 @@ fn default_file_template() -> FileConfig {
         userns_size: Some(65_536),
         control_domain: None,
         control_tls: Some(false),
+        acme_challenge: Some("http-01".to_string()),
+        acme_dns_provider: Some("cloudflare".to_string()),
+        cf_dns_api_token_file: None,
+        acme_dns_exec: None,
+        acme_dns_propagation_secs: Some(60),
+        acme_dns_resolvers: None,
         node_disk_path: None,
         autoscale_interval_s: Some(15),
         autoscale_headroom_cpu_millis: Some(1_000),
@@ -415,6 +548,20 @@ pub enum ConfigError {
     ConfigFileSerialize(String),
     #[error("invalid DENIA_CONTROL_DOMAIN: {0}")]
     InvalidControlDomain(String),
+    #[error("invalid DENIA_ACME_CHALLENGE: {0} (expected http-01 or dns-01)")]
+    InvalidAcmeChallenge(String),
+    #[error("invalid DENIA_ACME_DNS_PROVIDER: {0} (expected cloudflare or exec)")]
+    InvalidDnsProvider(String),
+    #[error(
+        "DENIA_CF_DNS_API_TOKEN (or cf_dns_api_token_file) must be set when acme_challenge = dns-01 and provider = cloudflare"
+    )]
+    CfTokenRequired,
+    #[error(
+        "DENIA_ACME_DNS_EXEC (or acme_dns_exec) must be set when acme_challenge = dns-01 and provider = exec"
+    )]
+    ExecPathRequired,
+    #[error("acme_dns_exec path is not an executable file: {0}")]
+    ExecPathNotExecutable(String),
     #[error("invalid {name}: {value}")]
     InvalidPortRange { name: &'static str, value: String },
 }
@@ -550,6 +697,52 @@ impl AppConfig {
             .map(|v| v == "1" || v == "true")
             .or(file_cfg.control_tls)
             .unwrap_or(false);
+        let acme_challenge = env::var("DENIA_ACME_CHALLENGE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| {
+                file_cfg
+                    .acme_challenge
+                    .clone()
+                    .filter(|v| !v.trim().is_empty())
+            })
+            .map(|v| AcmeChallengeType::parse_env(&v).ok_or(ConfigError::InvalidAcmeChallenge(v)))
+            .transpose()?
+            .unwrap_or_default();
+        let acme_dns_provider = env::var("DENIA_ACME_DNS_PROVIDER")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| {
+                file_cfg
+                    .acme_dns_provider
+                    .clone()
+                    .filter(|v| !v.trim().is_empty())
+            })
+            .map(|v| DnsProviderKind::parse_env(&v).ok_or(ConfigError::InvalidDnsProvider(v)))
+            .transpose()?
+            .unwrap_or_default();
+        // Token is a secret: env var (systemd EnvironmentFile) or a file path.
+        // Never read from a raw `config.toml` field.
+        let cf_dns_api_token = env::var("DENIA_CF_DNS_API_TOKEN")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| read_cf_token_file(file_cfg.cf_dns_api_token_file.as_deref()))
+            .map(Secret::new);
+        let acme_dns_exec = env::var("DENIA_ACME_DNS_EXEC")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| file_cfg.acme_dns_exec.clone());
+        let acme_dns_propagation_secs = env::var("DENIA_ACME_DNS_PROPAGATION_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .or(file_cfg.acme_dns_propagation_secs)
+            .unwrap_or(60);
+        let acme_dns_resolvers = env::var("DENIA_ACME_DNS_RESOLVERS")
+            .ok()
+            .map(|v| split_resolvers(&v))
+            .or_else(|| file_cfg.acme_dns_resolvers.clone())
+            .unwrap_or_default();
         let node_disk_path = env::var("DENIA_NODE_DISK_PATH")
             .ok()
             .map(PathBuf::from)
@@ -702,6 +895,12 @@ impl AppConfig {
             control_tls,
             node_disk_path,
             acme_email,
+            acme_challenge,
+            acme_dns_provider,
+            cf_dns_api_token,
+            acme_dns_exec,
+            acme_dns_propagation_secs,
+            acme_dns_resolvers,
             http_port,
             https_port,
             tcp_port_range,
@@ -755,6 +954,12 @@ impl AppConfig {
             control_tls: false,
             node_disk_path: data_dir.clone(),
             acme_email: None,
+            acme_challenge: AcmeChallengeType::Http01,
+            acme_dns_provider: DnsProviderKind::Cloudflare,
+            cf_dns_api_token: None,
+            acme_dns_exec: None,
+            acme_dns_propagation_secs: 60,
+            acme_dns_resolvers: Vec::new(),
             http_port: 80,
             https_port: 443,
             tcp_port_range: PortRange::parse(DEFAULT_TCP_PORT_RANGE).expect("default tcp range"),
@@ -791,6 +996,41 @@ impl AppConfig {
             return Err(ConfigError::AcmeEmailRequired);
         }
         Ok(())
+    }
+
+    /// When the DNS-01 challenge is selected, the chosen provider's credentials
+    /// are mandatory — issuance cannot proceed without them. Checked regardless of
+    /// whether TLS is in use yet, so a misconfigured `dns-01` setup fails fast at
+    /// boot rather than silently disabling issuance once a service enables TLS.
+    pub fn require_dns01_provider(&self) -> Result<(), ConfigError> {
+        if self.acme_challenge != AcmeChallengeType::Dns01 {
+            return Ok(());
+        }
+        match self.acme_dns_provider {
+            DnsProviderKind::Cloudflare => {
+                if self.cf_dns_api_token.is_none() {
+                    return Err(ConfigError::CfTokenRequired);
+                }
+                Ok(())
+            }
+            DnsProviderKind::Exec => {
+                let path = self
+                    .acme_dns_exec
+                    .as_ref()
+                    .ok_or(ConfigError::ExecPathRequired)?;
+                // Validate the hook is a real, executable file now — otherwise the
+                // misconfiguration only surfaces at first issuance.
+                use std::os::unix::fs::PermissionsExt;
+                let meta = std::fs::metadata(path)
+                    .map_err(|_| ConfigError::ExecPathNotExecutable(path.display().to_string()))?;
+                if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+                    return Err(ConfigError::ExecPathNotExecutable(
+                        path.display().to_string(),
+                    ));
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -856,6 +1096,140 @@ mod ingress_tls_tests {
         let c = base();
         assert_eq!(c.acme_directory_url, DEFAULT_ACME_DIRECTORY_URL);
         assert!(c.acme_directory_url.starts_with("https://"));
+    }
+}
+
+#[cfg(test)]
+mod dns01_config_tests {
+    use super::*;
+
+    fn base() -> AppConfig {
+        AppConfig::for_test("0123456789012345678901234567890123")
+    }
+
+    #[test]
+    fn acme_challenge_parses_aliases() {
+        assert_eq!(
+            AcmeChallengeType::parse_env("http-01"),
+            Some(AcmeChallengeType::Http01)
+        );
+        assert_eq!(
+            AcmeChallengeType::parse_env("DNS01"),
+            Some(AcmeChallengeType::Dns01)
+        );
+        assert_eq!(AcmeChallengeType::parse_env("nope"), None);
+    }
+
+    #[test]
+    fn dns_provider_parses_aliases() {
+        assert_eq!(
+            DnsProviderKind::parse_env("cloudflare"),
+            Some(DnsProviderKind::Cloudflare)
+        );
+        assert_eq!(
+            DnsProviderKind::parse_env("EXEC"),
+            Some(DnsProviderKind::Exec)
+        );
+        assert_eq!(DnsProviderKind::parse_env("route53"), None);
+        assert_eq!(DnsProviderKind::default(), DnsProviderKind::Cloudflare);
+    }
+
+    #[test]
+    fn default_challenge_is_http01() {
+        assert_eq!(base().acme_challenge, AcmeChallengeType::Http01);
+    }
+
+    #[test]
+    fn secret_debug_is_redacted() {
+        let s = Secret::new("super-secret-token");
+        assert_eq!(format!("{s:?}"), "Secret(***)");
+        assert_eq!(s.expose(), "super-secret-token");
+        // The token must not leak through AppConfig's derived Debug either.
+        let mut c = base();
+        c.cf_dns_api_token = Some(Secret::new("super-secret-token"));
+        assert!(!format!("{c:?}").contains("super-secret-token"));
+    }
+
+    #[test]
+    fn require_dns01_provider_cloudflare_needs_token() {
+        let mut c = base();
+        c.acme_challenge = AcmeChallengeType::Dns01;
+        c.acme_dns_provider = DnsProviderKind::Cloudflare;
+        c.cf_dns_api_token = None;
+        // Fails fast regardless of current TLS use.
+        assert!(matches!(
+            c.require_dns01_provider(),
+            Err(ConfigError::CfTokenRequired)
+        ));
+        c.cf_dns_api_token = Some(Secret::new("t"));
+        assert!(c.require_dns01_provider().is_ok());
+    }
+
+    #[test]
+    fn require_dns01_provider_exec_needs_script() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut c = base();
+        c.acme_challenge = AcmeChallengeType::Dns01;
+        c.acme_dns_provider = DnsProviderKind::Exec;
+        c.acme_dns_exec = None;
+        assert!(matches!(
+            c.require_dns01_provider(),
+            Err(ConfigError::ExecPathRequired)
+        ));
+        // A non-existent path is rejected at startup.
+        c.acme_dns_exec = Some(PathBuf::from("/nonexistent/denia-dns-hook"));
+        assert!(matches!(
+            c.require_dns01_provider(),
+            Err(ConfigError::ExecPathNotExecutable(_))
+        ));
+        // A real executable file passes.
+        let dir = tempfile::tempdir().unwrap();
+        let hook = dir.path().join("hook.sh");
+        std::fs::write(&hook, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        c.acme_dns_exec = Some(hook);
+        assert!(c.require_dns01_provider().is_ok());
+    }
+
+    #[test]
+    fn require_dns01_provider_http01_never_requires_anything() {
+        let mut h = base();
+        h.acme_challenge = AcmeChallengeType::Http01;
+        h.cf_dns_api_token = None;
+        h.acme_dns_exec = None;
+        assert!(h.require_dns01_provider().is_ok());
+    }
+
+    #[test]
+    fn read_cf_token_file_accepts_envfile_line_and_bare_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let envfile = dir.path().join("cf.env");
+        std::fs::write(&envfile, "# comment\nDENIA_CF_DNS_API_TOKEN=\"abc123\"\n").unwrap();
+        assert_eq!(
+            read_cf_token_file(Some(envfile.as_path())).as_deref(),
+            Some("abc123")
+        );
+
+        let bare = dir.path().join("cf.token");
+        std::fs::write(&bare, "raw-token\n").unwrap();
+        assert_eq!(
+            read_cf_token_file(Some(bare.as_path())).as_deref(),
+            Some("raw-token")
+        );
+
+        assert_eq!(read_cf_token_file(None), None);
+    }
+
+    #[test]
+    fn split_resolvers_trims_and_drops_blanks() {
+        assert_eq!(
+            split_resolvers("https://a/dns-query, , https://b/dns-query"),
+            vec![
+                "https://a/dns-query".to_string(),
+                "https://b/dns-query".to_string()
+            ]
+        );
+        assert!(split_resolvers("").is_empty());
     }
 }
 
