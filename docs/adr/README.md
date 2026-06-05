@@ -55,6 +55,7 @@ Each ADR should include:
 | [035](035-control-domain-ingress.md) | Control Domain Over Ingress | Accepted | 2026-06-03 |
 | [036](036-general-purpose-protocol-ingress.md) | General-Purpose Protocol Ingress | Proposed | 2026-06-04 |
 | [037](037-cross-platform-client-cfg-gated-crate.md) | Cross-Platform Client via cfg-Gated Single Crate + crates.io | Proposed | 2026-06-04 |
+| [038](038-dns01-acme-cloudflare-provider.md) | Opt-In DNS-01 ACME via Pluggable Providers (Cloudflare + exec) | Accepted | 2026-06-05 |
 
 ## Contributing
 
