@@ -348,21 +348,13 @@ where
         socket_path: &std::path::Path,
         log: &crate::deploy::log::DeploymentLogWriter,
     ) -> Result<(), DeployError> {
-        // Health probe contract (review MED — dual endpoint): ingress dials the
-        // workload's Denia-owned UDS (ADR-020), but the health probe targets
-        // `http://127.0.0.1:{internal_port}`. These resolve to the SAME process
-        // because the in-namespace socket-proxy (`src/ingress/socket_proxy.rs`)
-        // binds BOTH the UDS and `internal_port` on the workload's loopback.
-        // The probe runs from the daemon's net namespace, so it reaches that
-        // loopback via the proxy's host-side UDS bridge. If a workload is ever
-        // changed to bind ONLY the UDS, this probe must move to the UDS too.
+        // Health probe contract: ingress dials the workload's Denia-owned UDS
+        // (ADR-020), so readiness probes must use the same socket path. The
+        // loopback bridge was removed; probing `127.0.0.1:{internal_port}` from
+        // the daemon namespace only reaches the host loopback, not the workload.
         log.write("HEALTHCHECK", "starting").ok();
-        self.health
-            .check(
-                &format!("http://127.0.0.1:{}", service.internal_port),
-                &service.health_check,
-            )
-            .await?;
+        let target = socket_path.to_string_lossy();
+        self.health.check(&target, &service.health_check).await?;
         log.write("HEALTHCHECK", "passed").ok();
 
         self.repos
@@ -462,11 +454,9 @@ where
         // fails, stop the started replica before propagating the error so we
         // never leak a running, unregistered workload (review MED).
         let wired = async {
+            let target = runtime_status.socket_path.to_string_lossy();
             self.health
-                .check(
-                    &format!("http://127.0.0.1:{}", plan.service.internal_port),
-                    &plan.service.health_check,
-                )
+                .check(&target, &plan.service.health_check)
                 .await?;
 
             self.repos
@@ -968,6 +958,90 @@ mod async_tests {
             )
             .expect("stored service");
         (store, coordinator, runtime, service)
+    }
+
+    #[derive(Debug, Default, Clone)]
+    struct RecordingHealthChecker {
+        targets: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HealthChecker for RecordingHealthChecker {
+        async fn check(
+            &self,
+            target: &str,
+            _health: &HealthCheck,
+        ) -> Result<(), crate::health::HealthError> {
+            self.targets
+                .lock()
+                .expect("health targets lock")
+                .push(target.to_string());
+            Ok(())
+        }
+    }
+
+    impl RecordingHealthChecker {
+        fn targets(&self) -> Vec<String> {
+            self.targets.lock().expect("health targets lock").clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn deploy_plain_service_healthchecks_runtime_socket() {
+        use crate::artifacts::{ArtifactKind, ArtifactRecord};
+
+        let store = SqliteStore::open_in_memory().expect("sqlite");
+        store.migrate().expect("migrate");
+        let runtime = FakeRuntime::default();
+        let health = RecordingHealthChecker::default();
+        let coordinator =
+            DeploymentCoordinator::new(build_repos(&store), runtime.clone(), health.clone());
+
+        let project_id = store.default_project_id().expect("default project");
+        let service = store
+            .put_service(
+                ServiceConfig::new(
+                    project_id,
+                    "web",
+                    vec!["web.example.test".to_string()],
+                    ServiceSource::ExternalImage(ExternalImageSource {
+                        image: "ghcr.io/acme/web:latest".to_string(),
+                        credential: None,
+                        registry_id: None,
+                        image_ref: None,
+                    }),
+                    3000,
+                    HealthCheck::new("/ready", 5),
+                    Some(ResourceLimits::default()),
+                    vec![],
+                )
+                .expect("service"),
+            )
+            .expect("stored service");
+
+        let artifact = ArtifactRecord::new(
+            "sha256:deadbeef",
+            ArtifactKind::OciImage,
+            ArtifactSource::ExternalRegistry {
+                image: "ghcr.io/acme/web:latest".to_string(),
+            },
+        )
+        .expect("artifact");
+
+        coordinator
+            .deploy(DeploymentPlan {
+                service: service.clone(),
+                artifact,
+            })
+            .await
+            .expect("deploy ok");
+
+        let started = runtime.started_requests();
+        assert_eq!(started.len(), 1);
+        assert_eq!(
+            health.targets(),
+            vec![started[0].socket_path.to_string_lossy()]
+        );
     }
 
     #[tokio::test]

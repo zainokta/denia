@@ -239,6 +239,9 @@ export function ServiceDetail() {
   const canManageProject =
     service !== undefined &&
     (isSuperAdmin || roleForActiveProject(service.project_id) === 'admin')
+  const verifiedDomainHostnames = domains
+    .filter((domain) => domain.status === 'verified')
+    .map((domain) => domain.hostname)
 
   const { data: registries = [] } = useQuery({
     queryKey: ['projects', service?.project_id, 'registries'],
@@ -416,10 +419,18 @@ export function ServiceDetail() {
                 delete
               </button>
             )}
-            {service ? <TlsToggle service={service} /> : null}
+            {service ? (
+              <TlsToggle
+                service={service}
+                verifiedDomains={verifiedDomainHostnames}
+              />
+            ) : null}
           </div>
         ) : service ? (
-          <TlsToggle service={service} />
+          <TlsToggle
+            service={service}
+            verifiedDomains={verifiedDomainHostnames}
+          />
         ) : null}
       </header>
 

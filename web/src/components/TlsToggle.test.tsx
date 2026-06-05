@@ -52,6 +52,21 @@ afterEach(() => {
 })
 
 describe('TlsToggle', () => {
+  it('uses verified domains when enabling tls for a service with stale empty domains', async () => {
+    const { buildTlsTogglePayload } = await import('#/components/TlsToggle')
+
+    expect(
+      buildTlsTogglePayload(
+        { ...FIXTURE_SERVICE, domains: [], tls_enabled: false },
+        true,
+        ['example.com', 'example.com'],
+      ),
+    ).toMatchObject({
+      domains: ['example.com'],
+      tls_enabled: true,
+    })
+  })
+
   it('renders with current TLS state', async () => {
     const { TlsToggle } = await import('#/components/TlsToggle')
     render(<TlsToggle service={FIXTURE_SERVICE} />, { wrapper: makeWrapper() })

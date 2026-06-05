@@ -272,6 +272,8 @@ impl LinuxRuntime {
         child_argv.push(guest_socket.clone());
         child_argv.push("--connect".to_string());
         child_argv.push(format!("127.0.0.1:{}", request.internal_port));
+        child_argv.push("--workdir".to_string());
+        child_argv.push(process.workdir.clone());
         child_argv.push("--".to_string());
         child_argv.extend(process.argv);
 
@@ -346,6 +348,7 @@ impl LinuxRuntime {
         let denia_dir = plan.upper.join(".denia");
         create_runtime_directory(&denia_dir)?;
         prepare_overlay_mountpoints(
+            &plan.rootfs_path,
             &plan.upper,
             &plan.namespace.workdir,
             plan.namespace.mount_proc,
@@ -427,6 +430,9 @@ impl LinuxRuntime {
     pub fn cleanup(&self, plan: &LinuxRuntimePlan) -> Result<(), RuntimeError> {
         remove_cgroup_dir_if_exists(&plan.cgroup_path)?;
         unmount_runtime_mounts(&plan.replica_dir);
+        if plan.replica_dir.exists() {
+            restore_current_process_owner(&plan.replica_dir)?;
+        }
         // Remove the per-replica host socket dir; it lives under <data_dir>/sock
         // (outside replica_dir) so the wipe below won't catch it.
         if let Some(dir) = plan.socket_path.parent() {
@@ -521,11 +527,12 @@ impl LinuxRuntime {
         // read-only lower layer (some hosts report EROFS there).
         if let Some(dir) = plan.socket_path.parent() {
             create_runtime_directory(dir)?;
+            restore_current_process_owner(dir)?;
+            remove_existing_runtime_file(&plan.socket_path)?;
             self.chown_overlay_dir(dir)?;
             let guest_mountpoint = upper_guest_path(&plan.upper, dir)?;
             create_runtime_directory(&guest_mountpoint)?;
         }
-        remove_existing_runtime_file(&plan.socket_path)?;
         Ok(())
     }
 
@@ -609,12 +616,17 @@ fn restore_current_process_owner(path: &Path) -> Result<(), RuntimeError> {
 }
 
 fn prepare_overlay_mountpoints(
+    rootfs: &Path,
     upper: &Path,
     workdir: &str,
     mount_proc: bool,
     setup_dev: bool,
 ) -> Result<(), RuntimeError> {
     create_runtime_directory(&upper.join(".old_root"))?;
+    let tmp = upper.join("tmp");
+    create_runtime_directory(&tmp)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o1777))
+        .map_err(path_io("set runtime tmp permissions", &tmp))?;
     if mount_proc {
         create_runtime_directory(&upper.join("proc"))?;
     }
@@ -622,10 +634,13 @@ fn prepare_overlay_mountpoints(
         create_runtime_directory(&upper.join("dev"))?;
     }
     if workdir != "/" {
-        create_dir_all(
-            "create runtime workdir",
-            &upper_guest_path(upper, Path::new(workdir))?,
-        )?;
+        let guest_workdir = Path::new(workdir);
+        if !upper_guest_path(rootfs, guest_workdir)?.exists() {
+            create_dir_all(
+                "create runtime workdir",
+                &upper_guest_path(upper, guest_workdir)?,
+            )?;
+        }
     }
     Ok(())
 }
@@ -642,7 +657,7 @@ fn unmount_runtime_mounts(replica_dir: &Path) {
             path.starts_with(replica_dir).then_some(path)
         })
         .collect::<Vec<_>>();
-    mountpoints.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+    mountpoints.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     for mountpoint in mountpoints {
         let _ = rustix::mount::unmount(&mountpoint, rustix::mount::UnmountFlags::DETACH);
     }
@@ -816,7 +831,7 @@ impl Runtime for LinuxRuntime {
         create_dir_all("create job merged directory", &merged)?;
         let denia_dir = upper.join(".denia");
         create_runtime_directory(&denia_dir)?;
-        prepare_overlay_mountpoints(&upper, &process.workdir, true, true)?;
+        prepare_overlay_mountpoints(&rootfs_path, &upper, &process.workdir, true, true)?;
         // Persistent ancestor dirs need the traverse bit so the workload's mapped
         // userns-root can reach the read-only lower; the ephemeral overlay layers
         // are chowned to the userns base so guest writes/copy-ups are owned by the
@@ -1505,6 +1520,8 @@ mod tests {
             plan.socket_path.to_string_lossy().into_owned(),
             "--connect".to_string(),
             "127.0.0.1:8080".to_string(),
+            "--workdir".to_string(),
+            "/".to_string(),
             "--".to_string(),
             "/bin/echo".to_string(),
             "hello".to_string(),
@@ -1609,12 +1626,103 @@ mod tests {
             plan.upper.join("dev").is_dir(),
             "prepare must pre-create the dev mountpoint in the upper layer"
         );
+        assert!(
+            plan.upper.join("tmp").is_dir(),
+            "prepare must pre-create the guest tmp directory in the upper layer"
+        );
+        assert_eq!(
+            std::fs::metadata(plan.upper.join("tmp"))
+                .expect("tmp metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o1777,
+            "guest tmp must be sticky world-writable"
+        );
         let denia_metadata =
             std::fs::symlink_metadata(plan.upper.join(".denia")).expect(".denia metadata");
         assert_eq!(
             denia_metadata.uid(),
             unsafe { libc::getuid() },
             ".denia must stay daemon-owned so helper staging can create temp files after upper chown"
+        );
+    }
+
+    #[test]
+    fn prepare_does_not_shadow_existing_image_workdir() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let runtime_dir = tmp.path().join("runtime");
+        let artifact_dir = tmp.path().join("artifacts");
+        let cgroup_dir = tmp.path().join("cgroup");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+
+        let (artifact, bundle_dir, rootfs) =
+            write_process_bundle(&artifact_dir, "sha256:image-workdir");
+        std::fs::create_dir_all(rootfs.join("app")).expect("image app dir");
+        std::fs::write(rootfs.join("app/package.json"), "{}").expect("image package json");
+        std::fs::write(
+            bundle_dir.join("process.json"),
+            serde_json::to_vec(&LinuxRuntimeProcessSpec {
+                argv: vec!["/bin/echo".to_string(), "hello".to_string()],
+                env: Vec::new(),
+                workdir: "/app".to_string(),
+            })
+            .expect("manifest json"),
+        )
+        .expect("manifest");
+
+        let helper = tiny_socket_proxy(&tmp);
+        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir)
+            .with_socket_proxy(helper);
+        let request = runtime_request(&runtime_dir, artifact, "test-svc");
+        let plan = runtime.plan(&request).expect("plan");
+
+        runtime.prepare(&plan, &request).expect("prepare");
+
+        assert!(
+            !plan.upper.join("app").exists(),
+            "existing image workdir must not be shadowed by an empty upper dir"
+        );
+        assert!(
+            rootfs.join("app/package.json").is_file(),
+            "prepare must leave the image workdir contents in the lower rootfs"
+        );
+    }
+
+    #[test]
+    fn prepare_creates_missing_image_workdir_in_upper() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let runtime_dir = tmp.path().join("runtime");
+        let artifact_dir = tmp.path().join("artifacts");
+        let cgroup_dir = tmp.path().join("cgroup");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+
+        let (artifact, bundle_dir, _rootfs) =
+            write_process_bundle(&artifact_dir, "sha256:missing-workdir");
+        std::fs::write(
+            bundle_dir.join("process.json"),
+            serde_json::to_vec(&LinuxRuntimeProcessSpec {
+                argv: vec!["/bin/echo".to_string(), "hello".to_string()],
+                env: Vec::new(),
+                workdir: "/srv/app".to_string(),
+            })
+            .expect("manifest json"),
+        )
+        .expect("manifest");
+
+        let helper = tiny_socket_proxy(&tmp);
+        let runtime = LinuxRuntime::new_with_paths(runtime_dir.clone(), artifact_dir, cgroup_dir)
+            .with_socket_proxy(helper);
+        let request = runtime_request(&runtime_dir, artifact, "test-svc");
+        let plan = runtime.plan(&request).expect("plan");
+
+        runtime.prepare(&plan, &request).expect("prepare");
+
+        assert!(
+            plan.upper.join("srv/app").is_dir(),
+            "missing image workdir must be materialized in the upper layer"
         );
     }
 

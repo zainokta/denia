@@ -576,16 +576,18 @@ mod tests {
             Some("* * * * * *".to_string()),
         )
         .unwrap();
-        job.next_run_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        let now = Utc::now();
+        job.next_run_at = Some(now - chrono::Duration::seconds(1));
         let job = store.put_job(job).unwrap();
 
         let (scheduler, _rx) = Scheduler::new(store.clone());
 
         // First tick claims the due job and enqueues a Pending run.
-        let enqueued = scheduler.tick(Utc::now()).unwrap();
+        let enqueued = scheduler.tick(now).unwrap();
         assert_eq!(enqueued.len(), 1);
         // The run is now active (Pending), so the next due tick must Skip it.
-        let next = scheduler.tick(Utc::now()).unwrap();
+        let next_due = store.get_job(job.id).unwrap().unwrap().next_run_at.unwrap();
+        let next = scheduler.tick(next_due).unwrap();
         assert!(next.is_empty(), "active run blocks a new run");
         let runs = store.list_job_runs(job.id).unwrap();
         assert!(

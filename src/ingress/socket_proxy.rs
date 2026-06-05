@@ -1,5 +1,6 @@
 use std::{
     ffi::OsString,
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::{ExitStatus, Stdio},
 };
@@ -18,6 +19,7 @@ pub struct SocketProxyConfig {
     pub listen_socket: PathBuf,
     pub connect_host: String,
     pub connect_port: u16,
+    pub workdir: Option<PathBuf>,
     pub child_argv: Vec<OsString>,
 }
 
@@ -44,6 +46,7 @@ where
     let mut args = args.into_iter();
     let mut listen_socket = None;
     let mut connect = None;
+    let mut workdir = None;
     let mut child_argv = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -63,6 +66,14 @@ where
             connect = Some(
                 args.next()
                     .ok_or(SocketProxyError::MissingArgument { name: "--connect" })?,
+            );
+            continue;
+        }
+        if arg == "--workdir" {
+            workdir = Some(
+                args.next()
+                    .ok_or(SocketProxyError::MissingArgument { name: "--workdir" })?
+                    .into(),
             );
             continue;
         }
@@ -95,6 +106,7 @@ where
         listen_socket,
         connect_host: connect_host.to_string(),
         connect_port,
+        workdir,
         child_argv,
     })
 }
@@ -122,16 +134,22 @@ pub async fn run(config: SocketProxyConfig) -> Result<(), SocketProxyError> {
     }
 
     let listener = UnixListener::bind(&config.listen_socket)?;
+    std::fs::set_permissions(
+        &config.listen_socket,
+        std::fs::Permissions::from_mode(0o666),
+    )?;
     caps::set_no_new_privs()?;
     caps::drop_bounding_caps()?;
     // Install the seccomp denylist before spawning so the workload child inherits
     // it. Long-running services defer hardening to this proxy, so without this
     // call the workload would run with no syscall filter at all (F-4).
     syscall::seccomp::install_filter()?;
-    let mut child = Command::new(&config.child_argv[0])
-        .args(&config.child_argv[1..])
-        .stdin(Stdio::null())
-        .spawn()?;
+    let mut command = Command::new(&config.child_argv[0]);
+    command.args(&config.child_argv[1..]).stdin(Stdio::null());
+    if let Some(workdir) = &config.workdir {
+        command.current_dir(workdir);
+    }
+    let mut child = command.spawn()?;
 
     loop {
         tokio::select! {
@@ -231,6 +249,8 @@ mod tests {
             OsString::from("/run/denia/service.sock"),
             OsString::from("--connect"),
             OsString::from("127.0.0.1:3000"),
+            OsString::from("--workdir"),
+            OsString::from("/app"),
             OsString::from("--"),
             OsString::from("/bin/web"),
         ])
@@ -242,6 +262,7 @@ mod tests {
         );
         assert_eq!(config.connect_host, "127.0.0.1");
         assert_eq!(config.connect_port, 3000);
+        assert_eq!(config.workdir, Some(PathBuf::from("/app")));
         assert_eq!(config.child_argv, vec![OsString::from("/bin/web")]);
     }
 
