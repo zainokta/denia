@@ -332,10 +332,18 @@ impl LinuxRuntime {
         // Unmount any stale overlay from previous failed deployments
         let _ = rustix::mount::unmount(&plan.merged, rustix::mount::UnmountFlags::DETACH);
 
-        // Clean up overlay-specific state (the work/work directory that overlayfs creates)
-        // This must be empty for a fresh overlay mount
+        // Clean up overlay-specific state (the `work/work` directory overlayfs
+        // creates); it must be gone for a fresh overlay mount. overlayfs makes it
+        // mode 000, and a prior run's `chown_overlay_dir` left it owned by the
+        // userns base uid, so the daemon — which holds CAP_CHOWN but neither
+        // CAP_FOWNER nor CAP_DAC_OVERRIDE — can neither read nor chmod it as is and
+        // `remove_dir_all` would fail EACCES. Reclaim ownership (by path, no read
+        // needed), widen the mode, then remove.
         let overlay_work = plan.work.join("work");
         if overlay_work.exists() {
+            reclaim_runtime_dir_owner(&overlay_work)?;
+            std::fs::set_permissions(&overlay_work, std::fs::Permissions::from_mode(0o700))
+                .map_err(path_io("relax stale overlay work permissions", &overlay_work))?;
             std::fs::remove_dir_all(&overlay_work).map_err(path_io(
                 "remove stale overlay work directory",
                 &overlay_work,
@@ -363,21 +371,15 @@ impl LinuxRuntime {
         self.set_traverse_mode(&plan.service_dir)?;
         self.set_traverse_mode(&plan.deployment_dir)?;
         self.set_traverse_mode(&plan.replica_dir)?;
-        // Ephemeral overlay layers stay owned by the daemon — the process that
-        // mounts the overlay privileged in the initial user namespace (see
-        // syscall::ns / ADR-026). overlayfs creates `work/work` and performs
-        // every copy-up using the MOUNTER's credentials, so the mounter must own
-        // (or hold DAC override on) `upper` and `work`. The daemon is neither
-        // root nor `CAP_DAC_OVERRIDE`, so chowning these to `userns_base` made
-        // overlayfs's `work/work` creation fail EACCES and silently fall back to
-        // a READ-ONLY mount — every subsequent workload write then failed EROFS.
-        // Leaving them daemon-owned keeps the overlay writable; per-file
-        // ownership for workload writes/copy-ups is still set to the guest uid by
-        // overlayfs using the daemon's `CAP_CHOWN`. Only the traverse bit is
-        // widened. `merged` is just the mountpoint (shadowed by the overlay).
-        self.set_traverse_mode(&plan.upper)?;
-        self.set_traverse_mode(&plan.work)?;
-        self.set_traverse_mode(&plan.merged)?;
+        // Ephemeral, guest-writable overlay layers chowned to the namespace-root
+        // (userns_base, = uid 0 inside the workload userns) so the workload owns
+        // its writable upper layer. The overlay is mounted privileged in the
+        // initial user namespace now (see syscall::ns / ADR-026), so this is no
+        // longer required for the mount to succeed — it keeps guest writes and
+        // copy-ups owned by the workload. `merged` is the mountpoint.
+        self.chown_overlay_dir(&plan.upper)?;
+        self.chown_overlay_dir(&plan.work)?;
+        self.chown_overlay_dir(&plan.merged)?;
         // The child needs traverse permission (mode 0755 `other` x bit) to reach
         // the read-only lowerdir (artifact rootfs); it never writes there, so
         // ownership stays put and we avoid chowning thousands of artifact files.
@@ -559,20 +561,19 @@ impl LinuxRuntime {
             .map_err(path_io("set directory permissions to 0755", path))
     }
 
-    /// Prepare a guest-owned directory: set mode 0755 and, when the process
-    /// holds `CAP_CHOWN`, recursively chown it to `userns_base`.
+    /// Prepare an ephemeral overlay / guest-writable directory: set mode 0755
+    /// and, when the process holds `CAP_CHOWN`, recursively chown it to
+    /// `userns_base`.
     ///
-    /// Used for the per-replica socket dir, which the workload binds its ingress
-    /// unix socket into as namespace-root (host `userns_base`, = uid 0 inside the
-    /// userns), so it must own that dir directly (it is a real-host RW bind
-    /// mount, not part of the overlay — see `prepare_socket_directory`).
-    ///
-    /// NOT used for the overlay `upper`/`work` layers: those must stay owned by
-    /// the daemon, which mounts the overlay and is the credential overlayfs uses
-    /// to create `work/work` and copy up. Chowning them to `userns_base` made the
-    /// mount silently fall back to read-only (EACCES on `work/work`) — see
-    /// `prepare`. The chown is skipped when `CAP_CHOWN` is absent (unprivileged
-    /// dev/test); root and the daemon (ambient `CAP_CHOWN`, see
+    /// The overlay `upper` layer and the guest socket dirs are owned by the
+    /// workload's namespace-root (host `userns_base`, which maps to uid 0 inside
+    /// the userns) so the workload owns its writable layer and its runtime
+    /// writes / copy-ups land with the guest's uid. (The overlay mount itself is
+    /// now performed privileged in the initial user namespace — see
+    /// `syscall::ns::child_prepare_root` / ADR-026 — so ownership is no longer
+    /// required for the mount to succeed.) The chown is skipped when `CAP_CHOWN`
+    /// is absent (unprivileged dev/test, where the privileged launch is not
+    /// exercised); root and the daemon (ambient `CAP_CHOWN`, see
     /// `denia.service.in`) both have it.
     fn chown_overlay_dir(&self, path: &Path) -> Result<(), RuntimeError> {
         self.set_traverse_mode(path)?;
@@ -622,8 +623,11 @@ fn restore_current_process_owner(path: &Path) -> Result<(), RuntimeError> {
     chown::recursive_lchown(path, uid, gid).map_err(RuntimeError::Syscall)
 }
 
-/// Chown a single path back to the daemon (non-recursive). The daemon holds
-/// CAP_CHOWN but not CAP_FOWNER, so it must own a dir before it can chmod it.
+/// Chown a single path back to the daemon (non-recursive, by path so it needs no
+/// read access to the target). The daemon holds CAP_CHOWN but neither CAP_FOWNER
+/// nor CAP_DAC_OVERRIDE, so it must take ownership of a dir before it can chmod
+/// (or, for a mode-000 dir, even read) it. Used to reclaim overlay scratch dirs
+/// that a prior run chowned to the userns base uid.
 fn reclaim_runtime_dir_owner(path: &Path) -> Result<(), RuntimeError> {
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
@@ -640,14 +644,14 @@ fn prepare_overlay_mountpoints(
     create_runtime_directory(&upper.join(".old_root"))?;
     let tmp = upper.join("tmp");
     create_runtime_directory(&tmp)?;
-    // A previous workload run leaves `upper/tmp` owned by the userns base uid:
-    // overlayfs copy-up chowns guest writes via the daemon's CAP_CHOWN, and the
-    // per-replica upper layer persists across restarts (prepare only unmounts the
-    // overlay, it does not wipe `upper`). On the next boot the daemon holds
-    // CAP_CHOWN but not CAP_FOWNER, so it can no longer chmod a dir it does not
-    // own and the bare set_permissions below would fail EPERM, aborting autostart.
-    // Reclaim ownership of just the mountpoint dir (non-recursive: workload files
-    // inside keep their guest ownership) before resetting the sticky mode.
+    // The per-replica upper layer persists across restarts (prepare only unmounts
+    // the overlay, it never wipes `upper`), and `chown_overlay_dir` recursively
+    // hands `upper` (tmp included) to the userns base uid so the workload owns its
+    // writable layer. On the next start the daemon holds CAP_CHOWN but not
+    // CAP_FOWNER, so it can no longer chmod a tmp dir it no longer owns and the
+    // set_permissions below would fail EPERM, aborting (auto)start. Reclaim
+    // ownership of just the mountpoint dir before resetting its sticky mode;
+    // chown_overlay_dir hands it back to the base uid afterwards.
     reclaim_runtime_dir_owner(&tmp)?;
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o1777))
         .map_err(path_io("set runtime tmp permissions", &tmp))?;
@@ -857,14 +861,13 @@ impl Runtime for LinuxRuntime {
         create_runtime_directory(&denia_dir)?;
         prepare_overlay_mountpoints(&rootfs_path, &upper, &process.workdir, true, true)?;
         // Persistent ancestor dirs need the traverse bit so the workload's mapped
-        // userns-root can reach the read-only lower. The ephemeral overlay layers
-        // stay daemon-owned (the overlay mounter) so overlayfs can create
-        // `work/work` and copy up — see the matching note in `prepare`. Mirrors
-        // the service path.
+        // userns-root can reach the read-only lower; the ephemeral overlay layers
+        // are chowned to the userns base so guest writes/copy-ups are owned by the
+        // workload. Mirrors the service `prepare` path.
         self.set_traverse_mode(&run_dir)?;
-        self.set_traverse_mode(&upper)?;
-        self.set_traverse_mode(&work)?;
-        self.set_traverse_mode(&merged)?;
+        self.chown_overlay_dir(&upper)?;
+        self.chown_overlay_dir(&work)?;
+        self.chown_overlay_dir(&merged)?;
         if let Some(data_dir) = self.artifact_dir.parent() {
             self.set_traverse_mode(data_dir)?;
         }
