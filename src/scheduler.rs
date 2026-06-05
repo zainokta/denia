@@ -347,6 +347,13 @@ impl JobRunRequestResolver for RuntimeJobRunRequestResolver {
                 },
                 RegistryAuth::Anonymous,
             ),
+            // Upload sources (ADR-039) build from a per-deploy working-tree
+            // context, which a job's one-shot run has no way to supply.
+            ServiceSource::Upload => {
+                return Err(ResolveError::Other(
+                    "upload source is not supported for jobs".to_string(),
+                ));
+            }
         };
 
         let artifact = acquirer

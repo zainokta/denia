@@ -598,6 +598,10 @@ export const ApiClientLive = Layer.effect(ApiClient)(
         // service legitimately sends the (possibly empty) `image`; we still pass
         // `image_ref` when present so direct-image and registry-ref redeploys
         // both carry a meaningful value.
+        //
+        // Upload-source services have no server-side build context to rebuild
+        // from, so the console "deploy" redeploys the current promoted artifact
+        // (ADR-039); shipping new code requires a fresh `denia push`.
         const body =
           src.type === 'git'
             ? {
@@ -606,11 +610,13 @@ export const ApiClientLive = Layer.effect(ApiClient)(
                 repo_url: src.repo_url,
                 git_ref: src.git_ref,
               }
-            : {
-                source: 'external_image',
-                service_id: service.id,
-                image: src.image || src.image_ref || '',
-              }
+            : src.type === 'upload'
+              ? { source: 'redeploy', service_id: service.id }
+              : {
+                  source: 'external_image',
+                  service_id: service.id,
+                  image: src.image || src.image_ref || '',
+                }
         const response = yield* http
           .post(url('/v1/deployments'), {
             headers: {

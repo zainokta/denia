@@ -21,6 +21,20 @@ mod tests {
         let back: DeploymentRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back, req);
     }
+
+    #[test]
+    fn redeploy_request_round_trips_and_exposes_service_id() {
+        let sid = Uuid::now_v7();
+        let req = DeploymentRequest::Redeploy { service_id: sid };
+        assert_eq!(req.service_id(), sid);
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            json,
+            format!(r#"{{"source":"redeploy","service_id":"{sid}"}}"#)
+        );
+        let back: DeploymentRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, req);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +55,14 @@ pub enum DeploymentRequest {
         dockerfile_path: String,
         context_path: String,
     },
+    /// Redeploy the service's current promoted artifact without rebuilding from
+    /// source. Backs the console "deploy" button for upload-source services
+    /// (ADR-039): the coordinator loads the latest promoted deployment's stored
+    /// artifact instead of acquiring a new one. Serializes as
+    /// `{"source":"redeploy","service_id":"<uuid>"}`.
+    Redeploy {
+        service_id: Uuid,
+    },
 }
 
 impl DeploymentRequest {
@@ -48,7 +70,8 @@ impl DeploymentRequest {
         match self {
             Self::Git { service_id, .. }
             | Self::ExternalImage { service_id, .. }
-            | Self::Upload { service_id, .. } => *service_id,
+            | Self::Upload { service_id, .. }
+            | Self::Redeploy { service_id } => *service_id,
         }
     }
 

@@ -235,6 +235,23 @@ where
                     )
                     .await?
             }
+            // Redeploy the current promoted artifact without rebuilding (ADR-039):
+            // load the live deployment's stored rootfs bundle and reuse it. This
+            // is how upload-source services redeploy from the console, since their
+            // build context is not retained server-side.
+            DeploymentRequest::Redeploy { .. } => {
+                log.write("REDEPLOY", "reusing current promoted artifact")
+                    .ok();
+                let promoted = self
+                    .repos
+                    .deployments
+                    .promoted_deployment(service.id)?
+                    .ok_or(DeployError::NoExistingArtifact)?;
+                self.repos
+                    .deployments
+                    .get_deployment_artifact(promoted)?
+                    .ok_or(DeployError::NoExistingArtifact)?
+            }
         };
         log.write("OCI_PULL", "done").ok();
         self.repos.deployments.put_artifact(artifact.clone())?;
