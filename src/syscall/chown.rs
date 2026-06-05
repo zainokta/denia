@@ -24,6 +24,15 @@ pub fn recursive_lchown(root: &Path, uid: u32, gid: u32) -> Result<(), SyscallEr
     Ok(())
 }
 
+/// Change ownership of a single path without recursing or following symlinks.
+///
+/// Used to reclaim ownership of a directory the daemon created earlier but that
+/// a workload run left owned by the userns base uid. The daemon holds CAP_CHOWN
+/// but not CAP_FOWNER, so it must own a path before it can `chmod` it.
+pub fn lchown(path: &Path, uid: u32, gid: u32) -> Result<(), SyscallError> {
+    chown_entry(path, uid, gid)
+}
+
 fn chown_entry(path: &Path, uid: u32, gid: u32) -> Result<(), SyscallError> {
     let uid = Uid::from_raw(uid);
     let gid = Gid::from_raw(gid);
