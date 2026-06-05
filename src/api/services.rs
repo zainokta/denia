@@ -16,7 +16,7 @@ use crate::app::AppState;
 use crate::auth::{Principal, ensure_role};
 use crate::config::ConfigError;
 use crate::deploy::DeploymentCoordinator;
-use crate::domain::{Role, ServiceConfig};
+use crate::domain::{DomainStatus, Role, ServiceConfig, ServiceDomain};
 use crate::logs::{LogStore, LogTailer};
 use crate::metrics::CgroupMetricsReader;
 
@@ -161,7 +161,72 @@ async fn put_service(
             ));
         }
     }
-    Ok(Json(state.services.put_service(service)?))
+    let saved = state.services.put_service(service)?;
+    // Bridge the form's `ServiceConfig.domains` array into the first-class
+    // `service_domains` table (ADR-013). The legacy array is a read-only
+    // projection of verified rows, but the create/edit form is the only place an
+    // operator types a hostname, so each new hostname must become a `Pending`
+    // verification row — otherwise it persists in `config_json` yet never appears
+    // in the domains panel, never routes, and never gets a cert (operator has to
+    // re-add it by hand).
+    sync_domain_rows(&state, &saved)?;
+    Ok(Json(saved))
+}
+
+/// Reconcile a service's legacy `domains` array into `service_domains` rows.
+///
+/// Additive only: missing hostnames are inserted as `Pending`; existing rows
+/// (any status) are left untouched so a `Verified` domain is never reset to
+/// pending, and removals stay an explicit `DELETE /domains/{id}` operation (the
+/// array can arrive stale or hydrated from verified rows, so it is not an
+/// authoritative delete signal). Reserved control hostnames are rejected and a
+/// hostname already owned by another service surfaces as a 409, mirroring
+/// `create_service_domain`.
+fn sync_domain_rows(state: &AppState, service: &ServiceConfig) -> Result<(), ApiError> {
+    if service.domains.is_empty() {
+        return Ok(());
+    }
+    let existing: std::collections::HashSet<String> = state
+        .domains
+        .list_service_domains_by_service(service.id)?
+        .into_iter()
+        .map(|d| d.hostname)
+        .collect();
+    for raw in &service.domains {
+        let hostname = crate::verification::validate_hostname(raw)
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        if existing.contains(&hostname) {
+            continue;
+        }
+        if crate::api::domains::is_reserved_control_hostname(
+            &hostname,
+            state.config.control_domain.as_deref(),
+        ) {
+            return Err(ApiError::Conflict(
+                "hostname is reserved for the control plane".into(),
+            ));
+        }
+        let d = ServiceDomain {
+            id: uuid::Uuid::now_v7(),
+            service_id: service.id,
+            hostname,
+            status: DomainStatus::Pending,
+            challenge_token: crate::verification::generate_token(),
+            verified_at: None,
+            last_check_at: None,
+            last_error: None,
+            created_at: chrono::Utc::now(),
+        };
+        state.domains.put_service_domain(&d).map_err(|e| match e {
+            crate::repo::RepoError::Sqlite(ref err)
+                if crate::api::error::is_constraint_violation(err) =>
+            {
+                ApiError::Conflict(format!("hostname already in use: {}", d.hostname))
+            }
+            other => ApiError::Repo(other),
+        })?;
+    }
+    Ok(())
 }
 
 async fn get_service(
@@ -1048,5 +1113,95 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_service_seeds_pending_domain_rows() {
+        use crate::domain::{DomainStatus, ServiceDomain};
+
+        let state = test_state();
+        let project = Project::new("team-domains", None).unwrap();
+        state.projects.put_project(project.clone()).unwrap();
+
+        let app = build_router(state);
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(service_create_body(project.id, "web")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::OK);
+        let created: ServiceConfig = serde_json::from_str(&body_string(create).await).unwrap();
+
+        // The hostname typed in the create form must land in the first-class
+        // `service_domains` table as a Pending row, not only in config_json.
+        let domains = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/services/{}/domains", created.id))
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(domains.status(), StatusCode::OK);
+        let rows: Vec<ServiceDomain> =
+            serde_json::from_str(&body_string(domains).await).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].hostname, "web.example.com");
+        assert_eq!(rows[0].status, DomainStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn re_post_same_domain_does_not_duplicate_rows() {
+        use crate::domain::ServiceDomain;
+
+        let state = test_state();
+        let project = Project::new("team-dom-idem", None).unwrap();
+        state.projects.put_project(project.clone()).unwrap();
+
+        let app = build_router(state);
+        let mut created_id = None;
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/services")
+                        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(service_create_body(project.id, "web")))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let cfg: ServiceConfig = serde_json::from_str(&body_string(resp).await).unwrap();
+            created_id = Some(cfg.id);
+        }
+
+        let domains = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/services/{}/domains", created_id.unwrap()))
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(domains.status(), StatusCode::OK);
+        let rows: Vec<ServiceDomain> =
+            serde_json::from_str(&body_string(domains).await).unwrap();
+        assert_eq!(rows.len(), 1, "re-POST must not duplicate the domain row");
     }
 }

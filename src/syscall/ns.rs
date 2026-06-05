@@ -967,6 +967,7 @@ fn child_setup_stage(stage: u8) -> &'static str {
         b'o' => "chroot: create /.old_root",
         b'v' => "chroot: pivot_root",
         b'u' => "chroot: unmount /.old_root",
+        b'Z' => "workload root is read-only (overlay merged mounted read-only; check host kernel overlayfs support / data-dir filesystem)",
         b'b' => "read-only bind mount",
         b'W' => "chdir workdir",
         b'p' => "mount proc",
@@ -1639,6 +1640,41 @@ unsafe fn child_exec(
         unsafe { child_setup_fail_errno(pipes, b'u', e.raw_os_error()) }; // unmount old_root
     }
     let _ = unsafe { libc::rmdir(c"/.old_root".as_ptr()) };
+
+    // Probe that the pivoted root (the overlay `merged` layer) is actually
+    // writable, in the workload's exact mount + user namespace context. On some
+    // hosts — older kernels, or upper/work filesystems overlayfs cannot fully
+    // drive — overlayfs SILENTLY mounts the merged layer read-only: the `mount()`
+    // in `child_prepare_root` returns success, but every workload write (and
+    // copy-up from the read-only lower) then fails EROFS deep inside the workload
+    // (e.g. nginx failing to create /var/cache/nginx or /tmp). The daemon's own
+    // pre-userns setup never notices because it writes the `upper` dir directly,
+    // bypassing the read-only merged mount. Detect it here and fail fast with a
+    // clear stage instead of letting the workload die with a cryptic error.
+    // Only EROFS is treated as fatal: a read-only filesystem means the workload
+    // cannot run at all. Other errnos are left for the workload to surface, so an
+    // unusual-but-writable ownership setup is never rejected here.
+    {
+        const PROBE: &std::ffi::CStr = c"/.denia-rw-probe";
+        let fd = unsafe {
+            libc::open(
+                PROBE.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            let errno = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO);
+            if errno == libc::EROFS {
+                unsafe { child_setup_fail_errno(pipes, b'Z', errno) };
+            }
+        } else {
+            unsafe { libc::close(fd) };
+            let _ = unsafe { libc::unlink(PROBE.as_ptr()) };
+        }
+    }
 
     if unsafe { libc::chdir(plan.workdir.as_ptr()) } < 0 {
         unsafe { child_setup_fail(pipes, b'W') };
@@ -2460,6 +2496,10 @@ mod tests {
         assert_eq!(child_setup_stage(b'X'), "unshare user/pid namespace");
         assert_eq!(child_setup_stage(b'a'), "chroot: overlay mount");
         assert_eq!(child_setup_stage(b'R'), "chroot");
+        assert_eq!(
+            child_setup_stage(b'Z'),
+            "workload root is read-only (overlay merged mounted read-only; check host kernel overlayfs support / data-dir filesystem)"
+        );
         assert_eq!(child_setup_stage(b'E'), "execve");
         assert_eq!(child_setup_stage(b'?'), "unknown setup stage");
     }

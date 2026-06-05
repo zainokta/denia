@@ -310,7 +310,7 @@ impl ArtifactAcquirer {
         let image_artifact = ArtifactRecord::new(digest, ArtifactKind::OciImage, source)?;
         let pulled = self.puller.read_layout(output_dir).await?;
         let bundle_dir = self.write_bundle(&image_artifact.digest, &pulled.layers)?;
-        let process = rootfs_bundle_from_oci_config(&pulled.config)?;
+        let process = rootfs_bundle_from_oci_config(&pulled.config, &bundle_dir.join("rootfs"))?;
         std::fs::write(
             bundle_dir.join("process.json"),
             serde_json::to_vec_pretty(&process)?,
@@ -338,7 +338,7 @@ impl ArtifactAcquirer {
             pulled.digest.clone()
         };
         let bundle_dir = self.write_bundle(&digest, &pulled.layers)?;
-        let process = rootfs_bundle_from_oci_config(&pulled.config)?;
+        let process = rootfs_bundle_from_oci_config(&pulled.config, &bundle_dir.join("rootfs"))?;
         std::fs::write(
             bundle_dir.join("process.json"),
             serde_json::to_vec_pretty(&process)?,
@@ -587,6 +587,7 @@ impl ArtifactAcquirer {
 
 fn rootfs_bundle_from_oci_config(
     cfg: &crate::oci::config::OciImageConfig,
+    rootfs: &std::path::Path,
 ) -> Result<RootfsBundleSpec, ArtifactAcquireError> {
     let oci_spec = crate::oci::config::RootfsBundleSpec::try_from(cfg).map_err(|e| match e {
         crate::oci::config::ConfigError::MissingProcessConfig
@@ -597,11 +598,41 @@ fn rootfs_bundle_from_oci_config(
             ArtifactAcquireError::InvalidEnvironmentEntry { entry }
         }
     })?;
-    Ok(RootfsBundleSpec {
+    let mut process = RootfsBundleSpec {
         argv: oci_spec.argv,
         env: oci_spec.env,
         workdir: oci_spec.workdir,
-    })
+    };
+    resolve_relative_argv0_from_path(&mut process, rootfs);
+    Ok(process)
+}
+
+fn resolve_relative_argv0_from_path(process: &mut RootfsBundleSpec, rootfs: &std::path::Path) {
+    let Some(argv0) = process.argv.first() else {
+        return;
+    };
+    if argv0.starts_with('/') || argv0.contains('/') {
+        return;
+    }
+
+    let Some((_, path_value)) = process.env.iter().find(|(key, _)| key == "PATH") else {
+        return;
+    };
+
+    for entry in path_value.split(':') {
+        if entry.is_empty() || !entry.starts_with('/') {
+            continue;
+        }
+
+        let candidate = rootfs.join(entry.trim_start_matches('/')).join(argv0);
+        let Ok(metadata) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+            process.argv[0] = format!("{entry}/{argv0}");
+            return;
+        }
+    }
 }
 
 /// Resolve `rel` under `root`, refusing anything that could escape the checkout.
@@ -792,6 +823,93 @@ mod tests {
         assert!(
             cmd.contains("--opt filename=Dockerfile"),
             "buildctl invocation must name the Dockerfile within the dockerfile local context, got: {cmd}"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_image_resolves_bare_entrypoint_from_rootfs_path() {
+        struct StaticPuller;
+        #[async_trait]
+        impl OciImagePuller for StaticPuller {
+            async fn pull(
+                &self,
+                _image: &str,
+                _auth: RegistryAuth,
+            ) -> Result<PulledImage, OciError> {
+                Ok(PulledImage {
+                    digest: "sha256:nodepath".to_string(),
+                    config: crate::oci::config::OciImageConfig {
+                        config: Some(crate::oci::config::OciImageProcessConfig {
+                            entrypoint: Some(vec!["docker-entrypoint.sh".to_string()]),
+                            cmd: Some(vec!["node".to_string(), "server.mjs".to_string()]),
+                            env_vars: Some(vec![
+                                ("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+                                    .to_string()),
+                            ]),
+                            working_dir: Some("/app".to_string()),
+                        }),
+                        rootfs: None,
+                    },
+                    layers: Vec::new(),
+                    _staging: None,
+                    _cache_reservations: Vec::new(),
+                })
+            }
+
+            async fn read_layout(&self, _d: &Path) -> Result<PulledImage, OciError> {
+                unreachable!("StaticPuller::read_layout not expected")
+            }
+        }
+
+        struct NodeRootfsUnpacker;
+        impl OciRootfsUnpacker for NodeRootfsUnpacker {
+            fn unpack(&self, _layers: &[LayerBlob], rootfs_dir: &Path) -> Result<(), OciError> {
+                let bin_dir = rootfs_dir.join("usr/local/bin");
+                std::fs::create_dir_all(&bin_dir).map_err(OciError::Io)?;
+                let entrypoint = bin_dir.join("docker-entrypoint.sh");
+                std::fs::write(&entrypoint, b"#!/bin/sh\nexec \"$@\"\n").map_err(OciError::Io)?;
+                std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o755))
+                    .map_err(OciError::Io)
+            }
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = AppConfig::for_test("test-token");
+        config.artifact_dir = tmp.path().to_path_buf();
+        config.userns_base = std::fs::metadata(tmp.path()).unwrap().uid();
+        let acquirer = ArtifactAcquirer::with_traits(
+            config.clone(),
+            Arc::new(StaticPuller),
+            Arc::new(NodeRootfsUnpacker),
+        );
+        let runner = FakeCommandRunner::new(vec![]);
+
+        acquirer
+            .acquire_rootfs_bundle_from_image_config(
+                &runner,
+                ArtifactAcquireRequest::ExternalImage {
+                    image: "ghcr.io/acme/node:latest".to_string(),
+                },
+                RegistryAuth::Anonymous,
+            )
+            .await
+            .expect("acquire rootfs bundle");
+
+        let process_json = std::fs::read_to_string(
+            config
+                .artifact_dir
+                .join("sha256-nodepath")
+                .join("process.json"),
+        )
+        .unwrap();
+        let process: RootfsBundleSpec = serde_json::from_str(&process_json).unwrap();
+        assert_eq!(
+            process.argv,
+            vec![
+                "/usr/local/bin/docker-entrypoint.sh".to_string(),
+                "node".to_string(),
+                "server.mjs".to_string()
+            ]
         );
     }
 
