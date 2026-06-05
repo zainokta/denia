@@ -8,6 +8,7 @@ import { useActionToasts } from './Toast'
 
 interface Props {
   service: Service
+  verifiedDomains?: ReadonlyArray<string>
 }
 
 const putService = (svc: Service) =>
@@ -16,7 +17,24 @@ const putService = (svc: Service) =>
     return yield* api.putService(svc)
   })
 
-export function TlsToggle({ service }: Props) {
+export function buildTlsTogglePayload(
+  service: Service,
+  nextTlsEnabled: boolean,
+  verifiedDomains: ReadonlyArray<string> = [],
+): Service {
+  const domains =
+    nextTlsEnabled && service.domains.length === 0
+      ? Array.from(new Set(verifiedDomains))
+      : service.domains
+
+  return {
+    ...service,
+    domains,
+    tls_enabled: nextTlsEnabled,
+  }
+}
+
+export function TlsToggle({ service, verifiedDomains = [] }: Props) {
   const queryClient = useQueryClient()
   const toast = useActionToasts()
   const tlsEnabled = service.tls_enabled ?? false
@@ -24,10 +42,7 @@ export function TlsToggle({ service }: Props) {
   const toggle = useMutation({
     mutationFn: () =>
       runQuery(
-        putService({
-          ...service,
-          tls_enabled: !tlsEnabled,
-        }),
+        putService(buildTlsTogglePayload(service, !tlsEnabled, verifiedDomains)),
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['services'] })

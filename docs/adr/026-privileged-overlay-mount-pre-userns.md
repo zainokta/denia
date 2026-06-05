@@ -101,12 +101,29 @@ produced a circular `/dev/null` symlink that broke the socket-proxy's
 `Stdio::null()` and any workload opening `/dev/null`. The recursive self-bind +
 `pivot_root` carry the `/dev` tmpfs and its node binds into the workload.
 
-The pivot scratch directory (`/.old_root`), `/proc`, `/dev`, and any missing OCI
-workdir mountpoints are also pre-created in the per-replica `upper` layer before
-that layer is chowned to the workload's mapped uid. Creating them later through
-the inherited overlay view can report `EROFS` on hosts where the destination path
-resolves via the read-only lower image, or fail because the daemon no longer owns
-the upper layer.
+The pivot scratch directory (`/.old_root`), `/proc`, `/dev`, guest `/tmp`, and
+any missing OCI workdir mountpoints are also pre-created in the per-replica
+`upper` layer before that layer is chowned to the workload's mapped uid. Guest
+`/tmp` is created with `01777` so language runtimes can create temporary files
+even when the image omits the directory. OCI workdirs are only created in
+`upper` when the lower image does not already contain that path; otherwise an
+empty upper directory would shadow the image's real workdir contents. Creating
+these paths later through the inherited overlay view can report `EROFS` on hosts
+where the destination path resolves via the read-only lower image, or fail
+because the daemon no longer owns the upper layer.
+
+`/proc` is first prepared as a tiny tmpfs mountpoint in the pre-userns root setup
+stage, rather than as a plain overlay directory. Denia then read-only bind-mounts
+the host `/proc` onto that mountpoint as a compatibility fallback. After entering
+the workload PID/user namespaces but before `pivot_root`, the launcher mounts a
+fresh procfs onto `<new_root>/proc`; the mount then carries through the pivot.
+This matches the ordering used by `unshare --mount-proc` and avoids kernels that
+reject a fresh procfs after pivot with the user-namespace `mount_too_revealing`
+guard. If the fresh procfs mount is denied, Denia keeps the read-only fallback
+and still masks sensitive proc paths. This is less isolated than a namespaced
+procfs because host process entries can be visible, but it avoids exposing a
+writable procfs and keeps common runtimes such as Bun working on kernels that
+deny rootless procfs mounts.
 
 **socket-proxy runtime libraries.** socket-proxy is the daemon binary itself
 (`current_exe()`), dynamically linked against the host glibc + loader. Placed as
@@ -121,6 +138,15 @@ under `/.denia/lib`, and socket-proxy is launched through the staged loader:
 `--library-path` is consumed by the loader at socket-proxy startup and is **not**
 inherited by the workload socket-proxy spawns, so the workload keeps using its own
 image libc. A statically-linked socket-proxy yields no libs and is exec'd directly.
+Because socket-proxy is the namespaced init process and then spawns the actual
+workload, Denia passes the OCI workdir explicitly as `--workdir` and
+socket-proxy calls `current_dir()` for the workload child. This avoids relying on
+cwd inheritance through the staged dynamic-loader invocation.
+After binding the service Unix socket, socket-proxy sets the socket mode to
+`0666`. The socket is created by the workload's mapped uid/gid inside the
+namespace, while the host daemon and Pingora run as the `denia` user; without a
+writable socket mode, health checks and ingress receive `EACCES` even though root
+can connect manually.
 
 The helper binary and host libraries are staged into the per-replica `upper`
 layer, not the content-addressed artifact rootfs. This keeps ADR-019's immutable

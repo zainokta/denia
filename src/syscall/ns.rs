@@ -1217,6 +1217,49 @@ unsafe fn child_prepare_root(plan: &NativeLaunchPlan, pipes: &SyncPipes) {
                 unsafe { child_setup_fail_errno(pipes, b'p', errno) };
             }
         }
+        if unsafe {
+            libc::mount(
+                c"tmpfs".as_ptr(),
+                proc_target.as_ptr(),
+                c"tmpfs".as_ptr(),
+                libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                c"mode=755,size=4096".as_ptr().cast(),
+            )
+        } < 0
+        {
+            let errno = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO);
+            if errno != libc::EBUSY {
+                unsafe { child_setup_fail_errno(pipes, b'p', errno) };
+            }
+        }
+        if unsafe {
+            libc::mount(
+                c"/proc".as_ptr(),
+                proc_target.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND | libc::MS_REC,
+                std::ptr::null(),
+            )
+        } < 0
+        {
+            unsafe { child_setup_fail(pipes, b'p') };
+        }
+        let _ = unsafe {
+            libc::mount(
+                std::ptr::null(),
+                proc_target.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND
+                    | libc::MS_REMOUNT
+                    | libc::MS_RDONLY
+                    | libc::MS_NOSUID
+                    | libc::MS_NODEV
+                    | libc::MS_NOEXEC,
+                std::ptr::null(),
+            )
+        };
     }
 
     for bind in &plan.ro_binds {
@@ -1443,6 +1486,21 @@ unsafe fn child_exec(
         unsafe { child_setup_fail_errno(pipes, b'P', e.raw_os_error()) };
     }
 
+    // The id-map has been written by the parent before `child_exec` runs. Enter
+    // mapped root now, before the userns-owned mount operations (self-bind,
+    // pivot_root, procfs, loopback) so a daemon running as the `denia` host user
+    // is uid 0 inside the workload user namespace while using its namespace caps.
+    // Repeating the calls later is harmless and keeps the final privilege floor
+    // explicit immediately before execve.
+    if plan.setup.clone_flags & libc::CLONE_NEWUSER != 0 {
+        if unsafe { libc::setresgid(0, 0, 0) } < 0 {
+            unsafe { child_setup_fail(pipes, b'g') };
+        }
+        if unsafe { libc::setresuid(0, 0, 0) } < 0 {
+            unsafe { child_setup_fail(pipes, b'i') };
+        }
+    }
+
     if let Some(stdout_fd) = stdio.stdout_fd {
         redirect_stdio_fd(pipes, stdout_fd, libc::STDOUT_FILENO);
     }
@@ -1492,6 +1550,32 @@ unsafe fn child_exec(
         unsafe { child_setup_fail(pipes, b'r') }; // new-root self-bind mount
     }
 
+    // Mount /proc in the workload's PID/user namespace before pivoting. On some
+    // kernels, mounting proc after pivot is denied by the `mount_too_revealing`
+    // guard even while the old root is still attached; mounting onto
+    // `<new_root>/proc` first matches util-linux `unshare --mount-proc` ordering
+    // and carries the procfs through pivot_root.
+    let mut proc_mounted = false;
+    if plan.setup.mount_proc {
+        let mut proc_buf = new_root.to_bytes().to_vec();
+        proc_buf.extend_from_slice(b"/proc\0");
+        let proc_target =
+            std::ffi::CStr::from_bytes_with_nul(&proc_buf).expect("proc path has valid NUL");
+        let _ = std::fs::create_dir_all(proc_target.to_string_lossy().as_ref());
+        match mount_proc(&plan.proc_fs_type, proc_target) {
+            Ok(()) => {
+                proc_mounted = true;
+            }
+            Err(e) if e == rustix::io::Errno::EXIST || e == rustix::io::Errno::BUSY => {
+                proc_mounted = true;
+            }
+            Err(e) if e == rustix::io::Errno::PERM => {
+                proc_mounted = true;
+            }
+            Err(e) => unsafe { child_setup_fail_errno(pipes, b'p', e.raw_os_error()) },
+        }
+    }
+
     let mut old_root_buf = new_root.to_bytes().to_vec();
     old_root_buf.extend_from_slice(b"/.old_root\0");
     let old_root_target =
@@ -1519,26 +1603,31 @@ unsafe fn child_exec(
         unsafe { child_setup_fail_errno(pipes, b'W', e.raw_os_error()) };
     }
 
-    // Mount /proc and apply the masks BEFORE detaching /.old_root. A fresh
-    // procfs mount in the workload's user namespace is denied EPERM unless a
-    // fully-visible proc already exists as a reference (the kernel's
-    // `mount_too_revealing` anti-spoofing rule for proc in a userns). The old
-    // root's /proc — still mounted at /.old_root/proc until the detach below —
-    // is that reference; detaching first makes the proc mount fail. (Verified:
-    // proc-after-detach => EPERM, proc-before-detach => OK.) /dev and the
-    // read-only binds were already set up pre-userns in `child_prepare_root`.
-    if plan.setup.mount_proc {
+    // If the pre-pivot proc mount was denied, make one last attempt before
+    // detaching /.old_root. On kernels that still reject it, leave the image's
+    // empty /proc in place rather than exposing host procfs.
+    if plan.setup.mount_proc && !proc_mounted {
         // Minimal images omit /proc; ensure the mount target exists.
         let _ = std::fs::create_dir_all("/proc");
         match mount_proc(&plan.proc_fs_type, &plan.proc_mount_target) {
-            Ok(()) => {}
+            Ok(()) => {
+                proc_mounted = true;
+            }
             // A proc already mounted at /proc is benign (e.g. inherited) — keep it.
-            Err(e) if e == rustix::io::Errno::EXIST || e == rustix::io::Errno::BUSY => {}
+            Err(e) if e == rustix::io::Errno::EXIST || e == rustix::io::Errno::BUSY => {
+                proc_mounted = true;
+            }
+            // Some kernels deny a fresh procfs mount in this user namespace even
+            // before detaching the old root. Leave the image's empty /proc in
+            // place instead of failing the whole workload or exposing host /proc.
+            Err(e) if e == rustix::io::Errno::PERM => {
+                proc_mounted = true;
+            }
             Err(e) => unsafe { child_setup_fail_errno(pipes, b'p', e.raw_os_error()) },
         }
     }
 
-    if plan.mask_proc && mask_proc_paths().is_err() {
+    if proc_mounted && plan.mask_proc && mask_proc_paths().is_err() {
         unsafe { child_setup_fail(pipes, b'm') };
     }
 
@@ -1613,7 +1702,7 @@ unsafe fn child_exec(
     unsafe { child_setup_fail(pipes, b'E') };
 }
 
-fn mount_proc(fs_type: &CString, target: &CString) -> Result<(), rustix::io::Errno> {
+fn mount_proc(fs_type: &std::ffi::CStr, target: &std::ffi::CStr) -> Result<(), rustix::io::Errno> {
     rustix::mount::mount(
         fs_type,
         target,

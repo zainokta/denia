@@ -91,9 +91,14 @@ async fn put_service(
     Json(mut service): Json<ServiceConfig>,
 ) -> Result<Json<ServiceConfig>, ApiError> {
     ensure_role(&state, &principal, service.project_id, Role::Operator)?;
-    // A service with no domain cannot have ACME-issued TLS (ACME is gated to
-    // verified domains), so TLS is meaningless here — coerce it off rather than
-    // tripping the ACME-email requirement below.
+    // A service with no domain cannot have ACME-issued TLS. Domain management
+    // now stores verification rows separately from the legacy ServiceConfig
+    // `domains` array, so a TLS toggle can arrive with `domains: []` even when
+    // this existing service already has verified hostnames. Preserve that
+    // operator intent by hydrating the legacy array from verified domain rows.
+    if service.tls_enabled && service.domains.is_empty() && !service.id.is_nil() {
+        service.domains = state.domains.list_verified_hostnames(service.id)?;
+    }
     if service.domains.is_empty() {
         service.tls_enabled = false;
     }
@@ -349,6 +354,12 @@ mod tests {
 
     fn test_state() -> AppState {
         AppState::builder(AppConfig::for_test(ADMIN_TOKEN)).build()
+    }
+
+    fn test_state_with_acme_email() -> AppState {
+        let mut config = AppConfig::for_test(ADMIN_TOKEN);
+        config.acme_email = Some("ops@example.com".to_string());
+        AppState::builder(config).build()
     }
 
     async fn body_string(resp: axum::response::Response) -> String {
@@ -813,6 +824,76 @@ mod tests {
         let cfg: ServiceConfig = serde_json::from_str(&body_string(resp).await).unwrap();
         assert!(cfg.domains.is_empty());
         assert!(!cfg.tls_enabled, "tls must be coerced off when no domain");
+    }
+
+    #[tokio::test]
+    async fn put_service_tls_uses_verified_domain_rows_when_body_domains_are_stale() {
+        use crate::domain::{
+            DomainStatus, ExternalImageSource, HealthCheck, Project, ServiceConfig, ServiceDomain,
+            ServiceSource,
+        };
+        let state = test_state_with_acme_email();
+        let project = Project::new("team-domainrows", None).unwrap();
+        state.projects.put_project(project.clone()).unwrap();
+
+        let svc = state
+            .services
+            .put_service(
+                ServiceConfig::new(
+                    project.id,
+                    "web",
+                    vec![],
+                    ServiceSource::ExternalImage(ExternalImageSource {
+                        image: "nginx".into(),
+                        credential: None,
+                        registry_id: None,
+                        image_ref: None,
+                    }),
+                    80,
+                    HealthCheck::new("/health", 5),
+                    None,
+                    Vec::new(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        state
+            .domains
+            .put_service_domain(&ServiceDomain {
+                id: uuid::Uuid::now_v7(),
+                service_id: svc.id,
+                hostname: "web.example.com".into(),
+                status: DomainStatus::Verified,
+                challenge_token: "tok".into(),
+                verified_at: Some(chrono::Utc::now()),
+                last_check_at: Some(chrono::Utc::now()),
+                last_error: None,
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        let mut update = svc;
+        update.domains = vec![];
+        update.tls_enabled = true;
+        let body = serde_json::to_vec(&update).unwrap();
+
+        let resp = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/services")
+                    .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cfg: ServiceConfig = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert_eq!(cfg.domains, vec!["web.example.com"]);
+        assert!(cfg.tls_enabled);
     }
 
     #[tokio::test]
