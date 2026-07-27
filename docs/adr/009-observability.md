@@ -72,6 +72,3 @@ Same bearer token + `Operator` role check as the existing one-shot `GET /v1/serv
 ### Dependency
 
 Added `tokio-stream = "0.1"` for `tokio_stream::wrappers::ReceiverStream`.
-
-## References
-

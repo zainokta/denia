@@ -10,7 +10,7 @@ backend (ADR-020). The current `:443` listener constructs
 `TlsSettings::with_callbacks` for SNI-based certificate selection and does not
 call `enable_h2`, so Denia does not advertise HTTP/2 over ALPN today.
 
-On 2026-06-02, Calif published "analysis Discovered a Hidden HTTP/2 Bomb", a remote
+On 2026-06-02, Calif published research on a hidden HTTP/2 bomb, a remote
 denial-of-service class against HTTP/2 termination points. The attack combines
 HPACK indexed header amplification with a stalled HTTP/2 response flow-control
 window. Maximum decoded header bytes are not sufficient mitigation because the

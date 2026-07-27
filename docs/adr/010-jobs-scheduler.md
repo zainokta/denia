@@ -63,6 +63,3 @@ history (status + exit code) preserved across restarts.
   carries socket/internal-port semantics that don't apply to one-shot runs.
 - **OS cron in a sidecar**: rejected; one persistent control plane should
   own all scheduling so run history stays in SQLite.
-
-## References
-

@@ -195,7 +195,7 @@ impl RouteTable {
 /// handshake. The leaf certificate is first in `chain`.
 ///
 /// Holds boringssl-parsed material (`X509` / `PKey`). The key is never logged or
-/// serialized (project guidance secrets discipline); `ParsedCert` intentionally does
+/// serialized; `ParsedCert` intentionally does
 /// not derive `Debug`/`Serialize`.
 #[derive(Clone)]
 pub struct ParsedCert {

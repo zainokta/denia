@@ -19,7 +19,7 @@ Denia already holds a strong supply-chain posture: `install.sh` pins SHA256 for
 `rustup-init` and the NodeSource setup script, secrets are SOPS-encrypted, and
 the runtime drops capabilities. An update path that fetches and executes a new
 binary is a high-value target and must verify what it downloads before trusting
-it. The host root filesystem is the explicit trust boundary (project guidance).
+it. The host root filesystem is the explicit trust boundary.
 
 ## Decision
 
