@@ -1,0 +1,22 @@
+[Unit]
+Description=Denia managed OCI registry (Zot)
+Documentation=https://zotregistry.dev/
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=denia
+Group=denia
+ExecStart=/usr/local/bin/zot serve /etc/denia/zot.json
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=500000
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/denia/zot
+
+[Install]
+WantedBy=multi-user.target

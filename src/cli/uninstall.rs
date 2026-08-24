@@ -18,11 +18,6 @@ pub struct UninstallArgs {
 
 pub fn run(args: UninstallArgs) -> anyhow::Result<()> {
     privilege::require_root()?;
-    // detect_install_user is required for `--purge` (to resolve ~/.config/denia).
-    // Always call it so we can also surface a sensible error early. The
-    // SUDO_USER env-var check inside detect_install_user covers the
-    // sudo-invocation contract; without it we cannot know which operator's
-    // home to clean.
     let ctx = privilege::detect_install_user()?;
 
     for step in plan(args.purge) {
@@ -38,7 +33,7 @@ pub fn run(args: UninstallArgs) -> anyhow::Result<()> {
     if !args.dry_run {
         println!();
         println!("Denia service removed.");
-        println!("  Remove the binary manually: sudo rm /usr/local/bin/denia");
+        println!("  Remove binaries manually: sudo rm /usr/local/bin/denia /usr/local/bin/zot");
         if !args.purge {
             println!(
                 "  Data + config preserved. Re-run with --purge to wipe /var/lib/denia and ~/.config/denia."
@@ -50,10 +45,17 @@ pub fn run(args: UninstallArgs) -> anyhow::Result<()> {
 
 fn plan(purge: bool) -> Vec<Step> {
     use Step::*;
-    let mut steps = vec![SystemctlDisableNow, RemoveUnitFile, SystemctlDaemonReload];
+    let mut steps = vec![
+        SystemctlDisableNow,
+        SystemctlDisableZotNow,
+        RemoveUnitFile,
+        RemoveZotUnitFile,
+        SystemctlDaemonReload,
+    ];
     if purge {
         steps.extend([
             RemoveDataDir,
+            RemoveZotConfig,
             RemoveUserConfigDir,
             UserDelDenia,
             GroupDelDenia,
@@ -65,9 +67,12 @@ fn plan(purge: bool) -> Vec<Step> {
 
 enum Step {
     SystemctlDisableNow,
+    SystemctlDisableZotNow,
     RemoveUnitFile,
+    RemoveZotUnitFile,
     SystemctlDaemonReload,
     RemoveDataDir,
+    RemoveZotConfig,
     RemoveUserConfigDir,
     UserDelDenia,
     GroupDelDenia,
@@ -81,9 +86,14 @@ impl Step {
             SystemctlDisableNow => {
                 "systemctl disable --now denia.service (ignore if not loaded)".into()
             }
+            SystemctlDisableZotNow => {
+                "systemctl disable --now zot.service (ignore if not loaded)".into()
+            }
             RemoveUnitFile => "rm -f /etc/systemd/system/denia.service".into(),
+            RemoveZotUnitFile => "rm -f /etc/systemd/system/zot.service".into(),
             SystemctlDaemonReload => "systemctl daemon-reload".into(),
             RemoveDataDir => "rm -rf /var/lib/denia".into(),
+            RemoveZotConfig => "rm -f /etc/denia/zot.json (and empty /etc/denia)".into(),
             RemoveUserConfigDir => format!("rm -rf {}", ctx.user_config_dir.display()),
             UserDelDenia => "userdel denia".into(),
             GroupDelDenia => "groupdel denia".into(),
@@ -95,17 +105,13 @@ impl Step {
         use Step::*;
         match self {
             SystemctlDisableNow => {
-                // disable_now returns Err if the unit isn't loaded. Swallow
-                // that case so re-running uninstall after the unit was
-                // already removed is safe.
                 let _ = systemd::disable_now("denia.service");
             }
-            RemoveUnitFile => {
-                let p = Path::new("/etc/systemd/system/denia.service");
-                if p.exists() {
-                    std::fs::remove_file(p)?;
-                }
+            SystemctlDisableZotNow => {
+                let _ = systemd::disable_now("zot.service");
             }
+            RemoveUnitFile => remove_if_exists("/etc/systemd/system/denia.service")?,
+            RemoveZotUnitFile => remove_if_exists("/etc/systemd/system/zot.service")?,
             SystemctlDaemonReload => systemd::daemon_reload()?,
             RemoveDataDir => {
                 let p = Path::new("/var/lib/denia");
@@ -113,13 +119,16 @@ impl Step {
                     std::fs::remove_dir_all(p)?;
                 }
             }
+            RemoveZotConfig => {
+                remove_if_exists("/etc/denia/zot.json")?;
+                let _ = std::fs::remove_dir("/etc/denia");
+            }
             RemoveUserConfigDir => {
                 if ctx.user_config_dir.exists() {
                     std::fs::remove_dir_all(&ctx.user_config_dir)?;
                 }
             }
             UserDelDenia => {
-                // userdel exits 6 if the user doesn't exist; treat both 0 and 6 as success.
                 let status = Command::new("userdel")
                     .arg("denia")
                     .stdin(Stdio::null())
@@ -138,10 +147,34 @@ impl Step {
                 }
             }
             RmdirCgroupRoot => {
-                // Best-effort: ignore "directory not empty" or "no such file".
                 let _ = std::fs::remove_dir("/sys/fs/cgroup/denia");
             }
         }
         Ok(())
+    }
+}
+
+fn remove_if_exists(path: &str) -> anyhow::Result<()> {
+    let p = Path::new(path);
+    if p.exists() {
+        std::fs::remove_file(p)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uninstall_stops_zot_before_removing_units() {
+        let ctx = InstallContext::from_user("ops", "/home/ops");
+        let labels = plan(false)
+            .into_iter()
+            .map(|step| step.label(&ctx))
+            .collect::<Vec<_>>();
+        let stop_zot = labels.iter().position(|v| v.contains("disable --now zot.service")).unwrap();
+        let remove_zot = labels.iter().position(|v| v.contains("zot.service") && v.contains("rm -f")).unwrap();
+        assert!(stop_zot < remove_zot);
     }
 }

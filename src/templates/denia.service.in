@@ -1,7 +1,8 @@
 [Unit]
 Description=Denia control plane + L7 ingress (Pingora)
-After=network-online.target
-Wants=network-online.target
+After=network-online.target zot.service
+Wants=network-online.target zot.service
+Requires=zot.service
 # Denia owns :80/:443; refuse to coexist with the typical reverse proxies.
 Conflicts=traefik.service nginx.service caddy.service apache2.service httpd.service
 

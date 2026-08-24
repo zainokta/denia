@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use super::common::{
-    config_writer, io, paths::InstallContext, privilege, provision, secrets, systemd,
+    config_writer, io, paths::InstallContext, privilege, provision, secrets, systemd, zot,
 };
 
 #[derive(clap::Args, Debug)]
@@ -33,8 +33,7 @@ pub fn run(args: SetupArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Twelve idempotent setup steps. Plan order is the execution order — do not
-/// reorder.
+/// Idempotent setup steps. Plan order is the execution order — do not reorder.
 fn plan() -> Vec<Step> {
     use Step::*;
     vec![
@@ -43,6 +42,9 @@ fn plan() -> Vec<Step> {
         EnsureUser,
         EnsureDeniaInBuildkitGroup,
         EnsureDataDirs,
+        EnsureZotBinary,
+        WriteZotConfig,
+        VerifyZotConfig,
         EnsureCgroupRoot,
         EnsureUserConfigDir,
         GenerateAgeIdentityIfAbsent,
@@ -50,9 +52,12 @@ fn plan() -> Vec<Step> {
         WriteConfigIfAbsent,
         RepairUserConfigAccess,
         WriteBuildkitUnit,
+        WriteZotUnit,
         WriteSystemdUnit,
         SystemctlDaemonReload,
         SystemctlEnableBuildkitNow,
+        SystemctlEnableZotNow,
+        WaitZotActive,
         SystemctlEnableNow,
         WaitActive,
     ]
@@ -64,6 +69,9 @@ enum Step {
     EnsureUser,
     EnsureDeniaInBuildkitGroup,
     EnsureDataDirs,
+    EnsureZotBinary,
+    WriteZotConfig,
+    VerifyZotConfig,
     EnsureCgroupRoot,
     EnsureUserConfigDir,
     GenerateAgeIdentityIfAbsent,
@@ -71,9 +79,12 @@ enum Step {
     WriteConfigIfAbsent,
     RepairUserConfigAccess,
     WriteBuildkitUnit,
+    WriteZotUnit,
     WriteSystemdUnit,
     SystemctlDaemonReload,
     SystemctlEnableBuildkitNow,
+    SystemctlEnableZotNow,
+    WaitZotActive,
     SystemctlEnableNow,
     WaitActive,
 }
@@ -89,6 +100,18 @@ impl Step {
             EnsureDataDirs => {
                 "create /var/lib/denia/{sqlite,artifacts,tls,runtime,logs} 0700 denia:denia".into()
             }
+            EnsureZotBinary => format!(
+                "install Zot {} at {} when missing/outdated (verified sha256)",
+                zot::ZOT_VERSION,
+                zot::ZOT_BIN
+            ),
+            WriteZotConfig => format!(
+                "write {} for loopback registry {}:{}",
+                zot::ZOT_CONFIG_PATH,
+                zot::ZOT_LISTEN_ADDR,
+                zot::ZOT_LISTEN_PORT
+            ),
+            VerifyZotConfig => format!("verify {} with zot verify", zot::ZOT_CONFIG_PATH),
             EnsureCgroupRoot => "create /sys/fs/cgroup/denia 0755 denia:denia".into(),
             EnsureUserConfigDir => format!(
                 "create {} 0750 {}:denia",
@@ -117,9 +140,12 @@ impl Step {
             WriteBuildkitUnit => {
                 "write /etc/systemd/system/buildkit.service (always overwrite)".into()
             }
+            WriteZotUnit => "write /etc/systemd/system/zot.service (always overwrite)".into(),
             WriteSystemdUnit => "write /etc/systemd/system/denia.service (always overwrite)".into(),
             SystemctlDaemonReload => "systemctl daemon-reload".into(),
             SystemctlEnableBuildkitNow => "systemctl enable --now buildkit.service".into(),
+            SystemctlEnableZotNow => "systemctl enable --now zot.service".into(),
+            WaitZotActive => "wait up to 30s for systemctl is-active zot.service".into(),
             SystemctlEnableNow => "systemctl enable --now denia.service".into(),
             WaitActive => "wait up to 30s for systemctl is-active denia.service".into(),
         }
@@ -141,6 +167,11 @@ impl Step {
                 provision::ensure_user_in_group("denia", "buildkit")?;
             }
             EnsureDataDirs => provision::ensure_data_dirs()?,
+            EnsureZotBinary => {
+                zot::ensure_installed()?;
+            }
+            WriteZotConfig => zot::write_config()?,
+            VerifyZotConfig => zot::verify_config()?,
             EnsureCgroupRoot => provision::ensure_cgroup_root()?,
             EnsureUserConfigDir => provision::ensure_user_config_dir(ctx)?,
             GenerateAgeIdentityIfAbsent => {
@@ -167,9 +198,12 @@ impl Step {
             }
             RepairUserConfigAccess => provision::repair_user_config_access(ctx)?,
             WriteBuildkitUnit => systemd::write_buildkit_unit()?,
+            WriteZotUnit => systemd::write_zot_unit()?,
             WriteSystemdUnit => systemd::write_unit(ctx)?,
             SystemctlDaemonReload => systemd::daemon_reload()?,
             SystemctlEnableBuildkitNow => systemd::enable_now("buildkit.service")?,
+            SystemctlEnableZotNow => systemd::enable_now("zot.service")?,
+            WaitZotActive => systemd::wait_active("zot.service", Duration::from_secs(30))?,
             SystemctlEnableNow => systemd::enable_now("denia.service")?,
             WaitActive => systemd::wait_active("denia.service", Duration::from_secs(30))?,
         }
@@ -185,6 +219,7 @@ fn print_summary(ctx: &InstallContext) {
     println!("  admin token:  {}", ctx.token_file.display());
     println!("  age key:      {}", ctx.age_key_file.display());
     println!("  data root:    /var/lib/denia");
+    println!("  zot:          {} ({}:{})", zot::ZOT_BIN, zot::ZOT_LISTEN_ADDR, zot::ZOT_LISTEN_PORT);
     println!();
     println!("  Bootstrap first admin user (one-time):");
     println!(
@@ -203,7 +238,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn setup_plan_includes_buildkit_provisioning_before_denia_restart() {
+    fn setup_plan_includes_buildkit_and_zot_before_denia_restart() {
         let ctx = InstallContext::from_user("rakei", "/home/rakei");
         let labels = plan()
             .into_iter()
@@ -214,16 +249,45 @@ mod tests {
             .iter()
             .position(|label| label.contains("groupadd --system buildkit"))
             .expect("buildkit group step");
+        let zot_install = labels
+            .iter()
+            .position(|label| label.contains("install Zot"))
+            .expect("zot install step");
+        let zot_config = labels
+            .iter()
+            .position(|label| label.contains("zot.json"))
+            .expect("zot config step");
         let buildkit_unit = labels
             .iter()
             .position(|label| label.contains("/etc/systemd/system/buildkit.service"))
             .expect("buildkit unit step");
-        let denia_unit = labels
+        let zot_unit = labels
             .iter()
-            .position(|label| label.contains("/etc/systemd/system/denia.service"))
-            .expect("denia unit step");
+            .position(|label| label.contains("/etc/systemd/system/zot.service"))
+            .expect("zot unit step");
+        let daemon_reload = labels
+            .iter()
+            .position(|label| label == "systemctl daemon-reload")
+            .expect("daemon reload step");
+        let zot_enable = labels
+            .iter()
+            .position(|label| label == "systemctl enable --now zot.service")
+            .expect("zot enable step");
+        let zot_wait = labels
+            .iter()
+            .position(|label| label.contains("is-active zot.service"))
+            .expect("zot wait step");
+        let denia_enable = labels
+            .iter()
+            .position(|label| label == "systemctl enable --now denia.service")
+            .expect("denia enable step");
 
         assert!(buildkit_group < buildkit_unit);
-        assert!(buildkit_unit < denia_unit);
+        assert!(zot_install < zot_config);
+        assert!(zot_config < zot_unit);
+        assert!(zot_unit < daemon_reload);
+        assert!(daemon_reload < zot_enable);
+        assert!(zot_enable < zot_wait);
+        assert!(zot_wait < denia_enable);
     }
 }
