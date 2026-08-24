@@ -5,14 +5,14 @@ use sha2::Digest;
 
 const TEMPLATE: &str = include_str!("../../templates/denia.service.in");
 const BUILDKIT_TEMPLATE: &str = include_str!("../../templates/buildkit.service.in");
+const ZOT_TEMPLATE: &str = include_str!("../../templates/zot.service.in");
 const BUILDKIT_OVERRIDE: &str = "\
-[Service]
-ExecStart=
-ExecStart=/usr/local/bin/buildkitd --addr unix:///run/buildkit/buildkitd.sock --root /var/lib/buildkit --group buildkit --oci-worker=true --containerd-worker=false --oci-worker-snapshotter=native
-ExecStartPost=
-RuntimeDirectory=buildkit
-RuntimeDirectoryMode=0755
-";
+[Service]\n\
+ExecStart=\n\
+ExecStart=/usr/local/bin/buildkitd --addr unix:///run/buildkit/buildkitd.sock --root /var/lib/buildkit --group buildkit --oci-worker=true --containerd-worker=false --oci-worker-snapshotter=native\n\
+ExecStartPost=\n\
+RuntimeDirectory=buildkit\n\
+RuntimeDirectoryMode=0755\n";
 
 /// Render the operator-aware systemd unit text for `denia.service`.
 pub fn render_unit(ctx: &InstallContext) -> String {
@@ -33,6 +33,11 @@ pub fn render_unit(ctx: &InstallContext) -> String {
 /// Render the BuildKit service Denia expects for Dockerfile-compatible builds.
 pub fn render_buildkit_unit() -> String {
     BUILDKIT_TEMPLATE.to_string()
+}
+
+/// Render the local Zot registry service managed by Denia.
+pub fn render_zot_unit() -> String {
+    ZOT_TEMPLATE.to_string()
 }
 
 /// Render the late BuildKit drop-in that lets setup repair stale/manual
@@ -57,6 +62,7 @@ const UNIT_PATH: &str = "/etc/systemd/system/denia.service";
 const BUILDKIT_UNIT_PATH: &str = "/etc/systemd/system/buildkit.service";
 const BUILDKIT_DROPIN_DIR: &str = "/etc/systemd/system/buildkit.service.d";
 const BUILDKIT_DROPIN_PATH: &str = "/etc/systemd/system/buildkit.service.d/99-denia.conf";
+const ZOT_UNIT_PATH: &str = "/etc/systemd/system/zot.service";
 
 /// Write the rendered unit to `/etc/systemd/system/denia.service` via tmp +
 /// rename (atomic) with mode `0644 root:root`.
@@ -82,6 +88,15 @@ pub fn write_buildkit_unit() -> anyhow::Result<()> {
     std::fs::write(&dropin_tmp, render_buildkit_override())?;
     std::fs::set_permissions(&dropin_tmp, std::fs::Permissions::from_mode(0o644))?;
     std::fs::rename(&dropin_tmp, BUILDKIT_DROPIN_PATH)?;
+    Ok(())
+}
+
+/// Write the loopback-only Zot registry unit managed by Denia.
+pub fn write_zot_unit() -> anyhow::Result<()> {
+    let tmp = format!("{ZOT_UNIT_PATH}.tmp");
+    std::fs::write(&tmp, render_zot_unit())?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(&tmp, ZOT_UNIT_PATH)?;
     Ok(())
 }
 
@@ -167,6 +182,8 @@ mod tests {
             "Delegate=yes",
             "ProtectHome=read-only",
             "Conflicts=traefik.service nginx.service caddy.service apache2.service httpd.service",
+            "Requires=zot.service",
+            "After=network-online.target zot.service",
         ] {
             assert!(
                 unit.contains(needle),
@@ -218,6 +235,23 @@ mod tests {
             assert!(
                 dropin.contains(needle),
                 "expected `{needle}` in drop-in:\n{dropin}"
+            );
+        }
+    }
+
+    #[test]
+    fn zot_unit_is_non_root_and_uses_managed_paths() {
+        let unit = render_zot_unit();
+        for needle in [
+            "User=denia",
+            "Group=denia",
+            "ExecStart=/usr/local/bin/zot serve /etc/denia/zot.json",
+            "ReadWritePaths=/var/lib/denia/zot",
+            "NoNewPrivileges=true",
+        ] {
+            assert!(
+                unit.contains(needle),
+                "expected `{needle}` in Zot unit:\n{unit}"
             );
         }
     }
