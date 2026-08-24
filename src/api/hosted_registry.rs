@@ -41,7 +41,7 @@ struct TagView {
     tag: String,
     digest: String,
     size: u64,
-    updated_at: Option<DateTime<Utc>>,
+    updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -185,8 +185,10 @@ async fn zot_tags(client: &reqwest::Client, repository: &str) -> Result<Vec<TagV
             tag,
             digest,
             size,
-            // Distribution V2 does not define a tag-updated timestamp.
-            updated_at: None,
+            // Distribution V2 does not define a portable tag-updated timestamp.
+            // Keep the existing API shape for clients; this is the observation
+            // time of the live Zot tag, not a persisted Denia registry timestamp.
+            updated_at: Utc::now(),
         });
     }
     Ok(views)
