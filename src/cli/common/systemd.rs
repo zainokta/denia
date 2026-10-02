@@ -163,7 +163,7 @@ mod tests {
             "EnvironmentFile=/home/rakei/.config/denia/admin.token",
             "ExecStart=/usr/local/bin/denia",
             "BindReadOnlyPaths=/home/rakei/.config/denia",
-            "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_CHOWN",
+            "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE",
             "Delegate=yes",
             "ProtectHome=read-only",
             "Conflicts=traefik.service nginx.service caddy.service apache2.service httpd.service",

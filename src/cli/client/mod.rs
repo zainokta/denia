@@ -4,7 +4,9 @@
 
 pub mod auth;
 pub mod console;
+pub mod create;
 pub mod http;
+pub mod init;
 pub mod manifest;
 pub mod pack;
 pub mod profile;

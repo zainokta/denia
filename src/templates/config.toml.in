@@ -43,7 +43,7 @@ acme_directory_url = "https://acme-v02.api.letsencrypt.org/directory"
 # Required if any service has tls_enabled = true:
 # acme_email = "ops@example.com"
 
-# --- ACME challenge (ADR-038) ---
+# --- ACME challenge (ADR-040) ---
 # "http-01" (default) needs Let's Encrypt to reach :80 directly. Use "dns-01" to
 # issue via a DNS provider instead -- this works when the domain is fronted by a
 # proxy (Cloudflare orange-cloud, a WAF), where HTTP-01 cannot reach :80.

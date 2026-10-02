@@ -25,6 +25,8 @@ pub enum DeployError {
     UnsupportedServiceSource,
     #[error("service does not use a git source")]
     UnsupportedGitSource,
+    #[error("no existing artifact to redeploy; deploy the service first")]
+    NoExistingArtifact,
     #[error("artifact acquisition error: {0}")]
     ArtifactAcquire(#[from] ArtifactAcquireError),
     #[error("registry not found")]

@@ -14,9 +14,9 @@ Denia runs untrusted workload images under its own Linux runtime with PID, mount
 IPC namespaces. Services and one-shot jobs now use Denia's direct fork/unshare/exec syscall
 adapter instead of a host namespace launcher.
 
-A container escape or malicious image can therefore harm the host (roadmap item #12). roadmap item #13
-confirmed isolation is command + filesystem, not raw syscalls, so the CLI approach should be
-extended rather than replaced.
+A container escape or malicious image can therefore harm the host. Earlier
+isolation analysis confirmed the boundary is command + filesystem, not raw
+syscalls, so the CLI approach should be extended rather than replaced.
 
 ## Decision
 

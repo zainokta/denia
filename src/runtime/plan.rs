@@ -7,11 +7,19 @@ use crate::runtime::error::RuntimeError;
 use crate::syscall::ns::NamespaceConfig;
 use crate::syscall::signal::{self, ProcessStatus};
 
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessUser {
+    pub uid: u32,
+    pub gid: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinuxRuntimeProcessSpec {
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
     pub workdir: String,
+    #[serde(default)]
+    pub user: ProcessUser,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

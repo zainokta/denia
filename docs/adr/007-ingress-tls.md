@@ -44,6 +44,3 @@ Traefik's operator-owned static config.
 - **Rebuilding routes from `services` on every read**: rejected; the bridge
   port is not in SQLite, so the in-memory snapshot is the source of truth.
 - **Parsing the Traefik YAML back for `/ingress/routes`**: rejected as fragile.
-
-## References
-

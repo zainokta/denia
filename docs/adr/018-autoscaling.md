@@ -8,7 +8,7 @@
 Today a service maps 1:1 to one workload: one process, one cgroup, one ingress
 Unix socket, one Denia loopback bridge port exposed to Traefik as a single
 server. There is no mechanism to run replicas of a service or to react to load
-changes. roadmap item #14 asks for Kubernetes-HPA-like behavior: declare CPU/memory
+changes. The roadmap calls for Kubernetes-HPA-like behavior: declare CPU/memory
 targets, auto-clone into replicas when load rises, load-balance across them,
 account for remaining host resources, and scale back down — including to zero.
 
@@ -78,6 +78,5 @@ account for remaining host resources, and scale back down — including to zero.
 
 ## References
 
-- roadmap item #14 (HPA-like autoscaling)
 - ADR-003 (Linux Runtime Process Runner) — runtime identity model extended by this ADR
 - ADR-007 (Ingress + TLS) — bridge architecture that the load-balancer and activator build on

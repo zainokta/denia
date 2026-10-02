@@ -1,4 +1,4 @@
-# ADR-038: Opt-In DNS-01 ACME via Pluggable Providers (Cloudflare + exec)
+# ADR-040: Opt-In DNS-01 ACME via Pluggable Providers (Cloudflare + exec)
 
 - Status: Accepted
 - Date: 2026-06-05

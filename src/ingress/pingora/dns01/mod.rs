@@ -1,4 +1,4 @@
-//! Pluggable DNS-01 ACME providers (ADR-038), modeled on Traefik/lego.
+//! Pluggable DNS-01 ACME providers (ADR-040), modeled on Traefik/lego.
 //!
 //! DNS-01 proves domain ownership by writing a `_acme-challenge.<domain>` TXT
 //! record, so it works for hostnames fronted by a proxy (Cloudflare orange-cloud,

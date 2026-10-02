@@ -13,5 +13,5 @@ pub use console::{
 pub use error::RuntimeError;
 pub use fake::FakeRuntime;
 pub use linux::LinuxRuntime;
-pub use plan::{LinuxRuntimePlan, LinuxRuntimeProcessSpec};
+pub use plan::{LinuxRuntimePlan, LinuxRuntimeProcessSpec, ProcessUser};
 pub use runtime_trait::Runtime;

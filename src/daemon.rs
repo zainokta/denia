@@ -152,7 +152,7 @@ pub async fn run() -> anyhow::Result<()> {
     // The HTTP-01 solver shares ONE `ChallengeStore` with the axum
     // acme-challenge handler (`AppState.acme_challenges`) so the `:80` challenge
     // proxy and the order driver observe the same token map. The DNS-01 solver
-    // (ADR-038) instead writes Cloudflare TXT records and needs no axum handler.
+    // (ADR-040) instead writes Cloudflare TXT records and needs no axum handler.
     // The driver is built only when an email is set; `require_acme_email` above
     // guarantees one exists if any service uses TLS.
     let challenges: ChallengeStore = state.acme_challenges.clone();
@@ -643,7 +643,7 @@ fn acme_tls_in_use(
     service_tls_in_use || control_domain_to_issue(control_domain, control_tls).is_some()
 }
 
-/// Build the ACME [`ChallengeSolver`] from config (ADR-038). HTTP-01 (default)
+/// Build the ACME [`ChallengeSolver`] from config (ADR-040). HTTP-01 (default)
 /// shares the axum challenge token map; DNS-01 builds the configured provider
 /// (Cloudflare or exec) via `dns01::build_provider` plus a shared
 /// `PropagationCheck`. Returns `None` when the DNS-01 provider is misconfigured —

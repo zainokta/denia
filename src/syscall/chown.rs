@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{os::unix::fs::MetadataExt, path::Path};
 
 use rustix::fs::{AtFlags, chownat};
 use rustix::process::{Gid, Uid};
@@ -22,6 +22,39 @@ pub fn recursive_lchown(root: &Path, uid: u32, gid: u32) -> Result<(), SyscallEr
     }
     chown_entry(root, uid, gid)?;
     Ok(())
+}
+
+pub fn recursive_lchown_shifted(root: &Path, base: u32, size: u32) -> Result<(), SyscallError> {
+    let metadata = std::fs::symlink_metadata(root)?;
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            recursive_lchown_shifted(&entry.path(), base, size)?;
+        }
+    }
+    let uid = shift_id(metadata.uid(), base, size);
+    let gid = shift_id(metadata.gid(), base, size);
+    chown_entry(root, uid, gid)?;
+    Ok(())
+}
+
+fn shift_id(id: u32, base: u32, size: u32) -> u32 {
+    if id >= base && id < base.saturating_add(size) {
+        id
+    } else if id < size {
+        base.saturating_add(id)
+    } else {
+        base
+    }
+}
+
+/// Change ownership of a single path without recursing or following symlinks.
+///
+/// Used to reclaim ownership of a directory the daemon created earlier but that
+/// a workload run left owned by the userns base uid. The daemon holds CAP_CHOWN
+/// but not CAP_FOWNER, so it must own a path before it can `chmod` it.
+pub fn lchown(path: &Path, uid: u32, gid: u32) -> Result<(), SyscallError> {
+    chown_entry(path, uid, gid)
 }
 
 fn chown_entry(path: &Path, uid: u32, gid: u32) -> Result<(), SyscallError> {
@@ -69,5 +102,13 @@ mod tests {
             uid,
             "must not recurse into symlink targets"
         );
+    }
+
+    #[test]
+    fn shift_id_maps_image_ids_into_userns_range() {
+        assert_eq!(shift_id(0, 100000, 65536), 100000);
+        assert_eq!(shift_id(101, 100000, 65536), 100101);
+        assert_eq!(shift_id(100101, 100000, 65536), 100101);
+        assert_eq!(shift_id(70000, 100000, 65536), 100000);
     }
 }

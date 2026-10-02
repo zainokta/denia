@@ -200,6 +200,11 @@ export function ServiceForm({
         credential: { name: gitCredName.trim(), key: gitCredKey.trim() },
       }
     }
+    if (sourceType === 'upload') {
+      // Upload-deployed service (ADR-039): no source config — the build context
+      // is supplied per-deploy by `denia push`. Always valid.
+      return { type: 'upload' }
+    }
     if (imageMode === 'direct') {
       const image = extImage.trim()
       if (image.length === 0) return undefined
@@ -605,6 +610,18 @@ export function ServiceForm({
           />
           External Image
         </label>
+        <label className="inline-flex items-center gap-2 text-[var(--fg)]">
+          <input
+            type="radio"
+            className="field-check"
+            aria-label="source type upload"
+            name="sf-sourceType"
+            value="upload"
+            checked={sourceType === 'upload'}
+            onChange={() => setSourceType('upload')}
+          />
+          Upload (deploy via CLI push)
+        </label>
       </fieldset>
 
       {sourceType === 'git' ? (
@@ -735,6 +752,15 @@ export function ServiceForm({
               </div>
             </div>
           </div>
+        </div>
+      ) : sourceType === 'upload' ? (
+        <div className="mb-5">
+          <p className="field-help" style={{ marginTop: 0 }}>
+            Deploy this service's image from your machine with{' '}
+            <code>denia push</code>. No source configuration is needed here —
+            run <code>denia init</code>, then <code>denia create</code> and{' '}
+            <code>denia push</code>.
+          </p>
         </div>
       ) : (
         <div className="mb-5">

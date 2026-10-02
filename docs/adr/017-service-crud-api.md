@@ -16,7 +16,7 @@ web console therefore cannot offer create, read, or delete. The services page is
 a dead end: an empty state with no create path and no way to inspect or remove
 an existing service.
 
-Separately, Denia mandates UUIDv7 for every persisted id (see `project guidance`): IDs
+Separately, Denia mandates UUIDv7 for every persisted id: IDs
 are generated server-side with `Uuid::now_v7()` so they stay time-ordered and
 preserve SQLite B-tree index locality. A web client cannot honor this invariant
 — `crypto.randomUUID` produces a UUIDv4 — so clients must not generate service

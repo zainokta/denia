@@ -155,7 +155,7 @@ impl Drop for PublishedChallenges {
 /// `Drop` cannot run async deletes, so cleanup is the explicit async
 /// How [`AcmeDriver`] answers ACME challenges: in-process HTTP-01 (the token map
 /// shared with the axum acme-challenge handler) or DNS-01 via a pluggable
-/// [`Dns01Provider`] + a shared [`PropagationCheck`] (ADR-038). HTTP-01 is the
+/// [`Dns01Provider`] + a shared [`PropagationCheck`] (ADR-040). HTTP-01 is the
 /// default; DNS-01 is opt-in.
 pub enum ChallengeSolver {
     Http01(ChallengeStore),

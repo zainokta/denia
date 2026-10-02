@@ -64,7 +64,7 @@ pub struct AppConfig {
     pub control_tls: bool,
     pub node_disk_path: PathBuf,
     pub acme_email: Option<String>,
-    /// Which ACME challenge type to use for issuance (ADR-038). Default HTTP-01.
+    /// Which ACME challenge type to use for issuance (ADR-040). Default HTTP-01.
     pub acme_challenge: AcmeChallengeType,
     /// Which DNS-01 provider to use when `acme_challenge == Dns01`. Default
     /// Cloudflare. `DENIA_ACME_DNS_PROVIDER`.
@@ -175,7 +175,7 @@ impl OciCacheVerifyMode {
     }
 }
 
-/// ACME challenge type used for certificate issuance (ADR-038).
+/// ACME challenge type used for certificate issuance (ADR-040).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AcmeChallengeType {
     /// In-process HTTP-01 over `:80` (default; requires direct inbound reach).
@@ -197,7 +197,7 @@ impl AcmeChallengeType {
     }
 }
 
-/// Which DNS-01 provider answers the challenge (ADR-038). Selected by
+/// Which DNS-01 provider answers the challenge (ADR-040). Selected by
 /// `DENIA_ACME_DNS_PROVIDER`; only relevant when `acme_challenge == Dns01`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DnsProviderKind {

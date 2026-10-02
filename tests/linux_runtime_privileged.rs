@@ -393,6 +393,7 @@ async fn linux_runtime_start_uses_native_namespace_and_cgroup_gate() {
             argv: vec!["/bin/sleep".to_string(), "30".to_string()],
             env: Vec::new(),
             workdir: "/".to_string(),
+            user: Default::default(),
         })
         .expect("manifest json"),
     )
@@ -492,6 +493,7 @@ async fn sweep_orphans_reaps_workload_from_a_previous_session() {
             argv: vec!["/bin/sleep".to_string(), "300".to_string()],
             env: Vec::new(),
             workdir: "/".to_string(),
+            user: Default::default(),
         })
         .expect("manifest json"),
     )
@@ -594,6 +596,7 @@ async fn console_exec_reads_service_environment() {
             argv: vec!["/bin/sleep".to_string(), "300".to_string()],
             env: vec![("DENIA_CONSOLE_TEST".to_string(), "inside".to_string())],
             workdir: "/".to_string(),
+            user: Default::default(),
         })
         .expect("manifest json"),
     )

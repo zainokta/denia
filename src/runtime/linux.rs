@@ -200,6 +200,7 @@ impl LinuxRuntime {
         let manifest = std::fs::read_to_string(&manifest_path)?;
         let process: LinuxRuntimeProcessSpec = serde_json::from_str(&manifest)?;
         validate_process_spec(&process, &manifest_path)?;
+        validate_process_user(process.user.uid, process.user.gid, self.userns_size)?;
         let mut env_map: std::collections::BTreeMap<String, String> =
             process.env.into_iter().collect();
         for (key, value) in &request.env {
@@ -274,6 +275,10 @@ impl LinuxRuntime {
         child_argv.push(format!("127.0.0.1:{}", request.internal_port));
         child_argv.push("--workdir".to_string());
         child_argv.push(process.workdir.clone());
+        child_argv.push("--uid".to_string());
+        child_argv.push(process.user.uid.to_string());
+        child_argv.push("--gid".to_string());
+        child_argv.push(process.user.gid.to_string());
         child_argv.push("--".to_string());
         child_argv.extend(process.argv);
 
@@ -332,10 +337,21 @@ impl LinuxRuntime {
         // Unmount any stale overlay from previous failed deployments
         let _ = rustix::mount::unmount(&plan.merged, rustix::mount::UnmountFlags::DETACH);
 
-        // Clean up overlay-specific state (the work/work directory that overlayfs creates)
-        // This must be empty for a fresh overlay mount
+        // Clean up overlay-specific state (the `work/work` directory overlayfs
+        // creates); it must be gone for a fresh overlay mount. overlayfs makes it
+        // mode 000, and a prior run's `chown_overlay_dir` left it owned by the
+        // userns base uid, so the daemon — which holds CAP_CHOWN but neither
+        // CAP_FOWNER nor CAP_DAC_OVERRIDE — can neither read nor chmod it as is and
+        // `remove_dir_all` would fail EACCES. Reclaim ownership (by path, no read
+        // needed), widen the mode, then remove.
         let overlay_work = plan.work.join("work");
         if overlay_work.exists() {
+            reclaim_runtime_dir_owner(&overlay_work)?;
+            std::fs::set_permissions(&overlay_work, std::fs::Permissions::from_mode(0o700))
+                .map_err(path_io(
+                    "relax stale overlay work permissions",
+                    &overlay_work,
+                ))?;
             std::fs::remove_dir_all(&overlay_work).map_err(path_io(
                 "remove stale overlay work directory",
                 &overlay_work,
@@ -597,6 +613,13 @@ fn upper_guest_path(upper: &Path, guest_path: &Path) -> Result<PathBuf, RuntimeE
     Ok(target)
 }
 
+fn validate_process_user(uid: u32, gid: u32, size: u32) -> Result<(), RuntimeError> {
+    if uid >= size || gid >= size {
+        return Err(RuntimeError::InvalidProcessUser { uid, gid, size });
+    }
+    Ok(())
+}
+
 fn copy_runtime_helper_file(src: &Path, dest: &Path) -> Result<(), RuntimeError> {
     if let Some(parent) = dest.parent() {
         create_dir_all("create runtime helper directory", parent)?;
@@ -615,6 +638,17 @@ fn restore_current_process_owner(path: &Path) -> Result<(), RuntimeError> {
     chown::recursive_lchown(path, uid, gid).map_err(RuntimeError::Syscall)
 }
 
+/// Chown a single path back to the daemon (non-recursive, by path so it needs no
+/// read access to the target). The daemon holds CAP_CHOWN but neither CAP_FOWNER
+/// nor CAP_DAC_OVERRIDE, so it must take ownership of a dir before it can chmod
+/// (or, for a mode-000 dir, even read) it. Used to reclaim overlay scratch dirs
+/// that a prior run chowned to the userns base uid.
+fn reclaim_runtime_dir_owner(path: &Path) -> Result<(), RuntimeError> {
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+    chown::lchown(path, uid, gid).map_err(RuntimeError::Syscall)
+}
+
 fn prepare_overlay_mountpoints(
     rootfs: &Path,
     upper: &Path,
@@ -625,6 +659,15 @@ fn prepare_overlay_mountpoints(
     create_runtime_directory(&upper.join(".old_root"))?;
     let tmp = upper.join("tmp");
     create_runtime_directory(&tmp)?;
+    // The per-replica upper layer persists across restarts (prepare only unmounts
+    // the overlay, it never wipes `upper`), and `chown_overlay_dir` recursively
+    // hands `upper` (tmp included) to the userns base uid so the workload owns its
+    // writable layer. On the next start the daemon holds CAP_CHOWN but not
+    // CAP_FOWNER, so it can no longer chmod a tmp dir it no longer owns and the
+    // set_permissions below would fail EPERM, aborting (auto)start. Reclaim
+    // ownership of just the mountpoint dir before resetting its sticky mode;
+    // chown_overlay_dir hands it back to the base uid afterwards.
+    reclaim_runtime_dir_owner(&tmp)?;
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o1777))
         .map_err(path_io("set runtime tmp permissions", &tmp))?;
     if mount_proc {
@@ -776,6 +819,7 @@ impl Runtime for LinuxRuntime {
         let manifest = std::fs::read_to_string(&manifest_path)?;
         let process: LinuxRuntimeProcessSpec = serde_json::from_str(&manifest)?;
         validate_process_spec(&process, &manifest_path)?;
+        validate_process_user(process.user.uid, process.user.gid, self.userns_size)?;
 
         let argv = match request.command.clone() {
             Some(cmd) if !cmd.is_empty() => cmd,
@@ -910,6 +954,10 @@ impl Runtime for LinuxRuntime {
         }
         let mut child_argv = helper.loader_prefix.clone();
         child_argv.push(WORKLOAD_LAUNCHER_TARGET.to_string());
+        child_argv.push("--uid".to_string());
+        child_argv.push(process.user.uid.to_string());
+        child_argv.push("--gid".to_string());
+        child_argv.push(process.user.gid.to_string());
         child_argv.push("--".to_string());
         child_argv.extend(argv);
         let mut namespace = NamespaceConfig::new(merged.clone(), child_argv)
@@ -1325,8 +1373,9 @@ impl LinuxRuntime {
         OpenOptions::new()
             .create(true)
             .append(true)
-            .mode(0o600)
+            .mode(0o666)
             .open(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
         Ok(path)
     }
 }
@@ -1371,6 +1420,7 @@ mod tests {
                 argv: vec!["/bin/echo".to_string(), "hello".to_string()],
                 env: Vec::new(),
                 workdir: "/".to_string(),
+                user: Default::default(),
             })
             .expect("manifest json"),
         )
@@ -1522,6 +1572,10 @@ mod tests {
             "127.0.0.1:8080".to_string(),
             "--workdir".to_string(),
             "/".to_string(),
+            "--uid".to_string(),
+            "0".to_string(),
+            "--gid".to_string(),
+            "0".to_string(),
             "--".to_string(),
             "/bin/echo".to_string(),
             "hello".to_string(),
@@ -1667,6 +1721,7 @@ mod tests {
                 argv: vec!["/bin/echo".to_string(), "hello".to_string()],
                 env: Vec::new(),
                 workdir: "/app".to_string(),
+                user: Default::default(),
             })
             .expect("manifest json"),
         )
@@ -1707,6 +1762,7 @@ mod tests {
                 argv: vec!["/bin/echo".to_string(), "hello".to_string()],
                 env: Vec::new(),
                 workdir: "/srv/app".to_string(),
+                user: Default::default(),
             })
             .expect("manifest json"),
         )

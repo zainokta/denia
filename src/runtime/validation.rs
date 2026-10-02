@@ -121,6 +121,7 @@ mod tests {
             argv: vec!["/bin/sh".to_string()],
             env: Vec::new(),
             workdir: workdir.to_string(),
+            user: Default::default(),
         }
     }
 

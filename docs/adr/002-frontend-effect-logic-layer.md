@@ -81,5 +81,4 @@ Harder:
 - `docs/adr/001-initial-backend-architecture.md`
 - Effect: <https://effect.website/>
 - effect-smol source: <https://github.com/Effect-TS/effect-smol>
-- `web/project guidance` (frontend stack, env vars, prepare step)
 - TanStack Query: <https://tanstack.com/query/latest>

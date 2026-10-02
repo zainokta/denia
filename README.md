@@ -740,8 +740,7 @@ is wrong.
 
 ## Roadmap
 
-Denia v1 is deliberately single-node and scoped. Intentionally deferred (see the
-ADRs and `roadmap`):
+Denia v1 is deliberately single-node and scoped. Intentionally deferred:
 
 - **Multi-node scheduling** — the control plane and node agent are already
   separated internally so they can split when a multi-node ADR is accepted.
@@ -758,8 +757,7 @@ accepted decisions.
 
 ## Contributing
 
-Read [`project guidance`](project guidance) / [`project guidance`](project guidance) and
-[`docs/adr/README.md`](docs/adr/README.md) before changing anything. Architecture
+Read [`docs/adr/README.md`](docs/adr/README.md) before changing anything. Architecture
 changes (runtime isolation, ingress, secrets, persistence, API, dependencies)
 need a new or updated ADR.
 
