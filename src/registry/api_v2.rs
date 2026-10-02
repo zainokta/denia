@@ -215,6 +215,7 @@ fn resolve_repo(
     state
         .registry
         .ensure_repository(proj.id, svc.id, &format!("{project}/{service}"))
+        .map_err(Into::into)
 }
 
 fn is_hop_by_hop(name: &HeaderName) -> bool {
@@ -252,7 +253,10 @@ mod tests {
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer secret-token"),
         );
-        assert_eq!(extract_registry_token(&headers).as_deref(), Some("secret-token"));
+        assert_eq!(
+            extract_registry_token(&headers).as_deref(),
+            Some("secret-token")
+        );
 
         headers.insert(
             header::AUTHORIZATION,
