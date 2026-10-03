@@ -13,7 +13,8 @@
 //! Denia, logged, or placed in `config.toml`.
 
 use std::path::PathBuf;
-use std::process::Output;
+use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -30,36 +31,38 @@ impl ExecDns01 {
     }
 
     /// Run `<command> <action> <fqdn> <value>`; map a non-zero exit / spawn error
-    /// to [`Dns01Error::Exec`]. The hook's stderr is **not** surfaced by default
-    /// (a DNS CLI may print credentials there); set `DENIA_ACME_DNS_EXEC_DEBUG=1`
-    /// to append a truncated stderr for diagnosis.
+    /// to [`Dns01Error::Exec`]. Hook output is always discarded because it may
+    /// contain provider credentials.
     async fn run(&self, action: &str, fqdn: &str, value: &str) -> Result<(), Dns01Error> {
-        let output: Output = tokio::process::Command::new(&self.command)
+        let mut child = tokio::process::Command::new(&self.command)
             .arg(action)
             .arg(fqdn)
             .arg(value)
-            .output()
-            .await
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
             .map_err(|e| {
                 Dns01Error::Exec(format!("spawn {} failed: {e}", self.command.display()))
             })?;
-        if output.status.success() {
+        let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
+            Ok(result) => result.map_err(|e| Dns01Error::Exec(format!("wait failed: {e}")))?,
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(Dns01Error::ExecTimeout(format!("{action} for {fqdn}")));
+            }
+        };
+        if status.success() {
             return Ok(());
         }
-        let code = output
-            .status
+        let code = status
             .code()
             .map(|c| c.to_string())
             .unwrap_or_else(|| "signal".to_string());
-        // Redact stderr by default — it may contain provider credentials.
-        let detail = if std::env::var("DENIA_ACME_DNS_EXEC_DEBUG").as_deref() == Ok("1") {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            format!(": {}", stderr.trim().chars().take(200).collect::<String>())
-        } else {
-            " (stderr suppressed; set DENIA_ACME_DNS_EXEC_DEBUG=1 to include)".to_string()
-        };
         Err(Dns01Error::Exec(format!(
-            "{action} for {fqdn} exited {code}{detail}"
+            "{action} for {fqdn} exited {code} (hook output suppressed)"
         )))
     }
 }
@@ -146,5 +149,50 @@ mod tests {
         let exec = ExecDns01::new(PathBuf::from("/nonexistent/denia-dns-hook"));
         let result = exec.present("_acme-challenge.x.com", "v").await;
         assert!(matches!(result, Err(Dns01Error::Exec(_))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_hooks_are_killed_and_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started");
+        let script = write_script(
+            dir.path(),
+            "slow.sh",
+            &format!("#!/bin/sh\necho $$ > {}\nexec sleep 60\n", marker.display()),
+        );
+        let exec = ExecDns01::new(script);
+        for action in ["present", "cleanup"] {
+            let exec = ExecDns01::new(exec.command.clone());
+            let handle = TxtHandle {
+                fqdn: "_acme-challenge.x.com".into(),
+                value: "v".into(),
+                provider_ref: None,
+            };
+            let operation = tokio::spawn(async move {
+                if action == "present" {
+                    exec.present("_acme-challenge.x.com", "v").await.map(|_| ())
+                } else {
+                    exec.cleanup(&handle).await
+                }
+            });
+            let pid = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Ok(contents) = std::fs::read_to_string(&marker)
+                        && let Ok(pid) = contents.trim().parse::<u32>()
+                    {
+                        break pid;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("hook started and wrote its pid");
+            tokio::time::advance(Duration::from_secs(31)).await;
+            let result = operation.await.unwrap();
+            assert!(matches!(&result, Err(Dns01Error::ExecTimeout(_))));
+            assert!(result.unwrap_err().is_retryable());
+            assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+            std::fs::remove_file(&marker).unwrap();
+        }
     }
 }

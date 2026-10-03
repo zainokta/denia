@@ -4,12 +4,14 @@
 
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::time::Duration;
 
 use super::{Dns01Error, Dns01Provider, TxtHandle};
 
 /// Default Cloudflare API v4 base URL. Overridable in tests via
 /// [`CloudflareDns01::with_base_url`].
 const DEFAULT_BASE_URL: &str = "https://api.cloudflare.com/client/v4";
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Cloudflare API client for DNS-01. The token is a secret: no `Debug`/`Serialize`.
 pub struct CloudflareDns01 {
@@ -40,24 +42,29 @@ impl CloudflareDns01 {
     /// whole account and without a public-suffix-list dependency.
     pub async fn resolve_zone_id(&self, fqdn: &str) -> Result<(String, String), Dns01Error> {
         let fqdn = fqdn.trim_end_matches('.').to_ascii_lowercase();
-        for candidate in zone_candidates(&fqdn) {
-            let url = format!("{}/zones?name={candidate}", self.base_url);
-            let resp = self
-                .http
-                .get(&url)
-                .bearer_auth(&self.token)
-                .send()
-                .await
-                .map_err(|e| Dns01Error::Http(e.to_string()))?;
-            let zones: Vec<CfZone> = cf_result(resp).await?;
-            if let Some(zone) = zones
-                .into_iter()
-                .find(|z| z.name.eq_ignore_ascii_case(&candidate))
-            {
-                return Ok((zone.id, zone.name));
+        tokio::time::timeout(REQUEST_TIMEOUT, async {
+            for candidate in zone_candidates(&fqdn) {
+                let url = format!("{}/zones?name={candidate}", self.base_url);
+                let resp = self
+                    .http
+                    .get(&url)
+                    .bearer_auth(&self.token)
+                    .timeout(REQUEST_TIMEOUT)
+                    .send()
+                    .await
+                    .map_err(|e| Dns01Error::Http(e.to_string()))?;
+                let zones: Vec<CfZone> = cf_result(resp).await?;
+                if let Some(zone) = zones
+                    .into_iter()
+                    .find(|z| z.name.eq_ignore_ascii_case(&candidate))
+                {
+                    return Ok((zone.id, zone.name));
+                }
             }
-        }
-        Err(Dns01Error::ZoneNotFound(fqdn))
+            Err(Dns01Error::ZoneNotFound(fqdn.clone()))
+        })
+        .await
+        .map_err(|_| Dns01Error::Http("zone lookup timed out".to_string()))?
     }
 
     /// Create a TXT record `name` = `content` in `zone_id`; returns the record id.
@@ -73,6 +80,7 @@ impl CloudflareDns01 {
             .post(&url)
             .bearer_auth(&self.token)
             .json(&txt_create_body(name, content))
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| Dns01Error::Http(e.to_string()))?;
@@ -87,6 +95,7 @@ impl CloudflareDns01 {
             .http
             .delete(&url)
             .bearer_auth(&self.token)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| Dns01Error::Http(e.to_string()))?;
@@ -202,6 +211,49 @@ struct CfDnsRecord {
 mod tests {
     use super::*;
     use httpmock::prelude::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn stalled_api() -> (
+        String,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            let _ = seen_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        (format!("http://{address}"), seen_rx, server)
+    }
+
+    async fn wait_for_request(seen: tokio::sync::oneshot::Receiver<()>) {
+        tokio::time::timeout(Duration::from_secs(3), seen)
+            .await
+            .expect("request arrived before advancing time")
+            .expect("server task is alive");
+    }
+
+    async fn wait_for_request_awake(mut seen: tokio::sync::oneshot::Receiver<()>) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match seen.try_recv() {
+                    Ok(()) => break,
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                        panic!("server task ended before request")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("request arrived before advancing time");
+    }
 
     #[test]
     fn zone_candidates_most_specific_first_skips_tld() {
@@ -358,5 +410,79 @@ mod tests {
         let rendered = format!("{err}");
         assert!(rendered.contains("10000"));
         assert!(!rendered.contains("super-secret"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_zone_lookup_times_out() {
+        let (base_url, seen, server) = stalled_api().await;
+        let cf = CloudflareDns01::new("t".into()).with_base_url(base_url);
+        let task = tokio::spawn(async move { cf.resolve_zone_id("x.example.com").await });
+        wait_for_request(seen).await;
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert!(matches!(task.await.unwrap(), Err(Dns01Error::Http(_))));
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn total_zone_lookup_deadline_covers_all_candidates() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (first_seen_tx, first_seen_rx) = tokio::sync::oneshot::channel();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let (second_seen_tx, second_seen_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            let _ = first.read(&mut request).await.unwrap();
+            let _ = first_seen_tx.send(());
+            reply_rx.await.unwrap();
+            first
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{\"success\":true,\"errors\":[],\"result\":[]}",
+                )
+                .await
+                .unwrap();
+            drop(first);
+
+            let (_second, _) = listener.accept().await.unwrap();
+            let _ = second_seen_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let cf = CloudflareDns01::new("t".into()).with_base_url(format!("http://{address}"));
+        let task = tokio::spawn(async move { cf.resolve_zone_id("x.api.example.com").await });
+        wait_for_request_awake(first_seen_rx).await;
+        tokio::time::advance(Duration::from_secs(20)).await;
+        reply_tx.send(()).unwrap();
+        wait_for_request_awake(second_seen_rx).await;
+        tokio::time::advance(Duration::from_secs(11)).await;
+        assert!(
+            matches!(task.await.unwrap(), Err(Dns01Error::Http(message)) if message.contains("timed out"))
+        );
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_record_creation_times_out() {
+        let (base_url, seen, server) = stalled_api().await;
+        let cf = CloudflareDns01::new("t".into()).with_base_url(base_url);
+        let task = tokio::spawn(async move {
+            cf.create_txt("zone", "_acme-challenge.x.example.com", "v")
+                .await
+        });
+        wait_for_request(seen).await;
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert!(matches!(task.await.unwrap(), Err(Dns01Error::Http(_))));
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_record_cleanup_times_out() {
+        let (base_url, seen, server) = stalled_api().await;
+        let cf = CloudflareDns01::new("t".into()).with_base_url(base_url);
+        let task = tokio::spawn(async move { cf.delete_txt("zone", "record").await });
+        wait_for_request(seen).await;
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert!(matches!(task.await.unwrap(), Err(Dns01Error::Http(_))));
+        server.abort();
     }
 }

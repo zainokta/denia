@@ -62,7 +62,13 @@ elsewhere (delegate `_acme-challenge` into a zone you control).
 - `exec` (`dns01/exec.rs`) — runs `<script> present|cleanup <fqdn> <value>`
   (`tokio::process`). Covers any DNS host (Akamai, Route53, PowerDNS, BIND, …).
   Denia passes only the non-secret fqdn+value; the script owns its own
-  credentials, so no provider secret is held by Denia.
+  credentials, so no provider secret is held by Denia. Hook stdin, stdout, and
+  stderr are always disconnected; output is never retained or logged. Each hook
+  operation has a 30-second deadline, after which Denia kills and reaps it.
+- Cloudflare zone lookup has a 30-second deadline across all suffix candidates;
+  each individual request, TXT creation, and TXT cleanup also has a 30-second
+  deadline. Transport timeouts are retryable; exec hook timeouts are reported
+  as retryable provider errors.
 
 **Configuration.**
 

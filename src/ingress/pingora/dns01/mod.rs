@@ -66,6 +66,9 @@ pub enum Dns01Error {
     /// External `exec` provider script failed (non-zero exit / spawn error).
     #[error("dns-01 exec provider error: {0}")]
     Exec(String),
+    /// External `exec` provider script exceeded its operation deadline.
+    #[error("dns-01 exec provider timed out: {0}")]
+    ExecTimeout(String),
     /// The selected provider is missing required configuration.
     #[error("dns-01 provider not configured: {0}")]
     NotConfigured(String),
@@ -78,7 +81,10 @@ impl Dns01Error {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Dns01Error::Http(_) | Dns01Error::Transient { .. } | Dns01Error::Propagation(_)
+            Dns01Error::Http(_)
+                | Dns01Error::Transient { .. }
+                | Dns01Error::Propagation(_)
+                | Dns01Error::ExecTimeout(_)
         )
     }
 }
@@ -159,6 +165,7 @@ mod tests {
             .is_retryable()
         );
         assert!(Dns01Error::Propagation("d".into()).is_retryable());
+        assert!(Dns01Error::ExecTimeout("present for x.com".into()).is_retryable());
         assert!(
             !Dns01Error::Auth {
                 status: 403,
