@@ -65,6 +65,10 @@ pub enum Commands {
     /// Self-update from the latest signed GitHub release and restart.
     #[cfg(target_os = "linux")]
     Update(update::UpdateArgs),
+    /// Internal update handoff: reconcile the dependency set in this binary.
+    #[cfg(target_os = "linux")]
+    #[command(name = "__reconcile-managed-dependencies", hide = true)]
+    ReconcileManagedDependencies,
     /// Open an interactive shell inside a running service replica.
     Console(client::console::ConsoleArgs),
     /// Authenticate to a remote Denia instance and save credentials locally.
@@ -100,6 +104,11 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::RotateToken) => crate::cli::rotate_token::run(),
         #[cfg(target_os = "linux")]
         Some(Commands::Update(args)) => crate::cli::update::run(args),
+        #[cfg(target_os = "linux")]
+        Some(Commands::ReconcileManagedDependencies) => {
+            crate::cli::common::privilege::require_root()?;
+            crate::cli::common::zot::reconcile_managed_install()
+        }
         Some(Commands::Console(args)) => {
             // Client console is async (websocket + PTY bridge); build a runtime
             // only for this path, like the daemon arm below.

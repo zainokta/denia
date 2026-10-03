@@ -6,6 +6,7 @@ use sha2::Digest;
 const TEMPLATE: &str = include_str!("../../templates/denia.service.in");
 const BUILDKIT_TEMPLATE: &str = include_str!("../../templates/buildkit.service.in");
 const ZOT_TEMPLATE: &str = include_str!("../../templates/zot.service.in");
+const DENIA_ZOT_DROPIN: &str = "[Unit]\nRequires=zot.service\nAfter=zot.service\n";
 const BUILDKIT_OVERRIDE: &str = "\
 [Service]\n\
 ExecStart=\n\
@@ -40,6 +41,11 @@ pub fn render_zot_unit() -> String {
     ZOT_TEMPLATE.to_string()
 }
 
+/// Minimal dependency drop-in for existing Denia units installed before Zot.
+pub fn render_denia_zot_dropin() -> String {
+    DENIA_ZOT_DROPIN.to_string()
+}
+
 /// Render the late BuildKit drop-in that lets setup repair stale/manual
 /// overrides from earlier install attempts.
 pub fn render_buildkit_override() -> String {
@@ -62,7 +68,6 @@ const UNIT_PATH: &str = "/etc/systemd/system/denia.service";
 const BUILDKIT_UNIT_PATH: &str = "/etc/systemd/system/buildkit.service";
 const BUILDKIT_DROPIN_DIR: &str = "/etc/systemd/system/buildkit.service.d";
 const BUILDKIT_DROPIN_PATH: &str = "/etc/systemd/system/buildkit.service.d/99-denia.conf";
-const ZOT_UNIT_PATH: &str = "/etc/systemd/system/zot.service";
 
 /// Write the rendered unit to `/etc/systemd/system/denia.service` via tmp +
 /// rename (atomic) with mode `0644 root:root`.
@@ -88,15 +93,6 @@ pub fn write_buildkit_unit() -> anyhow::Result<()> {
     std::fs::write(&dropin_tmp, render_buildkit_override())?;
     std::fs::set_permissions(&dropin_tmp, std::fs::Permissions::from_mode(0o644))?;
     std::fs::rename(&dropin_tmp, BUILDKIT_DROPIN_PATH)?;
-    Ok(())
-}
-
-/// Write the loopback-only Zot registry unit managed by Denia.
-pub fn write_zot_unit() -> anyhow::Result<()> {
-    let tmp = format!("{ZOT_UNIT_PATH}.tmp");
-    std::fs::write(&tmp, render_zot_unit())?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
-    std::fs::rename(&tmp, ZOT_UNIT_PATH)?;
     Ok(())
 }
 
@@ -126,6 +122,10 @@ pub fn restart(unit: &str) -> anyhow::Result<()> {
     run("systemctl", &["restart", unit])
 }
 
+pub fn stop(unit: &str) -> anyhow::Result<()> {
+    run("systemctl", &["stop", unit])
+}
+
 /// Returns true if the unit is in `active` state. Never errors — a missing
 /// unit, a stopped unit, and an unreachable `systemctl` all return false.
 pub fn is_active(unit: &str) -> bool {
@@ -135,6 +135,33 @@ pub fn is_active(unit: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+pub fn is_enabled(unit: &str) -> bool {
+    Command::new("systemctl")
+        .args(["is-enabled", "--quiet", unit])
+        .stdin(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Missing units are a no-op; inspection or stop failures halt cleanup.
+pub fn disable_if_present(unit: &str) -> anyhow::Result<()> {
+    let output = Command::new("systemctl")
+        .args(["show", "--property=LoadState", "--value", unit])
+        .stdin(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cannot inspect {unit}: systemctl exited with {}",
+            output.status
+        );
+    }
+    if String::from_utf8(output.stdout)?.trim() != "not-found" {
+        disable_now(unit)?;
+    }
+    Ok(())
 }
 
 /// Poll `is_active` every 500ms until either the unit is active or the
