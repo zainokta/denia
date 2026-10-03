@@ -113,6 +113,44 @@ This is the first increment of the "Docker-compatible login" future work noted
 above; OAuth2 token-endpoint exchange remains out of scope. Adds the `base64`
 dependency for decoding Basic credentials.
 
+## Amendment (2026-10-02): Denia-managed Zot
+
+Zot replaces the hosted registry data plane and its garbage collection. Denia
+keeps authentication, project RBAC, and repository ownership metadata. Zot runs
+as `denia:denia`, binds only to `127.0.0.1:5000`, and stores content under
+`/var/lib/denia/zot`. Denia remains the public `/v2` endpoint. The existing
+private external-registry credential path and rootfs unpacker are unchanged.
+
+The release pins Zot 2.1.20 and architecture-specific SHA-256 digests. Setup and
+update share one idempotent reconciliation operation: verify the binary,
+validate the loopback config, install the managed files, reload systemd as
+needed, enable/start Zot, and wait for it to become active. Changed running Zot
+instances must restart to load their new binary/config. Exact matching managed
+binaries are reused without downloading.
+
+After Zot is active, reconciliation installs a Denia unit drop-in declaring
+`Requires=zot.service` and `After=zot.service`. This preserves dependency ordering
+on boot for existing installations without rewriting their Denia unit.
+
+An ownership record binds the installed binary to its verified hash. A
+conflicting unrelated binary or service is an error; Denia must not take it over.
+Failed reconciliation restores prior managed files and attempts service
+recovery. A later Denia restart failure does not roll back successfully
+reconciled Zot or delete registry data. Automatic rollback covers executable
+and configuration files, not Zot storage format changes; future pins must be
+reviewed for storage compatibility.
+
+Uninstall checks the same ownership evidence before stopping or removing Zot.
+Ordinary uninstall retains the binary, configuration, and ownership record for
+setup to reuse. Purge removes those owned files as well as Denia data. Both modes
+remove the managed Denia dependency drop-in; unrelated Zot files and services
+are preserved.
+
+The management GC endpoint reports that Zot performs GC automatically, rather
+than starting Denia's old hosted-registry sweep. Hosted-registry status/tag
+information comes from Zot. Existing legacy registry content is not imported
+by this dependency provisioning change.
+
 ## References
 
 - ADR-001 (initial backend architecture)
