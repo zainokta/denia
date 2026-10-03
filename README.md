@@ -655,8 +655,40 @@ sudo denia update --force         # reinstall even if not newer
 
 `denia update` downloads the prebuilt binary for your architecture from the GitHub
 release, verifies it against a **pinned minisign signature** over `SHA256SUMS`
-(fail-closed), atomically swaps `/usr/local/bin/denia`, and restarts
-`denia.service`. See [ADR-029](docs/adr/029-self-update-from-github-release.md).
+(fail-closed), and atomically swaps `/usr/local/bin/denia`. It then asks the
+installed release to reconcile its Denia-managed Zot dependency before
+restarting `denia.service`. Setup uses that same reconciliation operation;
+operators do not install Zot separately or rerun setup for updates using this
+updater.
+
+This release pins Zot **2.1.20**. Reconciliation downloads missing or different
+managed binaries over HTTPS, verifies the release's pinned SHA-256, validates
+`/etc/denia/zot.json`, installs `zot.service`, reloads systemd when the unit
+changes, and enables/starts Zot. Changed Zot files trigger a restart. Zot must
+be active before Denia restarts. Matching verified binaries are reused without
+a download. A managed Denia unit drop-in adds `Requires=zot.service` and
+`After=zot.service` so the same ordering applies after reboot. Zot listens only
+on `127.0.0.1:5000` and stores data under
+`/var/lib/denia/zot`; Denia remains the public registry authentication boundary.
+
+The ownership record `/etc/denia/zot.managed` protects unrelated Zot installs
+from replacement. Conflicts fail explicitly. If reconciliation fails, Denia's
+previous binary is restored; a failed Denia restart also attempts recovery of
+the previous release. Successfully reconciled Zot is kept when a later Denia
+restart fails. `--force` performs the same reconciliation, and `--check` makes
+no file or service changes.
+
+An explicitly selected older release must implement the dependency handoff;
+otherwise the update fails and restores the previous binary.
+
+**Rollout requirement:** older released updaters that only swap and restart
+cannot invoke this new dependency handoff on their first upgrade. Publish a
+transition release containing the new updater while retaining the current
+registry backend, then publish the Zot-enabled release. Hosts must run the
+normal update to the transition release before updating to Zot. This patch
+cannot change code already running on those hosts. See
+[ADR-029](docs/adr/029-self-update-from-github-release.md) and
+[ADR-031](docs/adr/031-hosted-oci-registry.md).
 
 ### Uninstall
 
@@ -667,6 +699,11 @@ sudo denia uninstall --purge      # also wipe /var/lib/denia and ~/.config/denia
 
 `--purge` is destructive and irreversible — it deletes all state, secrets, and the
 age key. Back up first if you might want the data again.
+
+Uninstall removes only Denia-owned Zot services and the Denia dependency drop-in.
+Without `--purge`, it retains the verified Zot binary, config, and ownership
+record for reuse by setup. With `--purge`, it also removes those owned files.
+Unrelated Zot installations are left untouched.
 
 ### Backup & restore
 

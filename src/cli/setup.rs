@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use super::common::{
-    config_writer, io, paths::InstallContext, privilege, provision, secrets, systemd,
+    config_writer, io, paths::InstallContext, privilege, provision, secrets, systemd, zot,
 };
 
 #[derive(clap::Args, Debug)]
@@ -33,8 +33,7 @@ pub fn run(args: SetupArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Twelve idempotent setup steps. Plan order is the execution order — do not
-/// reorder.
+/// Idempotent setup steps. Plan order is the execution order — do not reorder.
 fn plan() -> Vec<Step> {
     use Step::*;
     vec![
@@ -43,6 +42,7 @@ fn plan() -> Vec<Step> {
         EnsureUser,
         EnsureDeniaInBuildkitGroup,
         EnsureDataDirs,
+        ReconcileManagedZot,
         EnsureCgroupRoot,
         EnsureUserConfigDir,
         GenerateAgeIdentityIfAbsent,
@@ -64,6 +64,7 @@ enum Step {
     EnsureUser,
     EnsureDeniaInBuildkitGroup,
     EnsureDataDirs,
+    ReconcileManagedZot,
     EnsureCgroupRoot,
     EnsureUserConfigDir,
     GenerateAgeIdentityIfAbsent,
@@ -89,6 +90,11 @@ impl Step {
             EnsureDataDirs => {
                 "create /var/lib/denia/{sqlite,artifacts,tls,runtime,logs} 0700 denia:denia".into()
             }
+            ReconcileManagedZot => format!(
+                "reconcile Denia-managed Zot {} at {} (binary, config, systemd, active)",
+                zot::ZOT_VERSION,
+                zot::ZOT_BIN
+            ),
             EnsureCgroupRoot => "create /sys/fs/cgroup/denia 0755 denia:denia".into(),
             EnsureUserConfigDir => format!(
                 "create {} 0750 {}:denia",
@@ -141,6 +147,7 @@ impl Step {
                 provision::ensure_user_in_group("denia", "buildkit")?;
             }
             EnsureDataDirs => provision::ensure_data_dirs()?,
+            ReconcileManagedZot => zot::reconcile_managed_install()?,
             EnsureCgroupRoot => provision::ensure_cgroup_root()?,
             EnsureUserConfigDir => provision::ensure_user_config_dir(ctx)?,
             GenerateAgeIdentityIfAbsent => {
@@ -185,6 +192,12 @@ fn print_summary(ctx: &InstallContext) {
     println!("  admin token:  {}", ctx.token_file.display());
     println!("  age key:      {}", ctx.age_key_file.display());
     println!("  data root:    /var/lib/denia");
+    println!(
+        "  zot:          {} ({}:{})",
+        zot::ZOT_BIN,
+        zot::ZOT_LISTEN_ADDR,
+        zot::ZOT_LISTEN_PORT
+    );
     println!();
     println!("  Bootstrap first admin user (one-time):");
     println!(
@@ -203,7 +216,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn setup_plan_includes_buildkit_provisioning_before_denia_restart() {
+    fn setup_plan_includes_buildkit_and_zot_before_denia_restart() {
         let ctx = InstallContext::from_user("rakei", "/home/rakei");
         let labels = plan()
             .into_iter()
@@ -214,16 +227,26 @@ mod tests {
             .iter()
             .position(|label| label.contains("groupadd --system buildkit"))
             .expect("buildkit group step");
+        let zot_reconcile = labels
+            .iter()
+            .position(|label| label.contains("reconcile Denia-managed Zot"))
+            .expect("zot reconciliation step");
         let buildkit_unit = labels
             .iter()
             .position(|label| label.contains("/etc/systemd/system/buildkit.service"))
             .expect("buildkit unit step");
-        let denia_unit = labels
+        let daemon_reload = labels
             .iter()
-            .position(|label| label.contains("/etc/systemd/system/denia.service"))
-            .expect("denia unit step");
+            .position(|label| label == "systemctl daemon-reload")
+            .expect("daemon reload step");
+        let denia_enable = labels
+            .iter()
+            .position(|label| label == "systemctl enable --now denia.service")
+            .expect("denia enable step");
 
         assert!(buildkit_group < buildkit_unit);
-        assert!(buildkit_unit < denia_unit);
+        assert!(zot_reconcile < buildkit_unit);
+        assert!(buildkit_unit < daemon_reload);
+        assert!(daemon_reload < denia_enable);
     }
 }

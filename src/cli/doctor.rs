@@ -53,6 +53,7 @@ pub fn run() -> anyhow::Result<()> {
         check_userns_enabled(),
         check_ports_free(),
         check_deps_in_path(),
+        check_zot_install(),
         check_user_config_files(ctx.as_ref()),
         check_unit_drift(ctx.as_ref()),
         check_healthz(),
@@ -74,6 +75,18 @@ pub fn run() -> anyhow::Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn check_zot_install() -> CheckResult {
+    match super::common::zot::check_managed_install() {
+        Ok(()) => CheckResult::Pass(format!(
+            "Denia-managed Zot {} is installed and active on {}:{}",
+            super::common::zot::ZOT_VERSION,
+            super::common::zot::ZOT_LISTEN_ADDR,
+            super::common::zot::ZOT_LISTEN_PORT
+        )),
+        Err(error) => CheckResult::Fail(format!("Denia-managed Zot: {error}")),
+    }
 }
 
 fn check_glibc_baseline() -> CheckResult {

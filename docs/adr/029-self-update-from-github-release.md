@@ -72,6 +72,43 @@ refresh.
 `env!("CARGO_PKG_VERSION")` with `semver`. Without `--force`, a release that is
 not strictly newer is a no-op. `--check` reports status and never downloads.
 
+## Amendment (2026-10-02): Target-release dependency reconciliation
+
+After verifying and installing the new binary, the updater invokes a hidden,
+root-only reconciliation command on the absolute installed binary. That binary
+supplies its own Zot version, hashes, configuration, and unit. The old updater's
+compiled-in pins cannot decide dependencies for a newer release.
+
+Reconciliation must finish and Zot must become active before Denia restarts.
+If reconciliation fails, restore the previous Denia binary atomically and do
+not restart Denia into the failed release. If Denia itself fails to restart,
+restore its binary and attempt to restart the previous release. Report recovery
+failures explicitly. Successfully reconciled Zot stays installed if a later
+Denia restart fails. `--force` uses the same lifecycle; `--check` returns before
+any dependency provisioning, file writes, or service operations.
+
+Targets without the hidden handoff command fail closed, including explicitly
+selected older releases. Rollback restores the prior binary rather than guessing
+which dependencies that release requires.
+
+An already-published updater that only swaps the binary and restarts has no
+dependency handoff. Installing a release containing this amendment cannot
+retroactively change that running process. A deployment upgrading from such a
+release requires a transition release carrying the handoff before it relies on
+Zot. The existing non-root systemd unit
+cannot safely provision a root-owned dependency during daemon startup. This PR
+does not add daemon privileges to hide that rollout requirement.
+
+The rollout is two releases. Backport the dependency-neutral updater handoff
+to a transition release that keeps the existing registry backend and unit. Its
+internal reconciliation command has no managed registry dependency to install.
+Once hosts have installed that updater through their normal signed update,
+publish the Zot-enabled release. The transition updater invokes reconciliation
+from the newly installed Zot-enabled binary before restarting Denia. Do not
+offer a direct jump from a pre-handoff release as an automatically provisioned
+upgrade. Creating and publishing that transition release is release work beyond
+this PR's existing branch update.
+
 ## Consequences
 
 - Easier: `sudo denia update` upgrades an install in seconds without a host

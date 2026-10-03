@@ -5,14 +5,15 @@ use sha2::Digest;
 
 const TEMPLATE: &str = include_str!("../../templates/denia.service.in");
 const BUILDKIT_TEMPLATE: &str = include_str!("../../templates/buildkit.service.in");
+const ZOT_TEMPLATE: &str = include_str!("../../templates/zot.service.in");
+const DENIA_ZOT_DROPIN: &str = "[Unit]\nRequires=zot.service\nAfter=zot.service\n";
 const BUILDKIT_OVERRIDE: &str = "\
-[Service]
-ExecStart=
-ExecStart=/usr/local/bin/buildkitd --addr unix:///run/buildkit/buildkitd.sock --root /var/lib/buildkit --group buildkit --oci-worker=true --containerd-worker=false --oci-worker-snapshotter=native
-ExecStartPost=
-RuntimeDirectory=buildkit
-RuntimeDirectoryMode=0755
-";
+[Service]\n\
+ExecStart=\n\
+ExecStart=/usr/local/bin/buildkitd --addr unix:///run/buildkit/buildkitd.sock --root /var/lib/buildkit --group buildkit --oci-worker=true --containerd-worker=false --oci-worker-snapshotter=native\n\
+ExecStartPost=\n\
+RuntimeDirectory=buildkit\n\
+RuntimeDirectoryMode=0755\n";
 
 /// Render the operator-aware systemd unit text for `denia.service`.
 pub fn render_unit(ctx: &InstallContext) -> String {
@@ -33,6 +34,16 @@ pub fn render_unit(ctx: &InstallContext) -> String {
 /// Render the BuildKit service Denia expects for Dockerfile-compatible builds.
 pub fn render_buildkit_unit() -> String {
     BUILDKIT_TEMPLATE.to_string()
+}
+
+/// Render the local Zot registry service managed by Denia.
+pub fn render_zot_unit() -> String {
+    ZOT_TEMPLATE.to_string()
+}
+
+/// Minimal dependency drop-in for existing Denia units installed before Zot.
+pub fn render_denia_zot_dropin() -> String {
+    DENIA_ZOT_DROPIN.to_string()
 }
 
 /// Render the late BuildKit drop-in that lets setup repair stale/manual
@@ -111,6 +122,10 @@ pub fn restart(unit: &str) -> anyhow::Result<()> {
     run("systemctl", &["restart", unit])
 }
 
+pub fn stop(unit: &str) -> anyhow::Result<()> {
+    run("systemctl", &["stop", unit])
+}
+
 /// Returns true if the unit is in `active` state. Never errors — a missing
 /// unit, a stopped unit, and an unreachable `systemctl` all return false.
 pub fn is_active(unit: &str) -> bool {
@@ -120,6 +135,33 @@ pub fn is_active(unit: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+pub fn is_enabled(unit: &str) -> bool {
+    Command::new("systemctl")
+        .args(["is-enabled", "--quiet", unit])
+        .stdin(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Missing units are a no-op; inspection or stop failures halt cleanup.
+pub fn disable_if_present(unit: &str) -> anyhow::Result<()> {
+    let output = Command::new("systemctl")
+        .args(["show", "--property=LoadState", "--value", unit])
+        .stdin(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cannot inspect {unit}: systemctl exited with {}",
+            output.status
+        );
+    }
+    if String::from_utf8(output.stdout)?.trim() != "not-found" {
+        disable_now(unit)?;
+    }
+    Ok(())
 }
 
 /// Poll `is_active` every 500ms until either the unit is active or the
@@ -167,6 +209,8 @@ mod tests {
             "Delegate=yes",
             "ProtectHome=read-only",
             "Conflicts=traefik.service nginx.service caddy.service apache2.service httpd.service",
+            "Requires=zot.service",
+            "After=network-online.target zot.service",
         ] {
             assert!(
                 unit.contains(needle),
@@ -218,6 +262,23 @@ mod tests {
             assert!(
                 dropin.contains(needle),
                 "expected `{needle}` in drop-in:\n{dropin}"
+            );
+        }
+    }
+
+    #[test]
+    fn zot_unit_is_non_root_and_uses_managed_paths() {
+        let unit = render_zot_unit();
+        for needle in [
+            "User=denia",
+            "Group=denia",
+            "ExecStart=/usr/local/bin/zot serve /etc/denia/zot.json",
+            "ReadWritePaths=/var/lib/denia/zot",
+            "NoNewPrivileges=true",
+        ] {
+            assert!(
+                unit.contains(needle),
+                "expected `{needle}` in Zot unit:\n{unit}"
             );
         }
     }

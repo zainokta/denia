@@ -10,6 +10,7 @@
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
@@ -47,6 +48,28 @@ pub struct UpdateArgs {
     pub tag: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateMode {
+    Check,
+    Apply,
+}
+
+fn mode(args: &UpdateArgs) -> UpdateMode {
+    if args.check {
+        UpdateMode::Check
+    } else {
+        UpdateMode::Apply
+    }
+}
+
+fn update_is_needed(newer: bool, force: bool) -> bool {
+    newer || force
+}
+
+fn should_apply(args: &UpdateArgs, newer: bool) -> bool {
+    mode(args) == UpdateMode::Apply && update_is_needed(newer, args.force)
+}
+
 #[derive(Debug, Deserialize)]
 struct Release {
     tag_name: String,
@@ -62,10 +85,11 @@ struct Asset {
 
 pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
     platform::ensure_supported_glibc()?;
+    let mode = mode(&args);
 
     // `--check` is read-only; everything else writes /usr/local/bin and calls
     // systemctl, so it must run as root (like `rotate-token`).
-    if !args.check {
+    if mode == UpdateMode::Apply {
         privilege::require_root()?;
     }
 
@@ -79,7 +103,7 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
     let remote = parse_tag(&release.tag_name)?;
     let newer = remote > current;
 
-    if args.check {
+    if mode == UpdateMode::Check {
         if newer {
             println!("update available: {current} -> {remote}");
         } else {
@@ -88,7 +112,7 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if !newer && !args.force {
+    if !should_apply(&args, newer) {
         println!("already up to date: {current} (latest {remote})");
         return Ok(());
     }
@@ -127,21 +151,17 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
     let dir = target
         .parent()
         .unwrap_or_else(|| Path::new("/usr/local/bin"));
-    let backup = install_binary(dir, target, &bin_bytes).context("installing new binary")?;
-
-    println!("==> restarting {SERVICE}");
-    if let Err(e) = restart_and_wait() {
-        if let Some(b) = &backup {
-            eprintln!("restart failed; rolling back to the previous binary");
-            let _ = std::fs::copy(b, target);
-            let _ = restart_and_wait();
-        }
-        return Err(e.context("update failed and was rolled back to the previous binary"));
-    }
+    let was_active = systemd::is_active(SERVICE);
+    let host = SystemUpdateHost;
+    let backup = install_and_activate(dir, target, &bin_bytes, was_active, &host)
+        .context("updating Denia and its managed dependencies")?;
 
     println!();
     println!("denia {current} -> {remote}");
-    println!("service: active. previous binary kept at {TARGET_BIN}.bak");
+    println!("service: active.");
+    if let Some(backup) = backup {
+        println!("previous binary kept at {}", backup.display());
+    }
     Ok(())
 }
 
@@ -306,6 +326,149 @@ fn install_binary(dir: &Path, target: &Path, bin: &[u8]) -> anyhow::Result<Optio
     Ok(backup)
 }
 
+trait UpdateHost {
+    fn reconcile(&self, target: &Path) -> anyhow::Result<()>;
+    fn restart(&self) -> anyhow::Result<()>;
+    fn is_active(&self) -> bool;
+    fn stop(&self) -> anyhow::Result<()>;
+}
+
+struct SystemUpdateHost;
+
+impl UpdateHost for SystemUpdateHost {
+    fn reconcile(&self, target: &Path) -> anyhow::Result<()> {
+        let status = Command::new(target)
+            .arg("__reconcile-managed-dependencies")
+            .stdin(Stdio::null())
+            .status()
+            .with_context(|| format!("running {} managed-dependency handoff", target.display()))?;
+        if !status.success() {
+            bail!(
+                "{} managed-dependency handoff exited with {status}",
+                target.display()
+            );
+        }
+        Ok(())
+    }
+
+    fn restart(&self) -> anyhow::Result<()> {
+        restart_and_wait()
+    }
+
+    fn is_active(&self) -> bool {
+        systemd::is_active(SERVICE)
+    }
+
+    fn stop(&self) -> anyhow::Result<()> {
+        systemd::stop(SERVICE)
+    }
+}
+
+fn install_and_activate(
+    dir: &Path,
+    target: &Path,
+    bytes: &[u8],
+    was_active: bool,
+    host: &dyn UpdateHost,
+) -> anyhow::Result<Option<PathBuf>> {
+    let backup = install_binary(dir, target, bytes).context("installing new binary")?;
+    if let Err(error) = host.reconcile(target) {
+        let restore = restore_binary(target, backup.as_deref());
+        let recover_service = if restore.is_ok() && was_active && !host.is_active() {
+            host.restart()
+        } else {
+            Ok(())
+        };
+        return Err(update_rollback_error(
+            "managed dependency reconciliation failed before Denia restart",
+            error,
+            backup.is_some(),
+            restore,
+            recover_service,
+        ));
+    }
+
+    if let Err(error) = host.restart() {
+        let restore = restore_binary(target, backup.as_deref());
+        let recover_service = if restore.is_err() {
+            Err(anyhow!("skipped because restoring the prior binary failed"))
+        } else if was_active {
+            host.restart()
+        } else if host.is_active() {
+            host.stop()
+        } else {
+            Ok(())
+        };
+        return Err(update_rollback_error(
+            "Denia restart failed",
+            error,
+            backup.is_some(),
+            restore,
+            recover_service,
+        ));
+    }
+    Ok(backup)
+}
+
+fn restore_binary(target: &Path, backup: Option<&Path>) -> anyhow::Result<()> {
+    let Some(backup) = backup else {
+        match std::fs::remove_file(target) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("removing new binary {}", target.display()));
+            }
+        }
+    };
+    let dir = target
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent", target.display()))?;
+    let mut rollback = tempfile::Builder::new()
+        .prefix(".denia.rollback.")
+        .tempfile_in(dir)?;
+    std::io::copy(&mut std::fs::File::open(backup)?, rollback.as_file_mut())?;
+    rollback.as_file_mut().sync_all()?;
+    std::fs::set_permissions(rollback.path(), std::fs::Permissions::from_mode(0o755))?;
+    rollback.into_temp_path().persist(target).map_err(|error| {
+        anyhow!(
+            "restoring {} from {}: {}",
+            target.display(),
+            backup.display(),
+            error.error
+        )
+    })?;
+    Ok(())
+}
+
+fn update_rollback_error(
+    step: &str,
+    cause: anyhow::Error,
+    had_previous_binary: bool,
+    binary: anyhow::Result<()>,
+    service: anyhow::Result<()>,
+) -> anyhow::Error {
+    match (binary, service) {
+        (Ok(()), Ok(())) => cause.context(if had_previous_binary {
+            format!("{step}; previous binary restored")
+        } else {
+            format!("{step}; newly installed binary removed because no previous binary existed")
+        }),
+        (binary, service) => anyhow!(
+            "{step} ({cause}); rollback results: binary={}, previous_service={}",
+            result_text(binary),
+            result_text(service)
+        ),
+    }
+}
+
+fn result_text(result: anyhow::Result<()>) -> String {
+    match result {
+        Ok(()) => "ok".into(),
+        Err(error) => format!("failed ({error})"),
+    }
+}
+
 fn restart_and_wait() -> anyhow::Result<()> {
     systemd::restart(SERVICE)?;
     systemd::wait_active(SERVICE, RESTART_TIMEOUT)
@@ -396,6 +559,61 @@ fn push_download_chunk(
 mod tests {
     use super::*;
 
+    struct FakeUpdateHost {
+        events: std::sync::Mutex<Vec<&'static str>>,
+        fail_reconcile: bool,
+        restart_failures: std::sync::atomic::AtomicUsize,
+        active: std::sync::atomic::AtomicBool,
+    }
+
+    impl FakeUpdateHost {
+        fn new(fail_reconcile: bool, restart_failures: usize, active: bool) -> Self {
+            Self {
+                events: Default::default(),
+                fail_reconcile,
+                restart_failures: restart_failures.into(),
+                active: active.into(),
+            }
+        }
+    }
+
+    impl UpdateHost for FakeUpdateHost {
+        fn reconcile(&self, _target: &Path) -> anyhow::Result<()> {
+            self.events.lock().unwrap().push("reconcile");
+            if self.fail_reconcile {
+                bail!("zot unavailable");
+            }
+            Ok(())
+        }
+
+        fn restart(&self) -> anyhow::Result<()> {
+            self.events.lock().unwrap().push("restart");
+            if let Ok(remaining_failures) = self.restart_failures.fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |n| n.checked_sub(1),
+            ) {
+                if remaining_failures == 1 {
+                    bail!("old Denia failed");
+                }
+                bail!("new Denia failed");
+            }
+            self.active.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_active(&self) -> bool {
+            self.active.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn stop(&self) -> anyhow::Result<()> {
+            self.events.lock().unwrap().push("stop");
+            self.active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[test]
     fn parse_tag_strips_v_prefix() {
         assert_eq!(parse_tag("v0.2.0").unwrap(), parse_tag("0.2.0").unwrap());
@@ -404,6 +622,49 @@ mod tests {
         // pre-release sorts below its release
         assert!(parse_tag("0.2.0-rc.1").unwrap() < parse_tag("0.2.0").unwrap());
         assert!(parse_tag("not-a-version").is_err());
+    }
+
+    #[test]
+    fn check_mode_is_read_only_even_when_force_is_set() {
+        let args = UpdateArgs {
+            check: true,
+            force: true,
+            yes: true,
+            tag: None,
+        };
+        assert_eq!(mode(&args), UpdateMode::Check);
+        assert!(!should_apply(&args, false));
+    }
+
+    #[test]
+    fn force_keeps_the_full_apply_path_when_release_is_equal() {
+        let args = UpdateArgs {
+            check: false,
+            force: true,
+            yes: true,
+            tag: None,
+        };
+        assert_eq!(mode(&args), UpdateMode::Apply);
+        assert!(update_is_needed(false, args.force));
+    }
+
+    #[test]
+    fn installed_target_binary_receives_internal_dependency_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("denia");
+        let called = dir.path().join("handoff.called");
+        let script = format!(
+            "#!/bin/sh\ntest \"$1\" = \"__reconcile-managed-dependencies\" || exit 41\nprintf called > {}\n",
+            shell_quote(&called.display().to_string())
+        );
+        std::fs::write(&target, script).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        SystemUpdateHost.reconcile(&target).unwrap();
+        assert_eq!(std::fs::read_to_string(called).unwrap(), "called");
+    }
+
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 
     #[test]
@@ -569,6 +830,54 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
         let backup = install_binary(dir.path(), &target, b"NEW").unwrap();
         assert!(backup.is_none());
         assert_eq!(std::fs::read(&target).unwrap(), b"NEW");
+    }
+
+    #[test]
+    fn update_handoff_finishes_before_denia_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("denia");
+        std::fs::write(&target, b"OLD").unwrap();
+        let host = FakeUpdateHost::new(false, 0, false);
+        install_and_activate(dir.path(), &target, b"NEW", false, &host).unwrap();
+        assert_eq!(*host.events.lock().unwrap(), ["reconcile", "restart"]);
+        assert_eq!(std::fs::read(&target).unwrap(), b"NEW");
+    }
+
+    #[test]
+    fn dependency_failure_restores_binary_and_skips_denia_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("denia");
+        std::fs::write(&target, b"OLD").unwrap();
+        let host = FakeUpdateHost::new(true, 0, false);
+        let error = install_and_activate(dir.path(), &target, b"NEW", false, &host).unwrap_err();
+        assert!(error.to_string().contains("previous binary restored"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"OLD");
+        assert_eq!(*host.events.lock().unwrap(), ["reconcile"]);
+    }
+
+    #[test]
+    fn dependency_failure_removes_candidate_when_no_previous_binary_existed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("denia");
+        let host = FakeUpdateHost::new(true, 0, false);
+        let error = install_and_activate(dir.path(), &target, b"NEW", false, &host).unwrap_err();
+        assert!(!target.exists());
+        assert!(error.to_string().contains("newly installed binary removed"));
+    }
+
+    #[test]
+    fn denia_restart_failure_restores_binary_and_reports_recovery_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("denia");
+        std::fs::write(&target, b"OLD").unwrap();
+        let host = FakeUpdateHost::new(false, 2, true);
+        let error = install_and_activate(dir.path(), &target, b"NEW", true, &host).unwrap_err();
+        assert_eq!(std::fs::read(&target).unwrap(), b"OLD");
+        assert!(
+            error
+                .to_string()
+                .contains("previous_service=failed (old Denia failed)")
+        );
     }
 
     #[tokio::test]
