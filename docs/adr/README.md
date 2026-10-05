@@ -57,6 +57,7 @@ Each ADR should include:
 | [037](037-cross-platform-client-cfg-gated-crate.md) | Cross-Platform Client via cfg-Gated Single Crate + crates.io | Proposed | 2026-06-04 |
 | [038](038-oci-user-and-shifted-rootfs-ownership.md) | OCI User and Shifted Rootfs Ownership | Accepted | 2026-06-05 |
 | [039](039-upload-service-source.md) | Upload Service Source + `denia init`/`create` Workflow | Accepted | 2026-06-05 |
+| [040](040-dns01-acme-cloudflare-provider.md) | Opt-In DNS-01 ACME via Pluggable Providers (Cloudflare + exec) | Accepted | 2026-06-05 |
 
 ## Contributing
 
