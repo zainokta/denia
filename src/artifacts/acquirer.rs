@@ -898,7 +898,7 @@ fn short_digest(input: &str) -> String {
     format!("sha256:{}", hex::encode(h.finalize()))
 }
 
-fn safe_artifact_name(digest: &str) -> String {
+pub(crate) fn safe_artifact_name(digest: &str) -> String {
     digest
         .chars()
         .map(|character| {

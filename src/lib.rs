@@ -41,6 +41,8 @@ pub mod observability;
 #[cfg(target_os = "linux")]
 pub mod oci;
 #[cfg(target_os = "linux")]
+pub mod prune;
+#[cfg(target_os = "linux")]
 pub mod rate_limit;
 #[cfg(target_os = "linux")]
 pub mod registry;

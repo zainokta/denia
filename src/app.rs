@@ -323,6 +323,7 @@ pub struct AppStateBuilder {
     config: AppConfig,
     runtime: Option<Arc<dyn Runtime>>,
     domain_verifier: Option<Arc<dyn crate::verification::DomainVerifier>>,
+    command_runner: Option<Arc<dyn CommandRunner>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -332,11 +333,16 @@ impl AppStateBuilder {
             config,
             runtime: None,
             domain_verifier: None,
+            command_runner: None,
         }
     }
 
     pub fn runtime(mut self, runtime: Arc<dyn Runtime>) -> Self {
         self.runtime = Some(runtime);
+        self
+    }
+    pub fn command_runner(mut self, runner: Arc<dyn CommandRunner>) -> Self {
+        self.command_runner = Some(runner);
         self
     }
     pub fn domain_verifier(
@@ -380,7 +386,9 @@ impl AppStateBuilder {
                 .runtime
                 .unwrap_or_else(|| Arc::new(crate::runtime::FakeRuntime::default())),
             health: Arc::new(FakeHealthChecker::healthy()),
-            command_runner: Arc::new(TokioCommandRunner),
+            command_runner: self
+                .command_runner
+                .unwrap_or_else(|| Arc::new(TokioCommandRunner)),
             ingress: Arc::new(IngressState::default()),
             routes: Arc::new(Mutex::new(BTreeMap::new())),
             access_log: AccessLogStore::new(),
@@ -434,6 +442,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(api::oci::router())
         .merge(api::hosted_registry::router())
         .merge(api::node::router())
+        .merge(api::system::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .route_layer(middleware::from_fn_with_state(
             admin_rate_limiter,
