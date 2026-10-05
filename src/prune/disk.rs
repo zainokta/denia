@@ -1,4 +1,4 @@
-//! Filesystem side of the operator prune (ADR-040): find reclaimable entries
+//! Filesystem side of the operator prune (ADR-041): find reclaimable entries
 //! under the Denia data directories and remove or truncate them.
 //!
 //! Planning and applying are split so `GET /v1/system/prune` can report the

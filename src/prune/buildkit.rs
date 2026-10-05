@@ -1,4 +1,4 @@
-//! BuildKit cache step of the operator prune (ADR-040), driven through
+//! BuildKit cache step of the operator prune (ADR-041), driven through
 //! `buildctl` against the Denia-provisioned `buildkitd`.
 
 use serde::Deserialize;

@@ -237,7 +237,7 @@ privilege model.
 | `denia console [service]` | Open an interactive `/bin/sh` inside a running service replica (ticket + websocket). |
 | `denia auth` | Authenticate to a remote Denia (login → mint + store an API token in `client.toml`). |
 | `denia push` | Pack the working tree, upload it, and deploy to a remote service (Dockerfile required). |
-| `denia clean [--dry-run\|-y]` | Show what a node can reclaim (unused rootfs bundles, logs, crash leftovers, OCI layer and BuildKit caches), confirm, then free it. Needs a super-admin token. See [ADR-040](docs/adr/040-operator-prune.md). |
+| `denia clean [--dry-run\|-y]` | Show what a node can reclaim (unused rootfs bundles, logs, crash leftovers, OCI layer and BuildKit caches), confirm, then free it. Needs a super-admin token. See [ADR-041](docs/adr/041-operator-prune.md). |
 
 Running `denia` with no subcommand starts the control-plane daemon.
 

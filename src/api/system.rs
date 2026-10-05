@@ -1,4 +1,4 @@
-//! Operator prune endpoints behind `denia clean` (ADR-040). Super-admin only.
+//! Operator prune endpoints behind `denia clean` (ADR-041). Super-admin only.
 //!
 //! `GET /v1/system/prune` plans (deletes nothing); `POST /v1/system/prune`
 //! executes and reports what was actually reclaimed.

@@ -268,7 +268,7 @@ impl ClientApi {
         self.get_json("/v1/me", bearer).await
     }
 
-    /// GET /v1/system/prune — what `denia clean` would reclaim (ADR-040).
+    /// GET /v1/system/prune — what `denia clean` would reclaim (ADR-041).
     pub async fn prune_plan(&self, bearer: &str) -> Result<PruneReportView, ClientApiError> {
         self.get_json("/v1/system/prune", bearer).await
     }

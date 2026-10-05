@@ -1,5 +1,5 @@
 //! `denia clean`: show what the node can reclaim, confirm, then prune it.
-//! Thin client over `/v1/system/prune`; the daemon does the work. See ADR-040.
+//! Thin client over `/v1/system/prune`; the daemon does the work. See ADR-041.
 
 use std::io::{BufRead, IsTerminal, Write};
 

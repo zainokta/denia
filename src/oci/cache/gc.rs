@@ -104,7 +104,7 @@ impl LayerCacheGc {
 
     /// Dry run of [`Self::sweep_once`]: same guards, reports what would be
     /// deleted, deletes nothing and leaves `GcStatus` untouched. Used by the
-    /// operator prune plan (ADR-040).
+    /// operator prune plan (ADR-041).
     pub fn plan_once(&self) -> Result<GcReport, CacheError> {
         self.sweep(true)
     }

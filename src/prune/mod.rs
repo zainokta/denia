@@ -1,4 +1,4 @@
-//! Operator-requested prune behind `denia clean` (ADR-040).
+//! Operator-requested prune behind `denia clean` (ADR-041).
 //!
 //! One pass over every Denia-owned store: unreferenced rootfs bundles, crash
 //! leftovers, logs, the OCI layer cache (via its GC), and the BuildKit cache.

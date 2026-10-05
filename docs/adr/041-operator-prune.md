@@ -1,4 +1,4 @@
-# ADR-040: Operator-Requested Prune (`denia clean`)
+# ADR-041: Operator-Requested Prune (`denia clean`)
 
 - **Status**: Proposed
 - **Date**: 2026-10-05
