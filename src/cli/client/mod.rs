@@ -3,6 +3,7 @@
 //! commands). See ADR-033.
 
 pub mod auth;
+pub mod clean;
 pub mod console;
 pub mod create;
 pub mod http;

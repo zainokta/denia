@@ -16,6 +16,7 @@ pub mod oci;
 pub mod projects;
 pub mod registries;
 pub mod services;
+pub mod system;
 pub mod tokens;
 pub mod uploads;
 pub mod users;

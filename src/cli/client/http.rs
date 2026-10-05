@@ -112,6 +112,24 @@ impl std::fmt::Debug for ApiTokenResponse {
     }
 }
 
+/// Response of `/v1/system/prune`. Mirrors the server's `PruneReport`;
+/// `category` stays a string so a newer server's categories still render.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PruneReportView {
+    pub executed: bool,
+    pub total_bytes: u64,
+    pub categories: Vec<PruneCategoryView>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PruneCategoryView {
+    pub category: String,
+    pub entries: u64,
+    pub bytes: u64,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 pub struct ClientApi {
     base_url: String,
     http: reqwest::Client,
@@ -248,6 +266,17 @@ impl ClientApi {
     /// GET /v1/me — used to verify a token works. Returns the raw JSON.
     pub async fn me(&self, bearer: &str) -> Result<serde_json::Value, ClientApiError> {
         self.get_json("/v1/me", bearer).await
+    }
+
+    /// GET /v1/system/prune — what `denia clean` would reclaim (ADR-041).
+    pub async fn prune_plan(&self, bearer: &str) -> Result<PruneReportView, ClientApiError> {
+        self.get_json("/v1/system/prune", bearer).await
+    }
+
+    /// POST /v1/system/prune — reclaim it and report what was deleted.
+    pub async fn prune_execute(&self, bearer: &str) -> Result<PruneReportView, ClientApiError> {
+        self.post_json("/v1/system/prune", bearer, &serde_json::json!({}))
+            .await
     }
 
     /// GET /v1/node — returns node info including the control domain.

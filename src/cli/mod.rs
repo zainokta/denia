@@ -79,6 +79,8 @@ pub enum Commands {
     Create(client::create::CreateArgs),
     /// Pack the local working tree and deploy it to a remote service.
     Push(client::push::PushArgs),
+    /// Free disk on a Denia node: old rootfs bundles, logs, caches, leftovers.
+    Clean(client::clean::CleanArgs),
 }
 
 /// Entry point called from main.rs. The daemon is run when no subcommand is
@@ -128,6 +130,10 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(crate::cli::client::push::run(args))
         }
+        Some(Commands::Clean(args)) => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(crate::cli::client::clean::run(args))
+        }
         #[cfg(target_os = "linux")]
         None => {
             // Daemon is async; build a runtime here so non-daemon subcommands
@@ -138,7 +144,7 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         #[cfg(not(target_os = "linux"))]
         None => anyhow::bail!(
             "no subcommand given; the Denia daemon runs on Linux only. \
-             Use a client subcommand: auth, push, or console."
+             Use a client subcommand: auth, push, console, or clean."
         ),
     }
 }

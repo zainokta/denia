@@ -99,6 +99,17 @@ impl LayerCacheGc {
     /// 3. Otherwise delete the blob and its sidecar.
     /// 4. Update the in-memory `GcStatus`.
     pub fn sweep_once(&self) -> Result<GcReport, CacheError> {
+        self.sweep(false)
+    }
+
+    /// Dry run of [`Self::sweep_once`]: same guards, reports what would be
+    /// deleted, deletes nothing and leaves `GcStatus` untouched. Used by the
+    /// operator prune plan (ADR-041).
+    pub fn plan_once(&self) -> Result<GcReport, CacheError> {
+        self.sweep(true)
+    }
+
+    fn sweep(&self, dry_run: bool) -> Result<GcReport, CacheError> {
         self.assert_root_under_allowed_prefix()?;
 
         let deployed = self.deployed_source.snapshot()?;
@@ -148,6 +159,11 @@ impl LayerCacheGc {
                 if cur.is_err() {
                     continue;
                 }
+                if dry_run {
+                    report.deleted_entries += 1;
+                    report.deleted_bytes += size;
+                    continue;
+                }
                 let age_secs = lastref
                     .and_then(|t| now.duration_since(t).ok().map(|d| d.as_secs()))
                     .unwrap_or(0);
@@ -165,6 +181,9 @@ impl LayerCacheGc {
             Ok(report)
         })?;
 
+        if dry_run {
+            return Ok(report);
+        }
         if let Ok(mut s) = self.status.lock() {
             s.last_gc_at = report.ran_at;
             s.last_gc_deleted_bytes = report.deleted_bytes;
@@ -279,6 +298,25 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn plan_once_reports_without_deleting_or_updating_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = fresh_cache_at(dir.path());
+        let digest = "sha256:5555555555555555555555555555555555555555555555555555555555555555";
+        plant_blob(&cache, digest, b"xyz", Duration::from_secs(60 * 60));
+        let gc = LayerCacheGc::new(
+            cache.clone(),
+            Duration::from_secs(60),
+            Arc::new(EmptyDeployedDigests),
+            vec![dir.path().to_path_buf()],
+        );
+        let report = gc.plan_once().unwrap();
+        assert_eq!(report.deleted_entries, 1);
+        assert_eq!(report.deleted_bytes, 3);
+        assert!(cache.blob_path(digest).unwrap().exists());
+        assert!(gc.status().last_gc_at.is_none());
     }
 
     #[test]

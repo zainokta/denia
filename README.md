@@ -237,6 +237,7 @@ privilege model.
 | `denia console [service]` | Open an interactive `/bin/sh` inside a running service replica (ticket + websocket). |
 | `denia auth` | Authenticate to a remote Denia (login → mint + store an API token in `client.toml`). |
 | `denia push` | Pack the working tree, upload it, and deploy to a remote service (Dockerfile required). |
+| `denia clean [--dry-run\|-y]` | Show what a node can reclaim (unused rootfs bundles, logs, crash leftovers, OCI layer and BuildKit caches), confirm, then free it. Needs a super-admin token. See [ADR-041](docs/adr/041-operator-prune.md). |
 
 Running `denia` with no subcommand starts the control-plane daemon.
 
@@ -488,6 +489,8 @@ token from `/v1/auth/login`. Routes enforce a project-scoped role minimum
   auth — browser websockets can't send an `Authorization` header)
 - `POST /v1/services/{id}/uploads` (Operator; streams a `tar.zst` build context)
 - `GET /v1/node` (exposes `control_domain`)
+- `GET /v1/system/prune` (plan), `POST /v1/system/prune` (execute) — super-admin;
+  backs `denia clean`
 
 ## Hosted registry
 
