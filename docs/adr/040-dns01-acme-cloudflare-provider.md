@@ -10,16 +10,28 @@ challenge: Let's Encrypt fetches `http://<host>/.well-known/acme-challenge/<toke
 from `:80`, which Denia's Pingora ingress serves from the control backend
 (ADR-007, ADR-020). HTTP-01 requires Let's Encrypt to reach the origin directly.
 
-This breaks whenever a hostname is fronted by a proxy that terminates `:80`/`:443`
-— most commonly a **Cloudflare proxied (orange-cloud)** DNS record. The challenge
-request never reaches Denia, so issuance fails and `:443` has no certificate for
-that SNI. Operators who want Cloudflare's edge (DDoS protection, IP hiding) in
-front of the control console or a workload domain currently cannot get a Denia
-certificate at all. HTTP-01 also cannot issue **wildcard** certificates.
+A **Cloudflare proxied (orange-cloud)** record does not by itself break HTTP-01.
+In SSL mode Full or Full (strict), Cloudflare forwards a plain-HTTP request to
+the origin's `:80` (it uses the scheme the visitor used), and Denia's `:80`
+listener answers `/.well-known/acme-challenge/` and `/.well-known/denia-challenge/`
+before its own HTTPS redirect. HTTP-01 behind Cloudflare works with no DNS
+credential once the edge passes those paths through: Always Use HTTPS off (or a
+redirect rule that skips them, since Denia's domain verifier does not follow
+redirects), Bot Fight Mode off, and a WAF Skip rule for the challenge paths.
+This is the documented default path ("Domains behind Cloudflare" guide).
 
-This is the same problem Dokploy/Traefik solve with the DNS-01 challenge: prove
-domain ownership by writing a `_acme-challenge.<domain>` TXT record via the DNS
-provider's API, which needs no inbound reachability to the origin.
+HTTP-01 still cannot cover every case:
+
+- The operator cannot or will not change those edge settings (Bot Fight Mode
+  cannot be bypassed by WAF rules on the Free plan; SSL-Only Origin Pull sends
+  the challenge to `:443` before a cert exists).
+- `:80` is not reachable from the internet at all (firewall policy, a WAF that
+  terminates `:80`, a private origin behind a tunnel).
+- **Wildcard** certificates, which HTTP-01 cannot issue.
+
+For these, Dokploy/Traefik use the DNS-01 challenge: prove domain ownership by
+writing a `_acme-challenge.<domain>` TXT record via the DNS provider's API, which
+needs no inbound reachability to the origin.
 
 ## Decision
 
@@ -95,8 +107,8 @@ a documented follow-up; the trait + per-authorization loop leave room for it.
 
 ## Consequences
 
-- Easier: Denia issues and auto-renews Let's Encrypt certs for hostnames behind a
-  proxy/WAF, on **any** DNS host (Cloudflare natively, anything else via `exec` or
+- Easier: Denia issues and auto-renews Let's Encrypt certs for hostnames whose
+  `:80` is unreachable or whose edge blocks the challenge, on **any** DNS host (Cloudflare natively, anything else via `exec` or
   CNAME delegation), and the design is ready to extend to wildcard certs.
 - Easier: pairs cleanly with Cloudflare SSL mode **Full (strict)** — LE certs are
   trusted by Cloudflare without an Origin CA cert.
@@ -107,11 +119,17 @@ a documented follow-up; the trait + per-authorization loop leave room for it.
   (and optional DoH check) trade latency for reliability.
 - Note: the Cloudflare edge can still return 403 to API clients via Bot Fight Mode
   / WAF / Access — that is an edge policy concern, independent of certificates, and
-  is resolved on the Cloudflare side (disable Bot Fight Mode or add a WAF Skip rule
-  for `/v1/*` and `/healthz`).
+  is resolved on the Cloudflare side (disable Bot Fight Mode, which Skip rules
+  cannot bypass, and add a WAF Skip rule for `/v1/*` and `/healthz`).
 
 ## Alternatives Considered
 
+- **HTTP-01 through the Cloudflare proxy, no DNS-01.** Needs no credential and
+  no code: configure the edge as described in Context. This stays the default
+  and the recommended path for orange-cloud hostnames. Not sufficient alone
+  because it depends on edge settings the operator may not control, needs `:80`
+  reachable, and cannot issue wildcards, so DNS-01 is added as an opt-in rather
+  than a replacement.
 - **HTTP-01 only + a Cloudflare Origin CA certificate** dropped into `<tls_dir>`.
   Works today (Denia boot-loads any cert and skips ACME when one exists) but the
   cert is operator-managed with no automatic renewal, and Origin CA certs are
@@ -137,3 +155,7 @@ a documented follow-up; the trait + per-authorization loop leave room for it.
 - ADR-023 (TOML config + env override — the secret-sourcing pattern)
 - `instant-acme` DNS-01: <https://docs.rs/instant-acme/>
 - Cloudflare API (DNS records): <https://developers.cloudflare.com/api/>
+- Denia docs, Domains behind Cloudflare (HTTP-01 edge settings):
+  <https://github.com/zainokta/denia-documentation/blob/master/content/guides/domains-behind-cloudflare.md>
+- Cloudflare SSL mode Full (scheme matches visitor): <https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full/>
+- Cloudflare Bot Fight Mode (not skippable by WAF rules): <https://developers.cloudflare.com/bots/get-started/bot-fight-mode/>
